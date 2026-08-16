@@ -1,9 +1,9 @@
 # TASK-004: 패키지 메타데이터·라이선스·거버넌스 문서
 
-- **상태**: 대기
+- **상태**: 완료
 - **시작일**: 2026-08-16
-- **완료일**: —
-- **커밋**: —
+- **완료일**: 2026-08-16
+- **커밋**: (해시는 커밋 후 다음 커밋에서 기입)
 
 ## 목적
 
@@ -23,14 +23,21 @@
 
 ## 작업 기록
 
-—
+- 2026-08-16: LICENSE 저작권자는 특정 개인명 대신 "The rl Authors"로 표기
+  (기여자가 늘어나도 갱신 불필요한 관례적 표기).
+- 2026-08-16: MSRV는 1.88로 결정 — 코드가 사용하는 let-chains(1.88 안정화)와
+  edition 2024가 근거.
+- 2026-08-16: CHANGELOG는 Keep a Changelog 형식. 0.3.0 이전 이력은 git
+  히스토리에서 소급 정리, 이번 리팩토링은 Unreleased 섹션에 태스크 ID와 함께 기록.
 
 ## 검증
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test`
+- [x] `cargo fmt --check` — 통과
+- [x] `cargo clippy --all-targets -- -D warnings` — 경고 0개
+- [x] `cargo test` — 59개 전체 통과 (메타데이터 변경 후 재확인)
 
 ## 결과
 
-—
+- 신규: `LICENSE`(MIT), `CHANGELOG.md`, `CONTRIBUTING.md`.
+- `Cargo.toml`: `repository`/`readme`/`keywords`/`categories`/`rust-version`
+  보강, `[profile.release]`(thin LTO + symbol strip) 추가.
