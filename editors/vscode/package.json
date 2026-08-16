@@ -1,0 +1,82 @@
+{
+  "name": "rl-language",
+  "displayName": "rl Language",
+  "description": "Language support for rl — syntax highlighting, diagnostics via rlc, completion, hover, go-to-definition",
+  "version": "0.1.0",
+  "publisher": "rl-lang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/load28/rl"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:rl"
+  ],
+  "main": "./client/out/extension",
+  "contributes": {
+    "languages": [
+      {
+        "id": "rl",
+        "aliases": [
+          "rl"
+        ],
+        "extensions": [
+          ".rl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rl",
+        "scopeName": "source.rl",
+        "path": "./syntaxes/rl.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "rl",
+      "properties": {
+        "rl.compilerPath": {
+          "scope": "resource",
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `rlc` compiler used for diagnostics. When empty, the extension looks for `target/release/rlc` or `target/debug/rlc` in the workspace, then falls back to `rlc` on PATH."
+        },
+        "rl.verify": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run rlc's field-type validation and output self-check. When disabled, `--no-verify` is passed to `rlc --check`."
+        },
+        "rl.trace.server": {
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the rl language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -b",
+    "watch": "tsc -b -w",
+    "postinstall": "cd client && npm install && cd ../server && npm install",
+    "test": "npm run compile && node --test server/out/test/"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

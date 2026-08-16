@@ -216,6 +216,13 @@ TypeScript 자체의 `try { ... } catch` 블록, `obj.try()` 같은 멤버 이�
 문법·판별 규칙·방출 코드의 정확한 정의는
 [언어 레퍼런스](./docs/reference/language.md)를 참고하세요.
 
+## 편집기 지원
+
+[`editors/vscode/`](./editors/vscode/)에 VSCode 확장(LSP 언어 서버)이
+있습니다: 문법 하이라이팅, `rlc --check` 기반 진단, 케이스 태그·생성자
+자동완성, 호버, 정의로 이동, 문서 심볼, 소진되지 않은 match 빠른 수정.
+설치·개발 방법은 [확장 README](./editors/vscode/README.md) 참조.
+
 ## 문서
 
 | 문서 | 내용 |
