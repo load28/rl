@@ -279,6 +279,58 @@ const f = (e: AppEvent) => match (e) {
 }
 
 #[test]
+fn match_on_builtin_option_is_exhaustiveness_checked() {
+    // Option/Result are built-in enums: checked without a local declaration.
+    let e = err("const f = (o: Option<number>) => match (o) { Some(value) => value };\n");
+    assert!(
+        e.message
+            .contains("match on built-in enum Option is not exhaustive: missing \"None\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn match_on_builtin_result_is_exhaustiveness_checked() {
+    let e = err("const f = (r: Result<number, string>) => match (r) { Err(error) => error };\n");
+    assert!(
+        e.message
+            .contains("match on built-in enum Result is not exhaustive: missing \"Ok\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn full_match_on_builtin_enums_compiles() {
+    let out = ok(r#"
+const f = (o: Option<number>) => match (o) { Some(value) => value, None => 0 };
+const g = (r: Result<number, string>) => match (r) { Ok(value) => value, Err(error) => error.length };
+"#);
+    assert!(out.contains("case \"Some\""));
+    assert!(out.contains("case \"Err\""));
+}
+
+#[test]
+fn wildcard_exempts_builtin_exhaustiveness() {
+    ok("const f = (o: Option<number>) => match (o) { Some(value) => value, _ => 0 };\n");
+}
+
+#[test]
+fn local_enum_shadows_builtin() {
+    // A file-local rl enum named Option replaces the built-in for this file.
+    let e =
+        err("enum Option { Some(), Stale }\nconst f = (o: Option) => match (o) { Some => 1 };\n");
+    assert!(
+        e.message
+            .contains("match on enum Option is not exhaustive: missing \"Stale\""),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("built-in"), "{}", e.message);
+}
+
+#[test]
 fn missing_cases_are_all_listed() {
     let e = err(r#"enum Dir { North, South, East, West(deg: number) }
 const f = (d: Dir) => match (d) { North => 1 };
@@ -286,6 +338,102 @@ const f = (d: Dir) => match (d) { North => 1 };
     assert!(e.message.contains("\"East\""), "{}", e.message);
     assert!(e.message.contains("\"South\""), "{}", e.message);
     assert!(e.message.contains("\"West\""), "{}", e.message);
+}
+
+/* ------------------------------------------------------------------ */
+/* try — Rust-style error propagation                                  */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn try_decl_emits_early_return_and_bind() {
+    let out = ok("function f(): X {\n  const n = try g();\n  return h(n);\n}\n");
+    assert!(
+        out.contains(
+            "const $rl_t0 = (g()); if ($rl_t0.kind !== \"Ok\") return $rl_t0; const n = $rl_t0.value;"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn try_bare_statement_emits_early_return_only() {
+    let out = ok("function f(): X {\n  try g();\n  return h();\n}\n");
+    assert!(
+        out.contains("const $rl_t0 = (g()); if ($rl_t0.kind !== \"Ok\") return $rl_t0;"),
+        "{out}"
+    );
+    assert!(!out.contains("$rl_t0.value"), "{out}");
+}
+
+#[test]
+fn try_temporaries_are_unique_and_keep_declaration_keyword() {
+    let out = ok(
+        "function f(): X {\n  let a: number = try g();\n  var b = try h(a);\n  return k(b);\n}\n",
+    );
+    assert!(out.contains("let a: number = $rl_t0.value;"), "{out}");
+    assert!(out.contains("var b = $rl_t1.value;"), "{out}");
+}
+
+#[test]
+fn try_destructuring_binding_is_kept_verbatim() {
+    let out = ok("function f(): X {\n  const { a, b } = try g();\n  return a + b;\n}\n");
+    assert!(out.contains("const { a, b } = $rl_t0.value;"), "{out}");
+}
+
+#[test]
+fn try_expression_may_contain_a_match() {
+    let out = ok(
+        "function f(): X {\n  const x = try match (m) { Ok(value) => wrap(value), Err(error) => rewrap(error) };\n  return x;\n}\n",
+    );
+    assert!(out.contains("const $rl_t0 = ("), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn try_without_semicolon_is_not_recognized() {
+    // No terminating `;` → not rl syntax; the (invalid-TS) source passes
+    // through and the output self-check reports it.
+    let e = err("function f(): X {\n  const n = try g()\n  return h(n);\n}\n");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn try_inside_match_arm_is_an_error() {
+    let e = err(
+        "const x = match (r) {\n  Ok(value) => { const y = try f(value); return y; },\n  Err(error) => fallback(error),\n};\n",
+    );
+    assert!(
+        e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 18)); // points at the `const`
+}
+
+#[test]
+fn try_inside_match_scrutinee_is_an_error() {
+    let e = err(
+        "const x = match (run(() => { try g(); return h(); })) {\n  Ok(value) => value,\n  Err(error) => 0,\n};\n",
+    );
+    assert!(
+        e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn try_inside_template_interpolation_is_an_error() {
+    let e = err("const s = `${run(() => { try g(); return h(); })}`;\n");
+    assert!(
+        e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
 }
 
 /* ------------------------------------------------------------------ */

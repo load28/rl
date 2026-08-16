@@ -166,3 +166,53 @@ fn ts_computed_member_enum() {
 fn multibyte_content_preserved() {
     assert_passthrough("const 인사말 = \"안녕하세요 🎉\"; // 한글 주석과 match (x) { A => 1 }\n");
 }
+
+#[test]
+fn plain_ts_using_option_result_names_is_untouched() {
+    // The built-in Option/Result enums must never affect pure TypeScript: a
+    // file that works with these names on its own (import, constructors, a
+    // switch over the tags) contains no rl syntax and passes through.
+    assert_passthrough(
+        r#"
+import { Option, Result } from "./rl.js";
+const o = Option.Some(1);
+switch (o.kind) {
+  case "Some":
+    break;
+  case "None":
+    break;
+}
+const r: Result<number, string> = Result.Err("nope");
+"#,
+    );
+}
+
+#[test]
+fn ts_try_catch_finally_block() {
+    assert_passthrough(
+        "try {\n  risky();\n} catch (e) {\n  handle(e);\n} finally {\n  done();\n}\n",
+    );
+}
+
+#[test]
+fn class_field_and_method_named_try() {
+    assert_passthrough(
+        "class Guard {\n  try = 5;\n  run() {\n    try {\n      this.try += 1;\n    } catch {}\n  }\n}\n",
+    );
+}
+
+#[test]
+fn interface_members_named_try() {
+    // Signatures named `try` — including generic and annotation-free ones —
+    // must never be taken for an rl try statement.
+    assert_passthrough(
+        "interface Retryable {\n  try(times: number): void;\n  try2?: () => void;\n}\ninterface Generic {\n  try<T>(x: T);\n}\n",
+    );
+}
+
+#[test]
+fn object_property_and_method_named_try() {
+    assert_passthrough(
+        "const machine = { try(x: number) { return x + 1; } };\nconst spec = { try: 1 };\nmachine.try(spec.try);\n",
+    );
+}

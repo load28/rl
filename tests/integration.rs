@@ -268,6 +268,176 @@ console.log(JSON.stringify(Shape.Circle(1)));
     assert_eq!(lines, vec!["1", "Blue", r#"{"kind":"Circle","radius":1}"#]);
 }
 
+#[test]
+fn runtime_std_option_result_functional_pipeline() {
+    require_toolchain!();
+    // Two-file setup: the standard library module next to a compiled rl file
+    // that imports it. nodenext resolution so the emitted JS runs under node
+    // unchanged (`./rl.js` → tsc reads rl.ts, node loads rl.js).
+    let dir = tmpdir();
+    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    let code = compile(
+        r#"
+import { Option, Result } from "./rl.js";
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
+}
+
+const half = (n: number): Option<number> =>
+  n % 2 === 0 ? Option.Some(n / 2) : Option.None;
+
+const describe = (raw: string): string =>
+  match (parseNum(raw)) {
+    Ok(value) => match (half(value)) {
+      Some(value: h) => "half=" + h,
+      None => "odd:" + value,
+    },
+    Err(error) => "error:" + error,
+  };
+
+console.log(describe("42"));
+console.log(describe("7"));
+console.log(describe("x"));
+console.log(Option.unwrapOr(Option.map(Option.fromNullable([1, 2].find((n) => n > 1)), (n) => n * 2), -1));
+console.log(Result.unwrapOr(Result.andThen(parseNum("10"), (n): Result<number, string> => n > 5 ? Result.Ok(n * 2) : Result.Err("small")), -1));
+console.log(Result.isErr(Result.fromThrowable(() => JSON.parse("{"))));
+"#,
+        &Options::default(),
+    )
+    .expect("rl compile failed");
+    fs::write(dir.join("main.ts"), &code).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg(dir.join("rl.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args([
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+        ])
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---compiled---\n{code}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            "half=21",
+            "odd:7",
+            "error:not a number: x",
+            "4",
+            "20",
+            "true"
+        ]
+    );
+}
+
+#[test]
+fn runtime_try_error_propagation() {
+    require_toolchain!();
+    let dir = tmpdir();
+    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    let code = compile(
+        r#"
+import { Result } from "./rl.js";
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
+}
+
+function sumList(raws: string[]): Result<number, string> {
+  let total = 0;
+  for (const raw of raws) {
+    const n = try parseNum(raw);
+    total += n;
+  }
+  return Result.Ok(total);
+}
+
+function checked(raw: string): Result<number, string> {
+  try parseNum(raw);
+  let big: number = try parseNum(raw);
+  return Result.Ok(big * 10);
+}
+
+console.log(JSON.stringify(sumList(["1", "2", "3"])));
+console.log(JSON.stringify(sumList(["1", "x"])));
+console.log(JSON.stringify(checked("4")));
+"#,
+        &Options::default(),
+    )
+    .expect("rl compile failed");
+    fs::write(dir.join("main.ts"), &code).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg(dir.join("rl.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args([
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+        ])
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---compiled---\n{code}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Ok","value":6}"#,
+            r#"{"kind":"Err","error":"not a number: x"}"#,
+            r#"{"kind":"Ok","value":40}"#,
+        ]
+    );
+}
+
 /* ------------------------------------------------------------------ */
 /* the generated output is plain TypeScript: tsc accepts it            */
 /* ------------------------------------------------------------------ */

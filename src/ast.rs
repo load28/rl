@@ -35,8 +35,30 @@ pub(crate) enum Segment {
     Enum(EnumDecl),
     /// An rl `match` expression.
     Match(MatchExpr),
+    /// An rl `try` statement (Rust-style error propagation).
+    Try(TryStmt),
     /// A template literal; its interpolations are recursively parsed.
     Template(Template),
+}
+
+/// A structurally parsed rl `try` statement: `try <expr>;` or
+/// `const|let|var <binding> = try <expr>;`. Compiles to statements in the
+/// enclosing function scope — an early `return` of the `Err` value — so it is
+/// only valid where the parser sees the top-level statement stream (enforced
+/// by [`crate::sema`], which rejects it inside match expressions, template
+/// interpolations, and other try expressions).
+#[derive(Debug)]
+pub(crate) struct TryStmt {
+    /// Byte offset of the statement start (the declaration keyword, or `try`
+    /// for the bare form), for error reporting.
+    pub keyword_off: usize,
+    /// `Some((decl_keyword, binding_text))` for the declaration form, where
+    /// `binding_text` is the verbatim text between the keyword and `=`
+    /// (identifier or destructuring pattern, optionally type-annotated).
+    /// `None` for the bare `try <expr>;` form.
+    pub decl: Option<(String, String)>,
+    /// The expression after `try`, recursively parsed.
+    pub expr: Program,
 }
 
 /// A structurally parsed rl `enum` declaration.

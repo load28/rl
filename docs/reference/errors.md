@@ -67,18 +67,37 @@ enum E { A(x: number]) }
 ### `match on enum <이름> is not exhaustive: missing "<케이스>", ... (add the missing arms or a final `_` arm)`
 
 - **원인**: `_` 없는 match가 같은 파일에 선언된 rl enum `<이름>`의 케이스를
-  전부 커버하지 않음.
+  전부 커버하지 않음. 내장 enum(`Option`/`Result`)에 걸린 경우
+  `match on built-in enum <이름> is not exhaustive: ...`로 보고됩니다.
 - **위치**: `match` 키워드.
 - **해결**: 빠진 케이스의 암을 추가하거나 마지막에 `_` 암을 둡니다.
 - **참고**: 다른 파일에서 import한 enum이나 손으로 쓴 유니언에 대한 match는
   이 검사를 받지 않습니다 — 런타임 가드만 남습니다
-  ([language.md §3.6](./language.md#36-소진성-검사)).
+  ([language.md §3.6](./language.md#36-소진성-검사)). 단, 암 태그가 내장
+  `Option`(Some/None)·`Result`(Ok/Err)의 케이스에 속하면 선언 없이도 검사
+  대상입니다 ([language.md §4.2](./language.md#42-내장-enum과-소진성-검사)).
 
 ```
 $ rlc shapes.rl
 rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
      (add the missing arms or a final `_` arm)
 ```
+
+---
+
+## try 에러
+
+### `` `try` cannot be used inside a match expression, a template interpolation, or another `try` — it compiles to a `return` from the enclosing function``
+
+- **원인**: `try` 문이 match 표현식(스크루티니·암 본문), 템플릿 보간, 또는
+  다른 try의 식 내부에서 사용됨. 그 위치의 `return`은 둘러싼 함수가 아니라
+  match의 switch IIFE 등에서 반환되어 Rust와 의미가 달라집니다.
+- **위치**: 해당 `try` 문의 시작 (선언 형태면 `const`/`let`/`var`).
+- **해결**: try를 쓰는 로직을 별도 함수로 추출한 뒤 match 암에서는 그 함수를
+  호출합니다 ([language.md §5.4](./language.md#54-사용-위치-제약)).
+- **참고**: 모듈 최상위(함수 밖)의 try는 이 검사로 잡히지 않고, 생성물의
+  최상위 `return`이 모듈에서 유효하지 않아 출력 검증 에러(아래)로
+  드러납니다.
 
 ---
 
@@ -104,6 +123,7 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 | 메시지 | 원인 / 해결 |
 |--------|-------------|
 | `rlc: --out-dir requires a value` | `-o`/`--out-dir` 뒤에 디렉터리가 없음. |
+| `rlc: --emit-std requires a value` | `--emit-std` 뒤에 출력 파일 경로가 없음. |
 | `rlc: unknown option <옵션>` | 알 수 없는 `-` 시작 인자. `rlc -h`로 옵션 확인. |
 | `rlc: no such file or directory: <경로>` | 입력 경로가 존재하지 않음. |
 | `rlc: no .rl files found` | 입력 디렉터리에 `.rl` 파일이 하나도 없음. |

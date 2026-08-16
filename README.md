@@ -7,8 +7,9 @@
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](./Cargo.toml)
 
 **rl**은 [Civet](https://civet.dev)처럼 TypeScript 위에 얹히는 언어입니다.
-추가하는 것은 딱 두 가지 — 태그드 유니언 **`enum`** 선언과 패턴 매칭
-**`match`** 표현식. 나머지는 전부 그냥 TypeScript입니다.
+추가하는 것은 딱 세 가지 — 태그드 유니언 **`enum`** 선언, 패턴 매칭
+**`match`** 표현식, 에러 전파 **`try`** 문. 나머지는 전부 그냥
+TypeScript입니다.
 
 ```rl
 // shapes.rl
@@ -57,7 +58,15 @@ export const Shape = {
   `kind` 필드를 가진 모든 태그드 유니언에 쓸 수 있습니다. `await`, 중첩
   match, 템플릿 리터럴 보간 내부 사용 모두 동작합니다.
 - **컴파일 시점 소진성 검사** — 빠진 케이스는 tsc에 위임하지 않고 rlc가
-  `파일:행:열`과 함께 직접 에러로 보고합니다.
+  `파일:행:열`과 함께 직접 에러로 보고합니다. `Option`/`Result`는 내장
+  enum이라 선언 없이도 검사됩니다.
+- **`Option`/`Result` 표준 라이브러리** — `rlc --emit-std src/rl.ts`로
+  Rust 스타일 `Option<T>`/`Result<T, E>`와 함수형 콤비네이터(`map`,
+  `andThen`, `unwrapOr`, ...)가 담긴 순수 TypeScript 모듈을 생성해
+  import해서 씁니다.
+- **`try` 문으로 에러 전파** — Rust의 `?`처럼 `Err`를 즉시 리턴합니다:
+  `const n = try parseNum(s);`. TypeScript의 `try/catch` 블록과 완벽히
+  공존합니다 (블록 형태는 그대로 통과).
 - **깨끗한 에러 계층** — rl 수준 에러(중복 케이스, 소진되지 않은 match,
   잘못된 필드 타입)는 전부 rlc의 책임. 방출되는 코드는 타입 트릭 없는 순수
   TypeScript라서 rlc가 만든 코드가 tsc 에러를 일으키지 않습니다.
@@ -83,6 +92,7 @@ rlc -o out/ src/         # 출력 디렉터리 지정
 rlc -p file.rl           # stdout으로 출력
 rlc --check src/         # 컴파일만 하고 쓰지 않음 (문법 검사)
 rlc --no-verify file.rl  # swc 출력 검증 생략
+rlc --emit-std src/rl.ts # Option/Result 표준 라이브러리 모듈 생성
 ```
 
 전체 동작 예시는 [`examples/shapes.rl`](./examples/shapes.rl) →
@@ -152,6 +162,57 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
      (add the missing arms or a final `_` arm)
 ```
 
+### `Option` / `Result` — Rust 스타일 함수형 프로그래밍
+
+표준 라이브러리 모듈을 생성해 import하면 `Option`/`Result`와 콤비네이터를
+바로 쓸 수 있습니다. 두 타입은 **내장 enum**이라 match 소진성 검사도
+선언 없이 동작합니다:
+
+```sh
+rlc --emit-std src/rl.ts
+```
+
+```rl
+import { Option, Result } from "./rl.js";
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("not a number") : Result.Ok(n);
+}
+
+const label = match (parseNum(input)) {
+  Ok(value) => `n=${value}`,
+  Err(error) => `error: ${error}`,   // Err 암을 빼면 rlc 컴파일 에러
+};
+
+const port = Option.unwrapOr(Option.fromNullable(config.port), 8080);
+```
+
+전체 API는 [표준 라이브러리 레퍼런스](./docs/reference/std.md) 참조.
+
+### `try` — Rust의 `?`처럼 에러 전파
+
+`try 식;`은 `Result`가 `Err`면 그 값을 **둘러싼 함수에서 즉시 리턴**하고,
+`Ok`면 값을 풉니다. IIFE 없이 문장으로 컴파일되어 `await`와도 그대로
+동작합니다:
+
+```rl
+function loadConfig(path: string): Result<Config, string> {
+  const raw = try readFile(path);      // Err면 여기서 바로 return
+  const parsed = try parseJson(raw);
+  try validate(parsed);                // 값이 필요 없으면 전파만
+  return Result.Ok(parsed);
+}
+```
+
+```ts
+// 컴파일 결과 (한 줄씩)
+const $rl_t0 = (readFile(path)); if ($rl_t0.kind !== "Ok") return $rl_t0; const raw = $rl_t0.value;
+```
+
+TypeScript 자체의 `try { ... } catch` 블록, `obj.try()` 같은 멤버 이름은
+전부 그대로 통과합니다.
+
 문법·판별 규칙·방출 코드의 정확한 정의는
 [언어 레퍼런스](./docs/reference/language.md)를 참고하세요.
 
@@ -160,6 +221,7 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 | 문서 | 내용 |
 |------|------|
 | [언어 레퍼런스](./docs/reference/language.md) | 문법, rl enum/TS enum 판별 규칙, 방출 코드, 소진성 검사, 제한사항 |
+| [표준 라이브러리 레퍼런스](./docs/reference/std.md) | `Option`/`Result` 모듈 API, 값의 형태 계약 |
 | [CLI 레퍼런스](./docs/reference/cli.md) | 옵션, 입출력 경로 규칙, 종료 코드 |
 | [에러 레퍼런스](./docs/reference/errors.md) | 모든 진단 메시지의 형식·원인·해결 |
 | [설계 문서](./docs/design/) | 아키텍처와 설계 결정 기록 |
@@ -177,6 +239,8 @@ README는 소개용이며, 정확한 동작은 레퍼런스가 규정합니다.
   (프로젝트 단위 검사는 로드맵).
 - 표현식 암에서 객체 리터럴을 바로 반환하려면 화살표 함수처럼 괄호가
   필요합니다: `Tag => ({ a: 1 })`.
+- `try` 문은 세미콜론이 필수이고 식이 `(`/`<`로 시작할 수 없으며, match
+  내부·템플릿 보간·모듈 최상위에서는 쓸 수 없습니다.
 - 스크루티니에 괄호가 필수입니다: `match (x) { ... }`.
 - `.tsx`는 미지원입니다 (제네릭 화살표 함수 출력이 JSX와 충돌할 수 있음).
 

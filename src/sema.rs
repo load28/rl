@@ -16,8 +16,14 @@
 //! - `enum`: no duplicate case tags; with verification enabled, every field
 //!   type parses as a TypeScript type fragment (via [`crate::verify`]).
 //! - `match`: the wildcard `_` arm is last; no duplicate arm tags.
+//! - `try`: only allowed in the top-level statement stream — inside a match
+//!   expression, a template interpolation, or another try's expression its
+//!   emitted `return` would not exit the enclosing function, so it is an
+//!   error there.
 //! - exhaustiveness: a wildcard-free match whose arm tags all belong to an
-//!   enum declared in this file must cover every case of that enum. Matches
+//!   enum declared in this file — or to a built-in enum (`Option`, `Result`;
+//!   see [`crate::stdlib::BUILTIN_ENUMS`]) — must cover every case of that
+//!   enum. A file-local enum shadows a built-in of the same name. Matches
 //!   whose tags belong to no known enum (imported enums, hand-written
 //!   unions) are not checked — rlc has no type information for them.
 
@@ -43,7 +49,7 @@ pub(crate) fn check(program: &Program, verify: bool) -> Result<(), RlError> {
         enums: BTreeMap::new(),
         match_checks: Vec::new(),
     };
-    checker.visit_program(program)?;
+    checker.visit_program(program, false)?;
     checker.check_exhaustiveness()
 }
 
@@ -56,22 +62,38 @@ struct Checker {
 }
 
 impl Checker {
-    fn visit_program(&mut self, program: &Program) -> Result<(), RlError> {
+    /// `nested` is true inside any recursively parsed sub-program (match
+    /// scrutinee, arm body, template interpolation, try expression) — the
+    /// contexts where a `try` statement is not allowed.
+    fn visit_program(&mut self, program: &Program, nested: bool) -> Result<(), RlError> {
         for segment in &program.segments {
             match segment {
                 Segment::Verbatim(_) => {}
                 Segment::Enum(decl) => self.check_enum(decl)?,
                 Segment::Match(expr) => self.check_match(expr)?,
+                Segment::Try(stmt) => self.check_try(stmt, nested)?,
                 Segment::Template(template) => {
                     for chunk in &template.chunks {
                         if let TemplateChunk::Interp(interp) = chunk {
-                            self.visit_program(interp)?;
+                            self.visit_program(interp, true)?;
                         }
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    fn check_try(&mut self, stmt: &TryStmt, nested: bool) -> Result<(), RlError> {
+        if nested {
+            return Err(RlError::at(
+                stmt.keyword_off,
+                "`try` cannot be used inside a match expression, a template interpolation, \
+                 or another `try` — it compiles to a `return` from the enclosing function"
+                    .to_string(),
+            ));
+        }
+        self.visit_program(&stmt.expr, true)
     }
 
     fn check_enum(&mut self, decl: &EnumDecl) -> Result<(), RlError> {
@@ -154,46 +176,61 @@ impl Checker {
         }
 
         // children, in source order: scrutinee first, then arm bodies
-        self.visit_program(&expr.scrutinee)?;
+        self.visit_program(&expr.scrutinee, true)?;
         for arm in &expr.arms {
-            self.visit_program(&arm.body)?;
+            self.visit_program(&arm.body, true)?;
         }
         Ok(())
     }
 
     /// Resolves the deferred exhaustiveness checks against the collected
-    /// enum registry.
+    /// enum registry plus the built-in enums (`Option`, `Result`). Local
+    /// enums are tried first, so on a tie they win, and a local enum shadows
+    /// a built-in of the same name entirely.
     fn check_exhaustiveness(&self) -> Result<(), RlError> {
         for check in &self.match_checks {
-            let mut best: Option<(&str, Vec<&str>)> = None; // candidate with fewest missing cases
+            // candidate with fewest missing cases: (name, is_builtin, missing)
+            let mut best: Option<(&str, bool, Vec<&str>)> = None;
             let mut satisfied = false;
-            for (name, cases) in self.enums.iter() {
-                if !check.tags.iter().all(|t| cases.contains(t)) {
+            let locals = self.enums.iter().map(|(name, cases)| {
+                let cases: Vec<&str> = cases.iter().map(String::as_str).collect();
+                (name.as_str(), false, cases)
+            });
+            let builtins = crate::stdlib::BUILTIN_ENUMS
+                .iter()
+                .filter(|(name, _)| !self.enums.contains_key(*name))
+                .map(|(name, cases)| (*name, true, cases.to_vec()));
+            for (name, builtin, cases) in locals.chain(builtins) {
+                if !check.tags.iter().all(|t| cases.contains(&t.as_str())) {
                     continue; // not a candidate: some arm tag is not a case of this enum
                 }
                 let missing: Vec<&str> = cases
                     .iter()
-                    .filter(|c| !check.tags.contains(c))
-                    .map(String::as_str)
+                    .filter(|c| !check.tags.iter().any(|t| t.as_str() == **c))
+                    .copied()
                     .collect();
                 if missing.is_empty() {
                     satisfied = true;
                     break;
                 }
-                if best.as_ref().is_none_or(|(_, m)| missing.len() < m.len()) {
-                    best = Some((name, missing));
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, _, m)| missing.len() < m.len())
+                {
+                    best = Some((name, builtin, missing));
                 }
             }
-            if let (false, Some((name, missing))) = (satisfied, best) {
+            if let (false, Some((name, builtin, missing))) = (satisfied, best) {
                 let list = missing
                     .iter()
                     .map(|m| format!("\"{m}\""))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let qualifier = if builtin { "built-in " } else { "" };
                 return Err(RlError::at(
                     check.offset,
                     format!(
-                        "match on enum {name} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
+                        "match on {qualifier}enum {name} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
                     ),
                 ));
             }
