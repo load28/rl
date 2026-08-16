@@ -126,6 +126,41 @@ export async function main(): Promise<void> {
 }
 
 #[test]
+fn ts_numeric_enum() {
+    assert_passthrough("enum Direction {\n  Up = 1,\n  Down,\n  Left,\n  Right,\n}\n");
+}
+
+#[test]
+fn ts_string_enum() {
+    assert_passthrough("enum Level {\n  Info = \"INFO\",\n  Warn = \"WARN\",\n}\n");
+}
+
+#[test]
+fn ts_unit_only_enum() {
+    assert_passthrough("enum Color { Red, Green, Blue }\n");
+}
+
+#[test]
+fn ts_exported_unit_only_enum() {
+    assert_passthrough("export enum Color { Red, Green, Blue }\n");
+}
+
+#[test]
+fn ts_const_enum() {
+    assert_passthrough("const enum Flags { None, Read, Write }\n");
+}
+
+#[test]
+fn ts_declare_enum() {
+    assert_passthrough("declare enum Ambient { A, B }\n");
+}
+
+#[test]
+fn ts_computed_member_enum() {
+    assert_passthrough("enum FileAccess {\n  Read = 1 << 1,\n  Write = 1 << 2,\n  ReadWrite = Read | Write,\n}\n");
+}
+
+#[test]
 fn multibyte_content_preserved() {
     assert_passthrough("const 인사말 = \"안녕하세요 🎉\"; // 한글 주석과 match (x) { A => 1 }\n");
 }

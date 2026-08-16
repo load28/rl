@@ -1,5 +1,5 @@
 //! End-to-end tests: compile rl → TypeScript, then run `tsc` to type-check
-//! (including the exhaustiveness guarantee) and `node` to execute.
+//! (exhaustiveness is checked by rlc itself; tsc sees plain TypeScript) and `node` to execute.
 //!
 //! These tests skip silently when `tsc` or `node` is not installed.
 
@@ -113,10 +113,10 @@ macro_rules! require_toolchain {
 /* ------------------------------------------------------------------ */
 
 #[test]
-fn runtime_variant_construction_and_match() {
+fn runtime_enum_construction_and_match() {
     require_toolchain!();
     let lines = run(r#"
-variant Shape {
+enum Shape {
   Circle(radius: number),
   Rect(width: number, height: number),
   Point,
@@ -148,7 +148,7 @@ console.log(JSON.stringify(Shape.Point));
 fn runtime_binding_aliases_and_block_bodies() {
     require_toolchain!();
     let lines = run(r#"
-variant Msg {
+enum Msg {
   Quit,
   Move(x: number, y: number),
   Write(text: string),
@@ -173,10 +173,10 @@ console.log(describe(Msg.Quit));
 }
 
 #[test]
-fn runtime_generic_variant() {
+fn runtime_generic_enum() {
     require_toolchain!();
     let lines = run(r#"
-variant Option<T> {
+enum Option<T> {
   Some(value: T),
   None,
 }
@@ -198,7 +198,7 @@ console.log(unwrapOr<number>(Option.None, 42));
 fn runtime_async_match_with_await() {
     require_toolchain!();
     let lines = run(r#"
-variant Job {
+enum Job {
   Fetch(n: number),
   Idle,
 }
@@ -225,13 +225,15 @@ runJob(Job.Fetch(21)).then((a) => {
 }
 
 #[test]
-fn runtime_unhandled_variant_throws() {
+fn runtime_unexpected_case_throws() {
     require_toolchain!();
+    // The emitted default branch is a plain runtime guard — it protects when
+    // the type system was bypassed (e.g. data from the outside world).
     let lines = run(r#"
-variant AB { A, B }
+enum AB { A(n: number), B }
 function f(x: AB): number {
   return match (x) {
-    A => 1,
+    A(n) => n,
     B => 2,
   };
 }
@@ -242,18 +244,33 @@ try {
   console.log("threw: " + (e as Error).message);
 }
 "#);
-    assert_eq!(lines, vec![r#"threw: rl match: unhandled variant {"kind":"C"}"#]);
+    assert_eq!(lines, vec![r#"threw: rl match: unexpected case {"kind":"C"}"#]);
+}
+
+#[test]
+fn runtime_plain_typescript_enum_coexists() {
+    require_toolchain!();
+    // A unit-only enum is TypeScript's own enum, untouched by rlc.
+    let lines = run(r#"
+enum Color { Red, Green, Blue }
+enum Shape { Circle(radius: number), Point }
+
+console.log(Color.Green);
+console.log(Color[Color.Blue]);
+console.log(JSON.stringify(Shape.Circle(1)));
+"#);
+    assert_eq!(lines, vec!["1", "Blue", r#"{"kind":"Circle","radius":1}"#]);
 }
 
 /* ------------------------------------------------------------------ */
-/* exhaustiveness checking via tsc                                     */
+/* the generated output is plain TypeScript: tsc accepts it            */
 /* ------------------------------------------------------------------ */
 
 #[test]
 fn typecheck_exhaustive_match_passes() {
     require_toolchain!();
     let (ok, out) = typecheck(r#"
-variant Shape { Circle(radius: number), Point }
+enum Shape { Circle(radius: number), Point }
 const f = (s: Shape) => match (s) {
   Circle(radius) => radius,
   Point => 0,
@@ -263,24 +280,10 @@ const f = (s: Shape) => match (s) {
 }
 
 #[test]
-fn typecheck_non_exhaustive_match_fails() {
-    require_toolchain!();
-    let (ok, out) = typecheck(r#"
-variant Shape { Circle(radius: number), Rect(w: number, h: number), Point }
-const f = (s: Shape) => match (s) {
-  Circle(radius) => radius,
-  Point => 0,
-};
-"#);
-    assert!(!ok, "expected tsc to reject the non-exhaustive match");
-    assert!(out.contains("never"), "{out}");
-}
-
-#[test]
 fn typecheck_wildcard_makes_partial_match_exhaustive() {
     require_toolchain!();
     let (ok, out) = typecheck(r#"
-variant Shape { Circle(radius: number), Rect(w: number, h: number), Point }
+enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
 const f = (s: Shape) => match (s) {
   Circle(radius) => radius,
   _ => 0,

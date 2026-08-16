@@ -1,22 +1,104 @@
 //! The rl → TypeScript transform.
 //!
 //! Design goal: every valid TypeScript file is a valid .rl file and compiles
-//! to itself, byte for byte. Only the two constructs rl adds — `variant`
-//! declarations and `match` expressions — are rewritten; anything that does
-//! not fully parse as one of them is passed through untouched.
+//! to itself, byte for byte. Only the two constructs rl adds — Rust-style
+//! `enum` declarations and `match` expressions — are rewritten; anything that
+//! does not fully parse as one of them is passed through untouched.
 //!
-//! Unlike the original JavaScript implementation, the transform always
-//! recurses with absolute `(start, end)` ranges over the full source, so
-//! every error can be reported with an exact position.
+//! Plain TypeScript enums keep working: an `enum` declaration is treated as
+//! an rl enum only when at least one case carries a payload `(...)` or the
+//! declaration has generics — neither is valid TypeScript enum syntax, so no
+//! valid TS enum is ever rewritten.
+//!
+//! Error layering: rl-level errors (duplicate cases, non-exhaustive matches,
+//! bad field types) are rlc compile errors with exact positions. The emitted
+//! output is plain TypeScript with no type-level tricks; exhaustiveness is
+//! checked by rlc itself against the enums declared in the file, not
+//! delegated to tsc.
+//!
+//! The transform always recurses with absolute `(start, end)` ranges over
+//! the full source, so every error can be reported with an exact position.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use crate::error::RlError;
 use crate::scanner::*;
 use crate::verify;
 
+/// A deferred exhaustiveness check for one wildcard-free `match`, resolved
+/// once the whole file has been scanned (so declaration order doesn't matter).
+pub(crate) struct MatchCheck {
+    /// Offset of the `match` keyword, for error reporting.
+    pub offset: usize,
+    /// Non-wildcard arm tags.
+    pub tags: Vec<String>,
+}
+
 pub(crate) struct Ctx<'a> {
     pub src: &'a str,
     pub bytes: &'a [u8],
     pub verify: bool,
+    /// rl enums declared in this file: name → case tags.
+    pub enums: RefCell<BTreeMap<String, Vec<String>>>,
+    /// Wildcard-free matches to exhaustiveness-check after the pass.
+    pub match_checks: RefCell<Vec<MatchCheck>>,
+}
+
+impl<'a> Ctx<'a> {
+    pub fn new(src: &'a str, verify: bool) -> Self {
+        Ctx {
+            src,
+            bytes: src.as_bytes(),
+            verify,
+            enums: RefCell::new(BTreeMap::new()),
+            match_checks: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+/// Resolves the deferred exhaustiveness checks: a wildcard-free `match` whose
+/// arm tags all belong to an rl enum declared in this file must cover every
+/// case of that enum. Matches whose tags belong to no known enum (imported
+/// enums, hand-written unions) are not checked — rlc has no type information
+/// for them.
+pub(crate) fn check_exhaustiveness(ctx: &Ctx) -> Result<(), RlError> {
+    let enums = ctx.enums.borrow();
+    for check in ctx.match_checks.borrow().iter() {
+        let mut best: Option<(&str, Vec<&str>)> = None; // candidate with fewest missing cases
+        let mut satisfied = false;
+        for (name, cases) in enums.iter() {
+            if !check.tags.iter().all(|t| cases.contains(t)) {
+                continue; // not a candidate: some arm tag is not a case of this enum
+            }
+            let missing: Vec<&str> = cases
+                .iter()
+                .filter(|c| !check.tags.contains(c))
+                .map(String::as_str)
+                .collect();
+            if missing.is_empty() {
+                satisfied = true;
+                break;
+            }
+            if best.as_ref().is_none_or(|(_, m)| missing.len() < m.len()) {
+                best = Some((name, missing));
+            }
+        }
+        if let (false, Some((name, missing))) = (satisfied, best) {
+            let list = missing
+                .iter()
+                .map(|m| format!("\"{m}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(RlError::at(
+                check.offset,
+                format!(
+                    "match on enum {name} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // Words that can never be a variant tag, match pattern tag, or binding name.
@@ -118,21 +200,23 @@ pub(crate) fn transform(ctx: &Ctx, start: usize, end: usize) -> Result<String, R
             let word = &ctx.src[i..j];
             let dotted = prev_sig == b'.'; // property access like `str.match(...)`
 
-            if !dotted && (word == "variant" || word == "export") {
+            // `const enum` / `declare enum` are TypeScript-only forms — never rl.
+            let ts_enum_prefix = prev_word == "const" || prev_word == "declare";
+            if !dotted && !ts_enum_prefix && (word == "enum" || word == "export") {
                 let mut exported = false;
                 let mut kw_end = j;
                 if word == "export" {
                     let k = skip_ws_comments(src, j, end);
                     if k < end && is_ident_start(src[k]) {
                         let m = ident_end(src, k, end);
-                        if &ctx.src[k..m] == "variant" {
+                        if &ctx.src[k..m] == "enum" {
                             exported = true;
                             kw_end = m;
                         }
                     }
                 }
-                if (word == "variant" || exported)
-                    && let Some((parsed_end, text)) = parse_variant(ctx, kw_end, end, exported)? {
+                if (word == "enum" || exported)
+                    && let Some((parsed_end, text)) = parse_enum(ctx, kw_end, end, exported)? {
                         out.extend_from_slice(text.as_bytes());
                         i = parsed_end;
                         prev_sig = b';';
@@ -202,7 +286,7 @@ fn transform_template(ctx: &Ctx, mut i: usize, end: usize) -> Result<(usize, Str
 }
 
 /* ------------------------------------------------------------------ */
-/* variant                                                             */
+/* enum                                                                */
 /* ------------------------------------------------------------------ */
 
 struct Field {
@@ -212,14 +296,14 @@ struct Field {
     ty_off: usize,
 }
 
-struct VariantCase {
+struct EnumCase {
     tag: String,
     tag_off: usize,
     /// None = unit case (no parens); Some(vec) = case with a field list.
     fields: Option<Vec<Field>>,
 }
 
-fn parse_variant(
+fn parse_enum(
     ctx: &Ctx,
     j: usize,
     end: usize,
@@ -254,17 +338,26 @@ fn parse_variant(
         None => return Ok(None),
     };
 
-    let cases = match parse_variant_cases(ctx, i + 1, close_brace)? {
+    let cases = match parse_enum_cases(ctx, i + 1, close_brace)? {
         Some(cases) if !cases.is_empty() => cases,
         _ => return Ok(None),
     };
+
+    // A declaration with no payload case and no generics is a plain
+    // TypeScript enum — pass it through untouched. (TS enum members can
+    // never look like `Tag(...)`, and TS enums can never have generics, so
+    // this rule never captures valid TypeScript.)
+    let is_rl_enum = !generics.is_empty() || cases.iter().any(|c| c.fields.is_some());
+    if !is_rl_enum {
+        return Ok(None);
+    }
 
     let mut seen: Vec<&str> = Vec::new();
     for case in &cases {
         if seen.contains(&case.tag.as_str()) {
             return Err(RlError::at(
                 case.tag_off,
-                format!("variant {}: duplicate case \"{}\"", name, case.tag),
+                format!("enum {}: duplicate case \"{}\"", name, case.tag),
             ));
         }
         seen.push(&case.tag);
@@ -278,7 +371,7 @@ fn parse_variant(
                         return Err(RlError::at(
                             field.ty_off,
                             format!(
-                                "variant {}: invalid type for field `{}`: {}",
+                                "enum {}: invalid type for field `{}`: {}",
                                 name, field.name, msg
                             ),
                         ));
@@ -288,14 +381,19 @@ fn parse_variant(
         }
     }
 
-    Ok(Some((close_brace + 1, emit_variant(name, generics, &cases, exported))))
+    ctx.enums.borrow_mut().insert(
+        name.to_string(),
+        cases.iter().map(|c| c.tag.clone()).collect(),
+    );
+
+    Ok(Some((close_brace + 1, emit_enum(name, generics, &cases, exported))))
 }
 
-fn parse_variant_cases(
+fn parse_enum_cases(
     ctx: &Ctx,
     start: usize,
     end: usize,
-) -> Result<Option<Vec<VariantCase>>, RlError> {
+) -> Result<Option<Vec<EnumCase>>, RlError> {
     let src = ctx.bytes;
     let mut cases = Vec::new();
     let mut i = start;
@@ -327,7 +425,7 @@ fn parse_variant_cases(
             };
             i = close + 1;
         }
-        cases.push(VariantCase { tag: tag.to_string(), tag_off, fields });
+        cases.push(EnumCase { tag: tag.to_string(), tag_off, fields });
 
         i = skip_ws_comments(src, i, end);
         if i >= end {
@@ -444,7 +542,7 @@ fn scan_type_end(src: &[u8], mut i: usize, end: usize) -> usize {
     i
 }
 
-fn emit_variant(name: &str, generics: &str, cases: &[VariantCase], exported: bool) -> String {
+fn emit_enum(name: &str, generics: &str, cases: &[EnumCase], exported: bool) -> String {
     let exp = if exported { "export " } else { "" };
 
     let type_arms: Vec<String> = cases
@@ -601,6 +699,15 @@ fn parse_match(ctx: &Ctx, j: usize, end: usize) -> Result<Option<(usize, String)
             }
             seen.push(&arm.tag);
         }
+    }
+
+    // Wildcard-free matches are exhaustiveness-checked by rlc once the whole
+    // file has been scanned (deferred so declaration order doesn't matter).
+    if !arms.iter().any(|a| a.wildcard) {
+        ctx.match_checks.borrow_mut().push(MatchCheck {
+            offset: j.saturating_sub("match".len()),
+            tags: arms.iter().map(|a| a.tag.clone()).collect(),
+        });
     }
 
     Ok(Some((close_brace + 1, emit_match(ctx, scrut, &arms)?)))
@@ -833,7 +940,7 @@ fn emit_match(ctx: &Ctx, scrut: (usize, usize), arms: &[Arm]) -> Result<String, 
 
     if !has_wildcard {
         cases.push_str(
-            "    default: {\n      const $rl_never: never = $rl_m;\n      throw new Error(\"rl match: unhandled variant \" + JSON.stringify($rl_never));\n    }\n",
+            "    default: { throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m)); }\n",
         );
     }
 

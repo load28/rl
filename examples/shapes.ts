@@ -1,5 +1,5 @@
 // @generated from shapes.rl by rlc — do not edit directly.
-// examples/shapes.rl — rl is TypeScript plus `variant` and `match`.
+// examples/shapes.rl — rl is TypeScript plus rl `enum` and `match`.
 // Everything here that isn't one of those two constructs is plain TypeScript
 // and passes through the compiler untouched.
 
@@ -28,10 +28,7 @@ export function area(s: Shape): number {
     case "Circle": { const { radius } = $rl_m; return (Math.PI * radius * radius); }
     case "Rect": { const { width, height } = $rl_m; return (width * height); }
     case "Point": { return (0); }
-    default: {
-      const $rl_never: never = $rl_m;
-      throw new Error("rl match: unhandled variant " + JSON.stringify($rl_never));
-    }
+    default: { throw new Error("rl match: unexpected case " + JSON.stringify($rl_m)); }
   }
 })());
 }
@@ -54,20 +51,20 @@ export function unwrapOr<T>(o: Option<T>, fallback: T): T {
   switch ($rl_m.kind) {
     case "Some": { const { value } = $rl_m; return (value); }
     case "None": { return (fallback); }
-    default: {
-      const $rl_never: never = $rl_m;
-      throw new Error("rl match: unhandled variant " + JSON.stringify($rl_never));
-    }
+    default: { throw new Error("rl match: unexpected case " + JSON.stringify($rl_m)); }
   }
 })());
 }
 
-// Plain TypeScript keeps working as-is — including `.match` and friends:
+// Plain TypeScript keeps working as-is — including TypeScript's own enum
+// (unit-only, so rlc leaves it alone) and `.match` and friends:
+enum LogLevel { Debug, Info, Warn }
+const level = LogLevel.Info;
 const digits = "shape-42".match(/\d+/)?.[0] ?? "none";
 
 const shapes: Shape[] = [Shape.Circle(1), Shape.Rect(3, 4), Shape.Point];
 for (const s of shapes) {
-  console.log(describe(s), area(s), digits);
+  console.log(describe(s), area(s), digits, level);
 }
 
 console.log(unwrapOr(Option.Some(7), 0), unwrapOr<number>(Option.None, 42));

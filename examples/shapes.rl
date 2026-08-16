@@ -1,14 +1,14 @@
-// examples/shapes.rl — rl is TypeScript plus `variant` and `match`.
+// examples/shapes.rl — rl is TypeScript plus rl `enum` and `match`.
 // Everything here that isn't one of those two constructs is plain TypeScript
 // and passes through the compiler untouched.
 
-export variant Shape {
+export enum Shape {
   Circle(radius: number),
   Rect(width: number, height: number),
   Point,
 }
 
-export variant Option<T> {
+export enum Option<T> {
   Some(value: T),
   None,
 }
@@ -39,12 +39,15 @@ export function unwrapOr<T>(o: Option<T>, fallback: T): T {
   };
 }
 
-// Plain TypeScript keeps working as-is — including `.match` and friends:
+// Plain TypeScript keeps working as-is — including TypeScript's own enum
+// (unit-only, so rlc leaves it alone) and `.match` and friends:
+enum LogLevel { Debug, Info, Warn }
+const level = LogLevel.Info;
 const digits = "shape-42".match(/\d+/)?.[0] ?? "none";
 
 const shapes: Shape[] = [Shape.Circle(1), Shape.Rect(3, 4), Shape.Point];
 for (const s of shapes) {
-  console.log(describe(s), area(s), digits);
+  console.log(describe(s), area(s), digits, level);
 }
 
 console.log(unwrapOr(Option.Some(7), 0), unwrapOr<number>(Option.None, 42));

@@ -11,13 +11,13 @@ fn err(src: &str) -> rlc::CompileError {
 }
 
 /* ------------------------------------------------------------------ */
-/* variant                                                             */
+/* enum                                                                */
 /* ------------------------------------------------------------------ */
 
 #[test]
-fn variant_emits_union_type_and_constructors() {
+fn enum_with_payload_emits_union_type_and_constructors() {
     let out = ok(r#"
-variant Shape {
+enum Shape {
   Circle(radius: number),
   Rect(width: number, height: number),
   Point,
@@ -33,30 +33,55 @@ variant Shape {
 }
 
 #[test]
-fn variant_export_prefix_on_both_declarations() {
-    let out = ok("export variant Color { Red, Green, Blue }");
-    assert!(out.contains("export type Color ="));
-    assert!(out.contains("export const Color = {"));
+fn unit_only_enum_is_a_plain_typescript_enum() {
+    // No payload case and no generics → this is TypeScript's own enum and
+    // must pass through byte for byte.
+    let src = "enum Color { Red, Green, Blue }\n";
+    assert_eq!(ok(src), src);
+    let src = "export enum Color { Red, Green, Blue }\n";
+    assert_eq!(ok(src), src);
 }
 
 #[test]
-fn variant_generics_flow_into_constructors() {
-    let out = ok("variant Option<T> {\n  Some(value: T),\n  None,\n}\n");
+fn empty_parens_case_forces_rl_enum() {
+    // A unit-only enum can opt into rl semantics by giving one case parens.
+    let out = ok("enum Status { Active(), Inactive }\n");
+    assert!(out.contains("type Status ="));
+    assert!(out.contains("Active: (): Status => ({ kind: \"Active\" })"));
+    assert!(out.contains("Inactive: { kind: \"Inactive\" } as const"));
+}
+
+#[test]
+fn generics_force_rl_enum() {
+    let out = ok("enum Pair<T> { First, Second }\n");
+    assert!(out.contains("type Pair<T> ="));
+}
+
+#[test]
+fn enum_export_prefix_on_both_declarations() {
+    let out = ok("export enum Shape { Circle(radius: number), Point }");
+    assert!(out.contains("export type Shape ="));
+    assert!(out.contains("export const Shape = {"));
+}
+
+#[test]
+fn enum_generics_flow_into_constructors() {
+    let out = ok("enum Option<T> {\n  Some(value: T),\n  None,\n}\n");
     assert!(out.contains("type Option<T> ="));
     assert!(out.contains("Some: <T>(value: T): Option<T> => ({ kind: \"Some\", value })"));
 }
 
 #[test]
-fn variant_duplicate_case_is_error_with_position() {
-    let e = err("const a = 1;\nvariant X { A, A }\n");
+fn enum_duplicate_case_is_error_with_position() {
+    let e = err("const a = 1;\nenum X { A(v: number), A }\n");
     assert!(e.message.contains("duplicate case \"A\""), "{}", e.message);
-    assert_eq!((e.line, e.col), (2, 16));
+    assert_eq!((e.line, e.col), (2, 24));
 }
 
 #[test]
-fn variant_complex_field_types() {
+fn enum_complex_field_types() {
     let out = ok(r#"
-variant Node {
+enum Node {
   Leaf(entries: Map<string, number[]>),
   Branch(children: Array<string>, meta: { tag: string, depth: number }),
 }
@@ -66,19 +91,19 @@ variant Node {
 }
 
 #[test]
-fn variant_invalid_field_type_is_rejected_by_swc_with_position() {
-    let e = err("variant X {\n  A(f: number number),\n}\n");
+fn enum_invalid_field_type_is_rejected_by_swc_with_position() {
+    let e = err("enum X {\n  A(f: number number),\n}\n");
     assert!(e.message.contains("invalid type for field `f`"), "{}", e.message);
     assert_eq!(e.line, 2);
     assert_eq!(e.col, 8); // points at the start of the type annotation
 }
 
 #[test]
-fn variant_invalid_field_type_passes_without_verify() {
+fn enum_invalid_field_type_passes_without_verify() {
     // Without swc validation the construct still parses; the broken type is
     // carried into the output (where tsc would catch it).
     let opts = Options { verify: false, ..Options::default() };
-    let out = compile("variant X {\n  A(f: number number),\n}\n", &opts).unwrap();
+    let out = compile("enum X {\n  A(f: number number),\n}\n", &opts).unwrap();
     assert!(out.contains("f: number number"));
 }
 
@@ -87,8 +112,9 @@ fn variant_invalid_field_type_passes_without_verify() {
 /* ------------------------------------------------------------------ */
 
 #[test]
-fn match_compiles_to_switch_with_never_default() {
+fn match_compiles_to_switch_with_runtime_guard_only() {
     let out = ok(r#"
+enum Shape { Circle(radius: number), Point }
 const area = match (shape) {
   Circle(radius) => 3.14 * radius * radius,
   Point => 0,
@@ -97,11 +123,13 @@ const area = match (shape) {
     assert!(out.contains("switch ($rl_m.kind)"));
     assert!(out.contains("case \"Circle\": { const { radius } = $rl_m; return (3.14 * radius * radius); }"));
     assert!(out.contains("case \"Point\": { return (0); }"));
-    assert!(out.contains("const $rl_never: never = $rl_m;"));
+    // The output is plain TypeScript: a runtime guard, no type-level tricks.
+    assert!(out.contains("default: { throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m)); }"));
+    assert!(!out.contains("never"));
 }
 
 #[test]
-fn match_wildcard_becomes_default_without_never_check() {
+fn match_wildcard_becomes_default() {
     let out = ok("const r = match (x) { A => 1, _ => 0 };");
     assert!(out.contains("default: { return (0); }"));
     assert!(!out.contains("never"));
@@ -161,11 +189,87 @@ const r = match (m) {
 
 #[test]
 fn error_position_reported_inside_template_interpolation() {
-    // The absolute-offset recursion keeps positions exact even for errors
-    // nested inside template literals — the JS implementation could not.
     let e = err("const s = `${match (x) { A => 1, A => 2 }}`;\n");
     assert!(e.message.contains("duplicate arm"), "{}", e.message);
     assert_eq!((e.line, e.col), (1, 34));
+}
+
+/* ------------------------------------------------------------------ */
+/* exhaustiveness — an rlc error, not a tsc error                      */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn non_exhaustive_match_is_an_rlc_error_with_position() {
+    let e = err(r#"enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
+const f = (s: Shape) => match (s) {
+  Circle(radius) => radius,
+  Point => 0,
+};
+"#);
+    assert!(
+        e.message.contains("match on enum Shape is not exhaustive: missing \"Rect\""),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 25)); // points at the `match` keyword
+}
+
+#[test]
+fn exhaustive_match_compiles() {
+    let out = ok(r#"
+enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
+const f = (s: Shape) => match (s) {
+  Circle(radius) => radius,
+  Rect(w, h) => w * h,
+  Point => 0,
+};
+"#);
+    assert!(out.contains("case \"Rect\""));
+}
+
+#[test]
+fn wildcard_satisfies_exhaustiveness() {
+    ok(r#"
+enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
+const f = (s: Shape) => match (s) {
+  Circle(radius) => radius,
+  _ => 0,
+};
+"#);
+}
+
+#[test]
+fn exhaustiveness_is_declaration_order_independent() {
+    // match appears before the enum declaration — still checked.
+    let e = err(r#"const f = (s: Shape) => match (s) {
+  Circle(radius) => radius,
+};
+enum Shape { Circle(radius: number), Point }
+"#);
+    assert!(e.message.contains("missing \"Point\""), "{}", e.message);
+}
+
+#[test]
+fn match_on_unknown_tags_is_not_checked() {
+    // Hand-written unions / imported enums: rlc has no type info, so no
+    // exhaustiveness check — the runtime guard still protects.
+    let out = ok(r#"
+type AppEvent = { kind: "click"; x: number } | { kind: "key"; code: string };
+const f = (e: AppEvent) => match (e) {
+  click(x) => x,
+};
+"#);
+    assert!(out.contains("case \"click\""));
+}
+
+#[test]
+fn missing_cases_are_all_listed() {
+    let e = err(r#"enum Dir { North, South, East, West(deg: number) }
+const f = (d: Dir) => match (d) { North => 1 };
+"#);
+    assert!(e.message.contains("\"East\""), "{}", e.message);
+    assert!(e.message.contains("\"South\""), "{}", e.message);
+    assert!(e.message.contains("\"West\""), "{}", e.message);
 }
 
 /* ------------------------------------------------------------------ */
@@ -188,6 +292,6 @@ fn no_verify_passes_invalid_typescript_through() {
 #[test]
 fn filename_appears_in_error_display() {
     let opts = Options { filename: Some("demo.rl"), ..Options::default() };
-    let e = compile("variant X { A, A }", &opts).expect_err("expected error");
-    assert_eq!(e.to_string(), "demo.rl:1:16: variant X: duplicate case \"A\"");
+    let e = compile("const r = match (x) { A => 1, A => 2 };", &opts).expect_err("expected error");
+    assert_eq!(e.to_string(), "demo.rl:1:31: match: duplicate arm \"A\"");
 }
