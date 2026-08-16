@@ -2,10 +2,28 @@
 name = "rlc"
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Compiler for rl — a tiny TypeScript preprocessor adding Rust-style enums and match expressions on top of 100%-compatible TypeScript."
 license = "MIT"
+repository = "https://github.com/load28/rl"
+readme = "README.md"
+keywords = ["typescript", "compiler", "preprocessor", "enum", "pattern-matching"]
+categories = ["compilers", "development-tools"]
 
 [dependencies]
 swc_common = "26.0.0"
 swc_ecma_ast = "29.0.0"
 swc_ecma_parser = "45.0.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

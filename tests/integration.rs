@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rlc::{compile, Options};
+use rlc::{Options, compile};
 
 const TSC_FLAGS: &[&str] = &[
     "--strict",
@@ -61,7 +61,10 @@ fn typecheck(src: &str) -> (bool, String) {
         .output()
         .expect("failed to run tsc");
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    (out.status.success(), format!("{text}\n---compiled---\n{code}"))
+    (
+        out.status.success(),
+        format!("{text}\n---compiled---\n{code}"),
+    )
 }
 
 /// Compile rl source, emit JS with tsc, execute with node, return stdout lines.
@@ -244,7 +247,10 @@ try {
   console.log("threw: " + (e as Error).message);
 }
 "#);
-    assert_eq!(lines, vec![r#"threw: rl match: unexpected case {"kind":"C"}"#]);
+    assert_eq!(
+        lines,
+        vec![r#"threw: rl match: unexpected case {"kind":"C"}"#]
+    );
 }
 
 #[test]
@@ -269,33 +275,38 @@ console.log(JSON.stringify(Shape.Circle(1)));
 #[test]
 fn typecheck_exhaustive_match_passes() {
     require_toolchain!();
-    let (ok, out) = typecheck(r#"
+    let (ok, out) = typecheck(
+        r#"
 enum Shape { Circle(radius: number), Point }
 const f = (s: Shape) => match (s) {
   Circle(radius) => radius,
   Point => 0,
 };
-"#);
+"#,
+    );
     assert!(ok, "{out}");
 }
 
 #[test]
 fn typecheck_wildcard_makes_partial_match_exhaustive() {
     require_toolchain!();
-    let (ok, out) = typecheck(r#"
+    let (ok, out) = typecheck(
+        r#"
 enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
 const f = (s: Shape) => match (s) {
   Circle(radius) => radius,
   _ => 0,
 };
-"#);
+"#,
+    );
     assert!(ok, "{out}");
 }
 
 #[test]
 fn typecheck_match_on_handwritten_discriminated_union() {
     require_toolchain!();
-    let (ok, out) = typecheck(r#"
+    let (ok, out) = typecheck(
+        r#"
 type AppEvent =
   | { kind: "click"; x: number; y: number }
   | { kind: "key"; code: string };
@@ -303,6 +314,7 @@ const f = (e: AppEvent) => match (e) {
   click(x, y) => x + y,
   key(code) => code.length,
 };
-"#);
+"#,
+    );
     assert!(ok, "{out}");
 }

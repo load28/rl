@@ -1,7 +1,7 @@
 //! Every valid TypeScript file is a valid .rl file and must compile to
 //! itself, byte for byte.
 
-use rlc::{compile, Options};
+use rlc::{Options, compile};
 
 fn assert_passthrough(src: &str) {
     let out = compile(src, &Options::default()).expect("compile failed");
@@ -157,7 +157,9 @@ fn ts_declare_enum() {
 
 #[test]
 fn ts_computed_member_enum() {
-    assert_passthrough("enum FileAccess {\n  Read = 1 << 1,\n  Write = 1 << 2,\n  ReadWrite = Read | Write,\n}\n");
+    assert_passthrough(
+        "enum FileAccess {\n  Read = 1 << 1,\n  Write = 1 << 2,\n  ReadWrite = Read | Write,\n}\n",
+    );
 }
 
 #[test]

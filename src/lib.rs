@@ -15,9 +15,10 @@ mod verify;
 
 pub use error::CompileError;
 
-use error::{line_col, RlError};
+use error::{RlError, line_col};
 use transform::Ctx;
 
+/// Compilation options for [`compile`].
 #[derive(Debug, Clone)]
 pub struct Options<'a> {
     /// Reported in error messages.
@@ -28,7 +29,10 @@ pub struct Options<'a> {
 
 impl Default for Options<'_> {
     fn default() -> Self {
-        Options { filename: None, verify: true }
+        Options {
+            filename: None,
+            verify: true,
+        }
     }
 }
 
@@ -48,8 +52,7 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
     };
 
     let ctx = Ctx::new(source, options.verify);
-    let code =
-        transform::transform(&ctx, 0, source.len()).map_err(to_compile_error)?;
+    let code = transform::transform(&ctx, 0, source.len()).map_err(to_compile_error)?;
 
     // rlc owns exhaustiveness: wildcard-free matches over enums declared in
     // this file must cover every case. This is an rl-level error, checked
@@ -57,13 +60,14 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
     transform::check_exhaustiveness(&ctx).map_err(to_compile_error)?;
 
     if options.verify
-        && let Err(message) = verify::verify_output(&code) {
-            return Err(CompileError {
-                message,
-                filename: options.filename.map(String::from),
-                line: 0,
-                col: 0,
-            });
-        }
+        && let Err(message) = verify::verify_output(&code)
+    {
+        return Err(CompileError {
+            message,
+            filename: options.filename.map(String::from),
+            line: 0,
+            col: 0,
+        });
+    }
     Ok(code)
 }
