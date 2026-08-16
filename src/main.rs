@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use rlc::{compile, Options};
+use rlc::{Options, compile};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -38,8 +38,9 @@ fn collect_rl_files(entry: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()>
         return Ok(());
     }
     if meta.is_dir() {
-        let mut children: Vec<PathBuf> =
-            fs::read_dir(entry)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        let mut children: Vec<PathBuf> = fs::read_dir(entry)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
         children.sort();
         for child in children {
             let meta = fs::metadata(&child)?;
@@ -148,7 +149,10 @@ fn main() -> ExitCode {
                 continue;
             }
         };
-        let options = Options { filename: Some(&filename), verify };
+        let options = Options {
+            filename: Some(&filename),
+            verify,
+        };
         let mut code = match compile(&source, &options) {
             Ok(c) => c,
             Err(e) => {
@@ -165,11 +169,12 @@ fn main() -> ExitCode {
             print!("{code}");
         } else if !check {
             if let Some(parent) = job.out_path.parent()
-                && let Err(e) = fs::create_dir_all(parent) {
-                    eprintln!("rlc: {}: {e}", parent.display());
-                    failed = true;
-                    continue;
-                }
+                && let Err(e) = fs::create_dir_all(parent)
+            {
+                eprintln!("rlc: {}: {e}", parent.display());
+                failed = true;
+                continue;
+            }
             if let Err(e) = fs::write(&job.out_path, &code) {
                 eprintln!("rlc: {}: {e}", job.out_path.display());
                 failed = true;
@@ -178,5 +183,9 @@ fn main() -> ExitCode {
             eprintln!("rlc: {} → {}", job.file.display(), job.out_path.display());
         }
     }
-    if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }

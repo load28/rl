@@ -112,18 +112,66 @@ pub(crate) fn check_exhaustiveness(ctx: &Ctx) -> Result<(), RlError> {
 // attempt, so ordinary TypeScript (e.g. a class method named `match`) is
 // left untouched.
 const RESERVED: &[&str] = &[
-    "async", "await", "break", "case", "catch", "class", "const", "continue",
-    "debugger", "default", "delete", "do", "else", "enum", "export",
-    "extends", "false", "finally", "for", "function", "if", "import", "in",
-    "instanceof", "let", "new", "null", "of", "return", "static", "super",
-    "switch", "this", "throw", "true", "try", "typeof", "var", "void",
-    "while", "with", "yield",
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "let",
+    "new",
+    "null",
+    "of",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
 ];
 
 // After one of these words, a `/` starts a regex literal, not division.
 const REGEX_PRECEDING_WORDS: &[&str] = &[
-    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
-    "throw", "case", "do", "else", "yield", "await",
+    "return",
+    "typeof",
+    "instanceof",
+    "in",
+    "of",
+    "new",
+    "delete",
+    "void",
+    "throw",
+    "case",
+    "do",
+    "else",
+    "yield",
+    "await",
 ];
 
 fn is_reserved(word: &str) -> bool {
@@ -192,14 +240,16 @@ pub(crate) fn transform(ctx: &Ctx, start: usize, end: usize) -> Result<String, R
         }
 
         // regex literals — copied verbatim (heuristic: by preceding token)
-        if c == b'/' && regex_allowed(prev_sig, prev_word)
-            && let Some(e) = scan_regex(src, i, end) {
-                out.extend_from_slice(&src[i..e]);
-                i = e;
-                prev_sig = b'/';
-                prev_word = "";
-                continue;
-            }
+        if c == b'/'
+            && regex_allowed(prev_sig, prev_word)
+            && let Some(e) = scan_regex(src, i, end)
+        {
+            out.extend_from_slice(&src[i..e]);
+            i = e;
+            prev_sig = b'/';
+            prev_word = "";
+            continue;
+        }
 
         if is_ident_start(c) {
             let j = ident_end(src, i, end);
@@ -222,23 +272,26 @@ pub(crate) fn transform(ctx: &Ctx, start: usize, end: usize) -> Result<String, R
                     }
                 }
                 if (word == "enum" || exported)
-                    && let Some((parsed_end, text)) = enums::parse_enum(ctx, kw_end, end, exported)? {
-                        out.extend_from_slice(text.as_bytes());
-                        i = parsed_end;
-                        prev_sig = b';';
-                        prev_word = "";
-                        continue;
-                    }
-            }
-
-            if !dotted && word == "match"
-                && let Some((parsed_end, text)) = matches::parse_match(ctx, j, end)? {
+                    && let Some((parsed_end, text)) = enums::parse_enum(ctx, kw_end, end, exported)?
+                {
                     out.extend_from_slice(text.as_bytes());
                     i = parsed_end;
-                    prev_sig = b')';
+                    prev_sig = b';';
                     prev_word = "";
                     continue;
                 }
+            }
+
+            if !dotted
+                && word == "match"
+                && let Some((parsed_end, text)) = matches::parse_match(ctx, j, end)?
+            {
+                out.extend_from_slice(text.as_bytes());
+                i = parsed_end;
+                prev_sig = b')';
+                prev_word = "";
+                continue;
+            }
 
             out.extend_from_slice(word.as_bytes());
             i = j;

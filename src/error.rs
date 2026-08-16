@@ -3,10 +3,13 @@ use std::fmt;
 /// A compile error with a position in the original `.rl` source.
 #[derive(Debug, Clone)]
 pub struct CompileError {
+    /// Human-readable description of the error.
     pub message: String,
+    /// The filename passed via [`crate::Options::filename`], if any.
     pub filename: Option<String>,
     /// 1-based line, 1-based column. (0, 0) means "no position".
     pub line: usize,
+    /// See [`CompileError::line`].
     pub col: usize,
 }
 
@@ -34,7 +37,10 @@ pub(crate) struct RlError {
 
 impl RlError {
     pub fn at(offset: usize, message: impl Into<String>) -> Self {
-        RlError { message: message.into(), offset: Some(offset) }
+        RlError {
+            message: message.into(),
+            offset: Some(offset),
+        }
     }
 }
 

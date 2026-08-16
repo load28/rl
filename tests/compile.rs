@@ -1,6 +1,6 @@
 //! Emitted-code and error-reporting tests for the rl → TypeScript transform.
 
-use rlc::{compile, Options};
+use rlc::{Options, compile};
 
 fn ok(src: &str) -> String {
     compile(src, &Options::default()).expect("compile failed")
@@ -93,7 +93,11 @@ enum Node {
 #[test]
 fn enum_invalid_field_type_is_rejected_by_swc_with_position() {
     let e = err("enum X {\n  A(f: number number),\n}\n");
-    assert!(e.message.contains("invalid type for field `f`"), "{}", e.message);
+    assert!(
+        e.message.contains("invalid type for field `f`"),
+        "{}",
+        e.message
+    );
     assert_eq!(e.line, 2);
     assert_eq!(e.col, 8); // points at the start of the type annotation
 }
@@ -102,7 +106,10 @@ fn enum_invalid_field_type_is_rejected_by_swc_with_position() {
 fn enum_invalid_field_type_passes_without_verify() {
     // Without swc validation the construct still parses; the broken type is
     // carried into the output (where tsc would catch it).
-    let opts = Options { verify: false, ..Options::default() };
+    let opts = Options {
+        verify: false,
+        ..Options::default()
+    };
     let out = compile("enum X {\n  A(f: number number),\n}\n", &opts).unwrap();
     assert!(out.contains("f: number number"));
 }
@@ -121,10 +128,14 @@ const area = match (shape) {
 };
 "#);
     assert!(out.contains("switch ($rl_m.kind)"));
-    assert!(out.contains("case \"Circle\": { const { radius } = $rl_m; return (3.14 * radius * radius); }"));
+    assert!(out.contains(
+        "case \"Circle\": { const { radius } = $rl_m; return (3.14 * radius * radius); }"
+    ));
     assert!(out.contains("case \"Point\": { return (0); }"));
     // The output is plain TypeScript: a runtime guard, no type-level tricks.
-    assert!(out.contains("default: { throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m)); }"));
+    assert!(out.contains(
+        "default: { throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m)); }"
+    ));
     assert!(!out.contains("never"));
 }
 
@@ -151,7 +162,9 @@ fn match_duplicate_arm_is_error() {
 
 #[test]
 fn match_await_arm_produces_awaited_async_iife() {
-    let out = ok("async function f(x: T) { return match (x) { A(url) => await fetch(url), _ => null }; }");
+    let out = ok(
+        "async function f(x: T) { return match (x) { A(url) => await fetch(url), _ => null }; }",
+    );
     assert!(out.contains("(await (async () => {"));
 }
 
@@ -200,14 +213,17 @@ fn error_position_reported_inside_template_interpolation() {
 
 #[test]
 fn non_exhaustive_match_is_an_rlc_error_with_position() {
-    let e = err(r#"enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
+    let e = err(
+        r#"enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
 const f = (s: Shape) => match (s) {
   Circle(radius) => radius,
   Point => 0,
 };
-"#);
+"#,
+    );
     assert!(
-        e.message.contains("match on enum Shape is not exhaustive: missing \"Rect\""),
+        e.message
+            .contains("match on enum Shape is not exhaustive: missing \"Rect\""),
         "{}",
         e.message
     );
@@ -279,19 +295,29 @@ const f = (d: Dir) => match (d) { North => 1 };
 #[test]
 fn verify_rejects_invalid_passthrough_typescript() {
     let e = err("const = 5;\n");
-    assert!(e.message.contains("generated TypeScript failed to parse"), "{}", e.message);
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
 }
 
 #[test]
 fn no_verify_passes_invalid_typescript_through() {
-    let opts = Options { verify: false, ..Options::default() };
+    let opts = Options {
+        verify: false,
+        ..Options::default()
+    };
     let out = compile("const = 5;\n", &opts).unwrap();
     assert_eq!(out, "const = 5;\n");
 }
 
 #[test]
 fn filename_appears_in_error_display() {
-    let opts = Options { filename: Some("demo.rl"), ..Options::default() };
+    let opts = Options {
+        filename: Some("demo.rl"),
+        ..Options::default()
+    };
     let e = compile("const r = match (x) { A => 1, A => 2 };", &opts).expect_err("expected error");
     assert_eq!(e.to_string(), "demo.rl:1:31: match: duplicate arm \"A\"");
 }

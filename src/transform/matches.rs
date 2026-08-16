@@ -5,7 +5,7 @@
 //! `String.prototype.match` calls, ...) is passed through untouched by
 //! returning `Ok(None)`.
 
-use super::{at, is_reserved, transform, Ctx, MatchCheck};
+use super::{Ctx, MatchCheck, at, is_reserved, transform};
 use crate::error::RlError;
 use crate::scanner::*;
 
@@ -24,7 +24,11 @@ pub(super) struct Arm {
     block: bool,
 }
 
-pub(super) fn parse_match(ctx: &Ctx, j: usize, end: usize) -> Result<Option<(usize, String)>, RlError> {
+pub(super) fn parse_match(
+    ctx: &Ctx,
+    j: usize,
+    end: usize,
+) -> Result<Option<(usize, String)>, RlError> {
     let src = ctx.bytes;
     let k = skip_ws_comments(src, j, end);
     if at(src, k, end) != Some(b'(') {
@@ -208,7 +212,10 @@ fn parse_bindings(ctx: &Ctx, start: usize, end: usize) -> Option<Vec<Binding>> {
             alias = Some(alias_name.to_string());
             i = skip_ws_comments(src, m, end);
         }
-        bindings.push(Binding { name: name.to_string(), alias });
+        bindings.push(Binding {
+            name: name.to_string(),
+            alias,
+        });
 
         if i >= end {
             break;
@@ -265,7 +272,9 @@ fn scan_expr_end(src: &[u8], mut i: usize, end: usize) -> usize {
 fn emit_match(ctx: &Ctx, scrut: (usize, usize), arms: &[Arm]) -> Result<String, RlError> {
     let scrutinee = transform(ctx, scrut.0, scrut.1)?;
     let is_async = contains_await(ctx.bytes, scrut.0, scrut.1)
-        || arms.iter().any(|a| contains_await(ctx.bytes, a.body.0, a.body.1));
+        || arms
+            .iter()
+            .any(|a| contains_await(ctx.bytes, a.body.0, a.body.1));
 
     let mut cases = String::new();
     let mut has_wildcard = false;
@@ -279,17 +288,18 @@ fn emit_match(ctx: &Ctx, scrut: (usize, usize), arms: &[Arm]) -> Result<String, 
 
         let mut bind = String::new();
         if let Some(bindings) = &arm.bindings
-            && !bindings.is_empty() {
-                let parts = bindings
-                    .iter()
-                    .map(|b| match &b.alias {
-                        Some(alias) => format!("{}: {}", b.name, alias),
-                        None => b.name.clone(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                bind = format!("const {{ {} }} = $rl_m; ", parts);
-            }
+            && !bindings.is_empty()
+        {
+            let parts = bindings
+                .iter()
+                .map(|b| match &b.alias {
+                    Some(alias) => format!("{}: {}", b.name, alias),
+                    None => b.name.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            bind = format!("const {{ {} }} = $rl_m; ", parts);
+        }
 
         if arm.block {
             let body = transform(ctx, arm.body.0, arm.body.1)?;
@@ -297,7 +307,10 @@ fn emit_match(ctx: &Ctx, scrut: (usize, usize), arms: &[Arm]) -> Result<String, 
             // `break` (not `return`) so an arm whose block always returns doesn't
             // widen the match's type with `undefined`; if the block doesn't return,
             // the arm evaluates to undefined, which the inferred type then reflects.
-            cases.push_str(&format!("    {}: {{ {}{}\n      break; }}\n", label, bind, body));
+            cases.push_str(&format!(
+                "    {}: {{ {}{}\n      break; }}\n",
+                label, bind, body
+            ));
         } else {
             let expr = transform(ctx, arm.body.0, arm.body.1)?;
             let expr = expr.trim();
@@ -307,7 +320,10 @@ fn emit_match(ctx: &Ctx, scrut: (usize, usize), arms: &[Arm]) -> Result<String, 
             } else {
                 ""
             };
-            cases.push_str(&format!("    {}: {{ {}return ({}{}); }}\n", label, bind, expr, nl));
+            cases.push_str(&format!(
+                "    {}: {{ {}return ({}{}); }}\n",
+                label, bind, expr, nl
+            ));
         }
     }
 

@@ -5,7 +5,7 @@
 //! `enum` (including `const enum` / `declare enum`, filtered before reaching
 //! this module) is plain TypeScript and passes through untouched.
 
-use super::{at, is_reserved, Ctx};
+use super::{Ctx, at, is_reserved};
 use crate::error::RlError;
 use crate::scanner::*;
 use crate::verify;
@@ -107,14 +107,13 @@ pub(super) fn parse_enum(
         cases.iter().map(|c| c.tag.clone()).collect(),
     );
 
-    Ok(Some((close_brace + 1, emit_enum(name, generics, &cases, exported))))
+    Ok(Some((
+        close_brace + 1,
+        emit_enum(name, generics, &cases, exported),
+    )))
 }
 
-fn parse_enum_cases(
-    ctx: &Ctx,
-    start: usize,
-    end: usize,
-) -> Result<Option<Vec<EnumCase>>, RlError> {
+fn parse_enum_cases(ctx: &Ctx, start: usize, end: usize) -> Result<Option<Vec<EnumCase>>, RlError> {
     let src = ctx.bytes;
     let mut cases = Vec::new();
     let mut i = start;
@@ -146,7 +145,11 @@ fn parse_enum_cases(
             };
             i = close + 1;
         }
-        cases.push(EnumCase { tag: tag.to_string(), tag_off, fields });
+        cases.push(EnumCase {
+            tag: tag.to_string(),
+            tag_off,
+            fields,
+        });
 
         i = skip_ws_comments(src, i, end);
         if i >= end {
@@ -196,7 +199,8 @@ fn parse_fields(ctx: &Ctx, start: usize, end: usize) -> Result<Option<Vec<Field>
         if ty.is_empty() {
             return Ok(None);
         }
-        let ty_off = ty_start + (ctx.src[ty_start..i].len() - ctx.src[ty_start..i].trim_start().len());
+        let ty_off =
+            ty_start + (ctx.src[ty_start..i].len() - ctx.src[ty_start..i].trim_start().len());
         fields.push(Field {
             name: name.to_string(),
             optional,
