@@ -317,6 +317,133 @@ fn or_pattern_double_pipe_is_not_rl_syntax() {
 }
 
 /* ------------------------------------------------------------------ */
+/* guards                                                              */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn guarded_match_compiles_to_if_chain() {
+    let out = ok(r#"
+enum Score { Graded(points: number), Pending }
+const grade = match (s) {
+  Graded(points) if points >= 90 => "A",
+  Graded(points) => "F",
+  Pending => "-",
+};
+"#);
+    assert!(!out.contains("switch ("), "{out}");
+    assert!(
+        out.contains(
+            "if ($rl_m.kind === \"Graded\") { const { points } = $rl_m; if ((points >= 90)) return (\"A\"); }"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "if ($rl_m.kind === \"Graded\") { const { points } = $rl_m; return (\"F\"); }"
+        ),
+        "{out}"
+    );
+    // the same fail-fast runtime guard as the switch emission
+    assert!(
+        out.contains("throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m));"),
+        "{out}"
+    );
+}
+
+#[test]
+fn guard_free_match_still_emits_switch() {
+    let out = ok("const r = match (x) { A => 1, _ => 0 };");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+    assert!(!out.contains("$rl_b"), "{out}");
+}
+
+#[test]
+fn repeated_guarded_tags_are_allowed() {
+    let out =
+        ok("const r = match (x) { A(v) if v > 9 => 2, A(v) if v > 0 => 1, A => 0, _ => -1 };");
+    assert_eq!(out.matches("$rl_m.kind === \"A\"").count(), 3, "{out}");
+}
+
+#[test]
+fn guard_after_unguarded_same_tag_is_duplicate() {
+    // the unguarded A already covers the tag, so the guarded arm is unreachable
+    let e = err("const r = match (x) { A => 1, A if c => 2, _ => 0 };");
+    assert!(e.message.contains("duplicate arm \"A\""), "{}", e.message);
+}
+
+#[test]
+fn guarded_arms_do_not_satisfy_exhaustiveness() {
+    let e = err(
+        "const f = (o: Option<number>) => match (o) { Some(value) if value > 0 => value, None => 0 };",
+    );
+    assert!(
+        e.message
+            .contains("match on built-in enum Option is not exhaustive: missing \"Some\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn fully_guarded_match_is_not_exhaustive() {
+    // guarded tags still identify the enum — they just cover nothing
+    let e =
+        err("const f = (o: Option<number>) => match (o) { Some(value) if value > 0 => value };");
+    assert!(e.message.contains("\"None\""), "{}", e.message);
+    assert!(e.message.contains("\"Some\""), "{}", e.message);
+}
+
+#[test]
+fn guard_with_or_pattern_emits_combined_condition() {
+    let out = ok("const r = match (x) { A(v) | B(v) if v > 0 => v, _ => 0 };");
+    assert!(
+        out.contains(
+            "if ($rl_m.kind === \"A\" || $rl_m.kind === \"B\") { const { v } = $rl_m; if ((v > 0)) return (v); }"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn guarded_block_body_uses_labeled_break() {
+    let out = ok("const r = match (x) { A(v) if v > 0 => { log(v); }, _ => 0 };");
+    assert!(out.contains("$rl_b: {"), "{out}");
+    assert!(out.contains("break $rl_b;"), "{out}");
+}
+
+#[test]
+fn await_in_guard_makes_match_async() {
+    let out = ok(
+        "async function f(x: T) { return match (x) { A(u) if await allowed(u) => 1, _ => 0 }; }",
+    );
+    assert!(out.contains("(await (async () => {"), "{out}");
+}
+
+#[test]
+fn wildcard_with_guard_is_not_rl_syntax() {
+    // `_ if ...` does not parse as an rl match; the (invalid-TS) text passes
+    // through and the output self-check reports it.
+    let e = err("const r = match (x) { A => 1, _ if c => 0 };");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn try_inside_guard_is_an_error() {
+    let e = err(
+        "const r = match (x) {\n  A(v) if run(() => { try g(); return true; }) => v,\n  _ => 0,\n};\n",
+    );
+    assert!(
+        e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
+}
+
+/* ------------------------------------------------------------------ */
 /* exhaustiveness — an rlc error, not a tsc error                      */
 /* ------------------------------------------------------------------ */
 

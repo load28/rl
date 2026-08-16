@@ -104,12 +104,15 @@ pub(crate) struct MatchExpr {
     pub arms: Vec<Arm>,
 }
 
-/// One `pattern => body` arm of a match.
+/// One `pattern (if guard)? => body` arm of a match.
 #[derive(Debug)]
 pub(crate) struct Arm {
     pub pattern: Pattern,
     /// Byte offset of the pattern, for error reporting.
     pub pattern_off: usize,
+    /// `Some` for a guarded arm (`pattern if <cond> => body`). The parser
+    /// never attaches a guard to a wildcard pattern (`_ if` fails the parse).
+    pub guard: Option<GuardExpr>,
     /// Raw span of the body (used for `await` detection).
     pub body_span: Span,
     /// The body, recursively parsed. For block bodies the span excludes the
@@ -117,6 +120,15 @@ pub(crate) struct Arm {
     pub body: Program,
     /// True for a `{ ... }` block body, false for an expression body.
     pub block: bool,
+}
+
+/// The `if <cond>` guard of a match arm.
+#[derive(Debug)]
+pub(crate) struct GuardExpr {
+    /// Raw span of the condition (used for `await` detection).
+    pub span: Span,
+    /// The condition, recursively parsed.
+    pub expr: Program,
 }
 
 /// A match arm's pattern.

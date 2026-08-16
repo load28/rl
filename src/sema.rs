@@ -15,7 +15,9 @@
 //! Checks performed:
 //! - `enum`: no duplicate case tags; with verification enabled, every field
 //!   type parses as a TypeScript type fragment (via [`crate::verify`]).
-//! - `match`: the wildcard `_` arm is last; no duplicate arm tags.
+//! - `match`: the wildcard `_` arm is last; no arm repeats a tag already
+//!   covered by an unguarded arm (guarded arms may share tags with each
+//!   other); or-pattern alternatives all bind the same (field, name) set.
 //! - `try`: only allowed in the top-level statement stream — inside a match
 //!   expression, a template interpolation, or another try's expression its
 //!   emitted `return` would not exit the enclosing function, so it is an
@@ -23,7 +25,8 @@
 //! - exhaustiveness: a wildcard-free match whose arm tags all belong to an
 //!   enum declared in this file — or to a built-in enum (`Option`, `Result`;
 //!   see [`crate::stdlib::BUILTIN_ENUMS`]) — must cover every case of that
-//!   enum. A file-local enum shadows a built-in of the same name. Matches
+//!   enum with unguarded arms (a guard may be false, so guarded arms
+//!   identify the enum but cover nothing). A file-local enum shadows a built-in of the same name. Matches
 //!   whose tags belong to no known enum (imported enums, hand-written
 //!   unions) are not checked — rlc has no type information for them.
 
@@ -38,8 +41,12 @@ use crate::verify;
 struct MatchCheck {
     /// Offset of the `match` keyword, for error reporting.
     offset: usize,
-    /// Non-wildcard arm tags.
+    /// Every non-wildcard arm tag, guarded or not — used to identify which
+    /// enum the match is over.
     tags: Vec<String>,
+    /// Tags of unguarded arms only — a guard may be false, so only these
+    /// count as covering a case.
+    covered: Vec<String>,
 }
 
 /// Checks a whole program; `verify` enables swc validation of field types.
@@ -147,7 +154,10 @@ impl Checker {
     }
 
     fn check_match(&mut self, expr: &MatchExpr) -> Result<(), RlError> {
-        let mut seen: Vec<&str> = Vec::new();
+        // Tags covered by an unguarded arm. Any later arm repeating one of
+        // these is unreachable (duplicate); a guarded arm covers nothing, so
+        // guarded arms may repeat each other's tags.
+        let mut covered: Vec<&str> = Vec::new();
         for (idx, arm) in expr.arms.iter().enumerate() {
             match &arm.pattern {
                 Pattern::Wildcard => {
@@ -163,14 +173,17 @@ impl Checker {
                     // alternative (switch fallthrough), so all alternatives
                     // must bind the exact same (field, name) set.
                     let first_set = binding_set(&alts[0].bindings);
+                    let mut arm_tags: Vec<&str> = Vec::new();
                     for alt in alts {
-                        if seen.contains(&alt.tag.as_str()) {
+                        if covered.contains(&alt.tag.as_str())
+                            || arm_tags.contains(&alt.tag.as_str())
+                        {
                             return Err(RlError::at(
                                 alt.tag_off,
                                 format!("match: duplicate arm \"{}\"", alt.tag),
                             ));
                         }
-                        seen.push(&alt.tag);
+                        arm_tags.push(&alt.tag);
                         if binding_set(&alt.bindings) != first_set {
                             return Err(RlError::at(
                                 alt.tag_off,
@@ -178,6 +191,9 @@ impl Checker {
                                     .to_string(),
                             ));
                         }
+                    }
+                    if arm.guard.is_none() {
+                        covered.append(&mut arm_tags);
                     }
                 }
             }
@@ -188,24 +204,31 @@ impl Checker {
             .iter()
             .any(|a| matches!(a.pattern, Pattern::Wildcard))
         {
-            self.match_checks.push(MatchCheck {
-                offset: expr.keyword_off,
-                tags: expr
-                    .arms
+            let arm_tags = |guarded_too: bool| {
+                expr.arms
                     .iter()
+                    .filter(|a| guarded_too || a.guard.is_none())
                     .flat_map(|a| match &a.pattern {
                         Pattern::Tags(alts) => {
                             alts.iter().map(|t| t.tag.clone()).collect::<Vec<_>>()
                         }
                         Pattern::Wildcard => Vec::new(),
                     })
-                    .collect(),
+                    .collect::<Vec<_>>()
+            };
+            self.match_checks.push(MatchCheck {
+                offset: expr.keyword_off,
+                tags: arm_tags(true),
+                covered: arm_tags(false),
             });
         }
 
-        // children, in source order: scrutinee first, then arm bodies
+        // children, in source order: scrutinee first, then guards and bodies
         self.visit_program(&expr.scrutinee, true)?;
         for arm in &expr.arms {
+            if let Some(guard) = &arm.guard {
+                self.visit_program(&guard.expr, true)?;
+            }
             self.visit_program(&arm.body, true)?;
         }
         Ok(())
@@ -232,9 +255,10 @@ impl Checker {
                 if !check.tags.iter().all(|t| cases.contains(&t.as_str())) {
                     continue; // not a candidate: some arm tag is not a case of this enum
                 }
+                // guarded arms identify the enum but do not cover its cases
                 let missing: Vec<&str> = cases
                     .iter()
-                    .filter(|c| !check.tags.iter().any(|t| t.as_str() == **c))
+                    .filter(|c| !check.covered.iter().any(|t| t.as_str() == **c))
                     .copied()
                     .collect();
                 if missing.is_empty() {

@@ -22,8 +22,8 @@
 | TASK-012 | try 문 — Rust 스타일 에러 전파 | 완료 | 2026-08-16 | 2026-08-16 | [TASK-012](./TASK-012-try-error-propagation.md) |
 | TASK-013 | 파이프라인 연산자 `\|>` 설계 제안 | 완료 | 2026-08-16 | 2026-08-16 | [TASK-013](./TASK-013-pipeline-operator-proposal.md) |
 | TASK-014 | match or-패턴 (`A \| B => ...`) | 완료 | 2026-08-16 | 2026-08-16 | [TASK-014](./TASK-014-match-or-patterns.md) |
-| TASK-015 | match 가드 (`패턴 if 조건 => ...`) | 진행 중 | 2026-08-16 | — | [TASK-015](./TASK-015-match-guards.md) |
-| TASK-016 | let-else 문 (`const Tag(x) = 식 else { ... };`) | 대기 | 2026-08-16 | — | [TASK-016](./TASK-016-let-else.md) |
+| TASK-015 | match 가드 (`패턴 if 조건 => ...`) | 완료 | 2026-08-16 | 2026-08-16 | [TASK-015](./TASK-015-match-guards.md) |
+| TASK-016 | let-else 문 (`const Tag(x) = 식 else { ... };`) | 진행 중 | 2026-08-16 | — | [TASK-016](./TASK-016-let-else.md) |
 
 ## 다음 태스크 번호
 

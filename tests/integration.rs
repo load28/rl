@@ -203,6 +203,44 @@ console.log(action(Key.Char("z")));
 }
 
 #[test]
+fn runtime_match_guards_fall_through_top_to_bottom() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Score {
+  Graded(points: number),
+  Pending,
+}
+
+function grade(s: Score): string {
+  return match (s) {
+    Graded(points) if points >= 90 => "A",
+    Graded(points) if points >= 80 => "B",
+    Graded(points) => "F",
+    Pending => "-",
+  };
+}
+
+function tally(s: Score): number {
+  return match (s) {
+    Graded(points) if points > 0 => {
+      const doubled = points * 2;
+      return doubled;
+    },
+    _ => 0,
+  };
+}
+
+console.log(grade(Score.Graded(95)));
+console.log(grade(Score.Graded(85)));
+console.log(grade(Score.Graded(10)));
+console.log(grade(Score.Pending));
+console.log(tally(Score.Graded(3)));
+console.log(tally(Score.Graded(-1)));
+"#);
+    assert_eq!(lines, vec!["A", "B", "F", "-", "6", "0"]);
+}
+
+#[test]
 fn runtime_generic_enum() {
     require_toolchain!();
     let lines = run(r#"

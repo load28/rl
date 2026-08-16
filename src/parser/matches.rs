@@ -7,7 +7,7 @@
 //! The scrutinee and every arm body are recursively parsed sub-programs.
 
 use super::{Parser, is_reserved};
-use crate::ast::{Arm, Binding, MatchExpr, Pattern, Span, TagPattern};
+use crate::ast::{Arm, Binding, GuardExpr, MatchExpr, Pattern, Span, TagPattern};
 use crate::scanner::*;
 
 /// `j` is just past the `match` keyword. On success returns the index just
@@ -89,6 +89,31 @@ fn parse_arms(p: &Parser, start: usize, end: usize) -> Option<Vec<Arm>> {
         }
 
         i = skip_ws_comments(src, i, end);
+
+        // optional guard: `if <cond>` between the pattern and `=>`. Only tag
+        // patterns take a guard — `_ if` never parses, so it passes through.
+        let mut guard = None;
+        if matches!(pattern, Pattern::Tags(_))
+            && i < end
+            && is_ident_start(src[i])
+            && ident_end(src, i, end) == i + 2
+            && &src[i..i + 2] == b"if"
+        {
+            let g_start = skip_ws_comments(src, i + 2, end);
+            let g_end = scan_guard_end(src, g_start, end)?;
+            if p.src[g_start..g_end].trim().is_empty() {
+                return None;
+            }
+            guard = Some(GuardExpr {
+                span: Span {
+                    start: g_start,
+                    end: g_end,
+                },
+                expr: p.parse_range(g_start, g_end),
+            });
+            i = g_end;
+        }
+
         if !(at(src, i, end) == Some(b'=') && at(src, i + 1, end) == Some(b'>')) {
             return None;
         }
@@ -120,6 +145,7 @@ fn parse_arms(p: &Parser, start: usize, end: usize) -> Option<Vec<Arm>> {
         arms.push(Arm {
             pattern,
             pattern_off,
+            guard,
             body_span,
             body: p.parse_range(body_span.start, body_span.end),
             block,
@@ -214,6 +240,55 @@ fn parse_bindings(p: &Parser, start: usize, end: usize) -> Option<Vec<Binding>> 
         return None;
     }
     Some(bindings)
+}
+
+/// Scans a guard condition until the arm's top-level `=>`, returning the
+/// index of its `=`. None on anything a guard cannot contain at its top
+/// level (`,`, `;`, a closer) — the candidate then passes through.
+fn scan_guard_end(src: &[u8], mut i: usize, end: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    while i < end {
+        let c = src[i];
+        if c == b'/' && at(src, i + 1, end) == Some(b'/') {
+            i = line_end(src, i, end);
+            continue;
+        }
+        if c == b'/' && at(src, i + 1, end) == Some(b'*') {
+            i = match find_subslice(src, b"*/", i + 2, end) {
+                Some(e) => e + 2,
+                None => end,
+            };
+            continue;
+        }
+        if c == b'"' || c == b'\'' {
+            i = scan_string(src, i, end);
+            continue;
+        }
+        if c == b'`' {
+            i = skip_template(src, i, end);
+            continue;
+        }
+        if c == b'=' && at(src, i + 1, end) == Some(b'>') {
+            if depth == 0 {
+                return Some(i);
+            }
+            i += 2;
+            continue;
+        }
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            b',' | b';' if depth == 0 => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Scans an arm's expression body until a top-level `,` or closing bracket.
