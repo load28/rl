@@ -1,0 +1,109 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "rl",
+  "scopeName": "source.rl",
+  "patterns": [
+    { "include": "#rl-enum" },
+    { "include": "#rl-match" },
+    { "include": "source.ts" }
+  ],
+  "repository": {
+    "rl-enum": {
+      "begin": "(?<![.$\\w])(?:(export)\\s+)?(enum)\\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.export.rl" },
+        "2": { "name": "storage.type.enum.rl" },
+        "3": { "name": "entity.name.type.enum.rl" }
+      },
+      "end": "(?<=\\})|(?=[^\\s<{])",
+      "patterns": [
+        { "include": "#enum-type-parameters" },
+        { "include": "#enum-body" }
+      ]
+    },
+    "enum-type-parameters": {
+      "name": "meta.type.parameters.rl",
+      "begin": "<",
+      "end": ">",
+      "beginCaptures": { "0": { "name": "punctuation.definition.typeparameters.begin.rl" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.typeparameters.end.rl" } },
+      "patterns": [
+        { "include": "#enum-type-parameters" },
+        { "include": "source.ts#type" }
+      ]
+    },
+    "enum-body": {
+      "name": "meta.enum.body.rl",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.definition.block.rl" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.block.rl" } },
+      "patterns": [
+        { "include": "source.ts#comment" },
+        {
+          "name": "meta.enum.case.payload.rl",
+          "begin": "([A-Za-z_$][A-Za-z0-9_$]*)\\s*(\\()",
+          "beginCaptures": {
+            "1": { "name": "variable.other.enummember.rl" },
+            "2": { "name": "punctuation.definition.parameters.begin.rl" }
+          },
+          "end": "\\)",
+          "endCaptures": { "0": { "name": "punctuation.definition.parameters.end.rl" } },
+          "patterns": [
+            { "include": "source.ts#comment" },
+            {
+              "match": "([A-Za-z_$][A-Za-z0-9_$]*)\\s*(\\??)\\s*(:)",
+              "captures": {
+                "1": { "name": "variable.other.property.rl" },
+                "2": { "name": "keyword.operator.optional.rl" },
+                "3": { "name": "keyword.operator.type.annotation.rl" }
+              }
+            },
+            { "include": "source.ts#type" },
+            { "match": ",", "name": "punctuation.separator.comma.rl" }
+          ]
+        },
+        { "match": "[A-Za-z_$][A-Za-z0-9_$]*", "name": "variable.other.enummember.rl" },
+        { "match": ",", "name": "punctuation.separator.comma.rl" }
+      ]
+    },
+    "rl-match": {
+      "begin": "(?<![.$\\w])(match)\\s*(?=\\()",
+      "beginCaptures": { "1": { "name": "keyword.control.match.rl" } },
+      "end": "(?<=\\})|(?=[^\\s({])",
+      "patterns": [
+        { "include": "#match-scrutinee" },
+        { "include": "#match-body" }
+      ]
+    },
+    "match-scrutinee": {
+      "name": "meta.match.scrutinee.rl",
+      "begin": "\\(",
+      "end": "\\)",
+      "beginCaptures": { "0": { "name": "punctuation.definition.expression.begin.rl" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.expression.end.rl" } },
+      "patterns": [{ "include": "$self" }]
+    },
+    "match-body": {
+      "name": "meta.match.body.rl",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.definition.block.rl" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.block.rl" } },
+      "patterns": [
+        { "include": "source.ts#comment" },
+        {
+          "match": "(?:(?<=\\{)|(?<=,)|^)\\s*(_)\\s*(?==>)",
+          "captures": { "1": { "name": "keyword.control.wildcard.rl" } }
+        },
+        {
+          "match": "(?:(?<=\\{)|(?<=,)|(?<=\\|)|^)\\s*([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\(|\\||=>|if\\b)",
+          "captures": { "1": { "name": "variable.other.enummember.rl" } }
+        },
+        { "match": "=>", "name": "storage.type.function.arrow.rl" },
+        { "match": "\\|(?!\\|)", "name": "keyword.operator.or-pattern.rl" },
+        { "include": "$self" }
+      ]
+    }
+  }
+}
