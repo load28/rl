@@ -1,0 +1,11 @@
+[package]
+name = "rlc"
+version = "0.2.0"
+edition = "2024"
+description = "Compiler for rl — a tiny TypeScript preprocessor adding Rust-style match expressions and variant types on top of 100%-compatible TypeScript."
+license = "MIT"
+
+[dependencies]
+swc_common = "26.0.0"
+swc_ecma_ast = "29.0.0"
+swc_ecma_parser = "45.0.0"

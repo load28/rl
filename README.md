@@ -1,6 +1,6 @@
 # rl
 
-**TypeScript로 컴파일되는 초경량 전처리 언어.**
+**TypeScript로 컴파일되는 초경량 전처리 언어.** 컴파일러는 Rust로 작성되었습니다.
 [Civet](https://civet.dev)처럼 TypeScript 위에 얹히는 언어이며, 딱 두 가지 기능만 추가합니다:
 Rust 스타일의 **`variant`** (태그드 유니언) 선언과 **`match`** 표현식.
 
@@ -12,18 +12,22 @@ Rust 스타일의 **`variant`** (태그드 유니언) 선언과 **`match`** 표�
 ## 사용법
 
 ```sh
-node bin/rlc.js file.rl        # file.ts 생성
-node bin/rlc.js src/           # src/ 아래 모든 .rl 재귀 컴파일
-node bin/rlc.js -p file.rl     # stdout으로 출력
-node bin/rlc.js -o out/ src/   # 출력 디렉터리 지정
-node bin/rlc.js --check src/   # 컴파일만 하고 쓰지 않음 (문법 검사)
+cargo install --path .   # rlc 설치 (또는 cargo build --release 후 target/release/rlc)
+
+rlc file.rl              # file.ts 생성
+rlc src/                 # src/ 아래 모든 .rl 재귀 컴파일
+rlc -p file.rl           # stdout으로 출력
+rlc -o out/ src/         # 출력 디렉터리 지정
+rlc --check src/         # 컴파일만 하고 쓰지 않음 (문법 검사)
+rlc --no-verify file.rl  # swc 검증 생략
 ```
 
-라이브러리로도 쓸 수 있습니다:
+Rust 라이브러리로도 쓸 수 있습니다:
 
-```js
-import { compile } from "rl-lang";
-const { code } = compile(rlSource, { filename: "shapes.rl" });
+```rust
+use rlc::{compile, Options};
+
+let code = compile(rl_source, &Options { filename: Some("shapes.rl"), verify: true })?;
 ```
 
 ## `variant` — 태그드 유니언 선언
@@ -115,10 +119,23 @@ match (expr) {
 
 ## TypeScript 호환성이 지켜지는 방식
 
-컴파일러는 전체 파싱을 하지 않습니다. 문자열·템플릿·주석·정규식을 인식하며 소스를
-스캔하다가 `variant` / `match` 키워드 후보를 만나면 **해당 구문 전체가 완전하게
-파싱될 때만** 변환합니다. 파싱이 하나라도 어긋나면 원문 그대로 통과시키므로,
-`match`라는 이름의 클래스 메서드, `variant`라는 변수 등 기존 TS 코드는 안전합니다.
+rl 구문은 유효한 TS가 아니므로 기존 TS 파서에 통째로 태울 수 없습니다. 컴파일러는
+문자열·템플릿·주석·정규식을 인식하며 소스를 스캔하다가 `variant` / `match` 키워드
+후보를 만나면 **해당 구문 전체가 완전하게 파싱될 때만** 변환합니다. 파싱이 하나라도
+어긋나면 원문 그대로 통과시키므로, `match`라는 이름의 클래스 메서드, `variant`라는
+변수 등 기존 TS 코드는 안전합니다.
+
+여기에 [swc](https://swc.rs)의 TypeScript 파서가 두 곳에서 검증을 맡습니다
+(자세한 아키텍처는 `docs/design/rust-rewrite.md`):
+
+- **조각 검증** — `variant` 필드의 타입 표기를 파싱해, 잘못된 타입을 rl 컴파일
+  시점에 정확한 `파일:행:열`과 함께 거부합니다.
+- **출력 검증** — 생성된 TS 전체를 파싱하는 자가 검사. `--no-verify`로 끌 수
+  있습니다 (swc가 아직 모르는 최신 TS 문법을 쓰는 코드를 위한 탈출구).
+
+모든 컴파일 에러(중복 케이스, 와일드카드 위치, 잘못된 필드 타입 등)는
+`파일:행:열` 위치와 함께 보고됩니다 — 템플릿 리터럴 내부처럼 중첩된 위치도
+정확합니다.
 
 ## 제한사항 (v0.1)
 
@@ -134,7 +151,12 @@ match (expr) {
 ## 개발
 
 ```sh
-npm test   # node --test; tsc가 있으면 타입/런타임 테스트까지 수행
+cargo test   # tsc/node가 있으면 타입체크·소진성·런타임 통합 테스트까지 수행
 ```
+
+- `src/scanner.rs` — 바이트 단위 저수준 스캔
+- `src/transform.rs` — 메인 변환 + variant/match 파싱·방출
+- `src/verify.rs` — swc 기반 검증
+- `docs/design/rust-rewrite.md` — Rust 재작성 설계 문서 (브레인스토밍 결과)
 
 `examples/shapes.rl` → `examples/shapes.ts`가 전체 동작 예시입니다.

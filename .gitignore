@@ -1,3 +1,8 @@
 node_modules/
 *.tsbuildinfo
 *.log
+
+
+# Added by cargo
+
+/target
