@@ -155,15 +155,6 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 문법·판별 규칙·방출 코드의 정확한 정의는
 [언어 레퍼런스](./docs/reference/language.md)를 참고하세요.
 
-## 동작 원리
-
-rl 구문은 유효한 TS가 아니므로 기존 TS 파서에 통째로 태울 수 없습니다.
-컴파일러는 문자열·템플릿·주석·정규식을 인식하며 소스를 스캔하다가
-`enum` / `match` 키워드 후보를 만나면 **해당 구문 전체가 완전하게 파싱될
-때만** 변환합니다. 파싱이 조금이라도 어긋나면 원문 그대로 통과시키므로,
-`match`라는 이름의 클래스 메서드나 TS의 모든 enum 형태 등 기존 TS 코드는
-안전합니다. 자세한 아키텍처는 [`docs/design/`](./docs/design/)을 참고하세요.
-
 ## 문서
 
 | 문서 | 내용 |
