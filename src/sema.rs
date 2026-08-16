@@ -22,6 +22,10 @@
 //!   expression, a template interpolation, or another try's expression its
 //!   emitted `return` would not exit the enclosing function, so it is an
 //!   error there.
+//! - let-else: same placement rule as `try` (it emits statements into the
+//!   enclosing scope), plus the `else` block must end with a diverging
+//!   statement (`return`/`throw`/`break`/`continue`) — otherwise the
+//!   destructuring after the block would run with the case unproven.
 //! - exhaustiveness: a wildcard-free match whose arm tags all belong to an
 //!   enum declared in this file — or to a built-in enum (`Option`, `Result`;
 //!   see [`crate::stdlib::BUILTIN_ENUMS`]) — must cover every case of that
@@ -92,6 +96,7 @@ impl Checker {
                 Segment::Enum(decl) => self.check_enum(decl)?,
                 Segment::Match(expr) => self.check_match(expr)?,
                 Segment::Try(stmt) => self.check_try(stmt, nested)?,
+                Segment::LetElse(stmt) => self.check_let_else(stmt, nested)?,
                 Segment::Template(template) => {
                     for chunk in &template.chunks {
                         if let TemplateChunk::Interp(interp) = chunk {
@@ -114,6 +119,27 @@ impl Checker {
             ));
         }
         self.visit_program(&stmt.expr, true)
+    }
+
+    fn check_let_else(&mut self, stmt: &LetElseStmt, nested: bool) -> Result<(), RlError> {
+        if nested {
+            return Err(RlError::at(
+                stmt.keyword_off,
+                "let-else cannot be used inside a match expression, a template interpolation, \
+                 or a `try` — it compiles to statements in the enclosing function"
+                    .to_string(),
+            ));
+        }
+        if !stmt.diverges {
+            return Err(RlError::at(
+                stmt.else_off,
+                "let-else: the `else` block must end with a `return`, `throw`, `break`, or \
+                 `continue` statement"
+                    .to_string(),
+            ));
+        }
+        self.visit_program(&stmt.expr, true)?;
+        self.visit_program(&stmt.else_body, true)
     }
 
     fn check_enum(&mut self, decl: &EnumDecl) -> Result<(), RlError> {

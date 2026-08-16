@@ -503,6 +503,83 @@ console.log(JSON.stringify(checked("4")));
     );
 }
 
+#[test]
+fn runtime_let_else_narrows_and_diverges() {
+    require_toolchain!();
+    // tsc --strict must accept the emitted destructuring: the diverging
+    // else block narrows the temporary to the matched case.
+    let dir = tmpdir();
+    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    let code = compile(
+        r#"
+import { Option, Result } from "./rl.js";
+
+function findUser(id: number): Option<string> {
+  return id === 1 ? Option.Some("amy") : Option.None;
+}
+
+function greet(id: number): string {
+  const Some(value: user) = findUser(id) else { return "who?"; };
+  return "hello, " + user;
+}
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("bad") : Result.Ok(n);
+}
+
+function double(raw: string): number {
+  const Ok(value) = parseNum(raw) else { return -1; };
+  return value * 2;
+}
+
+console.log(greet(1));
+console.log(greet(2));
+console.log(double("21"));
+console.log(double("x"));
+"#,
+        &Options::default(),
+    )
+    .expect("rl compile failed");
+    fs::write(dir.join("main.ts"), &code).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg(dir.join("rl.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args([
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+        ])
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---compiled---\n{code}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines, vec!["hello, amy", "who?", "42", "-1"]);
+}
+
 /* ------------------------------------------------------------------ */
 /* the generated output is plain TypeScript: tsc accepts it            */
 /* ------------------------------------------------------------------ */

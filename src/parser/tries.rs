@@ -118,8 +118,9 @@ fn is_expr_start(c: u8) -> bool {
 /// scan means we ran past the statement (e.g. a missing `;`) or into a
 /// declaration — abort so the text passes through. Expression-capable
 /// keywords (`new`, `typeof`, `await`, `function`, `class`, `import(...)`,
-/// ...) are deliberately absent.
-const STMT_ONLY_WORDS: &[&str] = &[
+/// ...) are deliberately absent. Shared with the let-else expression
+/// scanner (which treats `else` as its terminator instead).
+pub(super) const STMT_ONLY_WORDS: &[&str] = &[
     "break", "case", "catch", "const", "continue", "debugger", "default", "do", "else", "enum",
     "export", "finally", "for", "if", "let", "return", "switch", "throw", "try", "var", "while",
     "with",

@@ -37,8 +37,39 @@ pub(crate) enum Segment {
     Match(MatchExpr),
     /// An rl `try` statement (Rust-style error propagation).
     Try(TryStmt),
+    /// An rl let-else statement (Rust-style refutable binding).
+    LetElse(LetElseStmt),
     /// A template literal; its interpolations are recursively parsed.
     Template(Template),
+}
+
+/// A structurally parsed rl let-else statement:
+/// `const|let|var Tag(bindings...) = <expr> else { ... };`. Like
+/// [`TryStmt`] it compiles to statements in the enclosing function scope:
+/// evaluate once, run the (diverging) `else` block unless the value's
+/// `kind` is the pattern's tag, then destructure the bindings.
+#[derive(Debug)]
+pub(crate) struct LetElseStmt {
+    /// Byte offset of the declaration keyword, for error reporting.
+    pub keyword_off: usize,
+    /// The declaration keyword: `const`, `let`, or `var`.
+    pub kw: String,
+    /// The pattern's case tag.
+    pub tag: String,
+    /// The pattern's bindings. Possibly empty — the parens are mandatory
+    /// (`const Tag() = ... else ...;` checks the case without binding).
+    pub bindings: Vec<Binding>,
+    /// The expression after `=`, recursively parsed.
+    pub expr: Program,
+    /// The `else { ... }` block body, recursively parsed (braces excluded).
+    pub else_body: Program,
+    /// Byte offset of the `else` keyword, for error reporting.
+    pub else_off: usize,
+    /// Whether the else block's last top-level statement starts with
+    /// `return`, `throw`, `break`, or `continue` — the syntactic stand-in
+    /// for Rust's "the else block must diverge" rule. Computed by the
+    /// parser (which stays infallible), enforced by sema.
+    pub diverges: bool,
 }
 
 /// A structurally parsed rl `try` statement: `try <expr>;` or

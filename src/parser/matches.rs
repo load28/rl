@@ -191,8 +191,9 @@ fn parse_tag_pattern(p: &Parser, i: usize, end: usize) -> Option<(usize, TagPatt
     ))
 }
 
-/// Parses `a, b: alias, ...` between the parens of a pattern. None on failure.
-fn parse_bindings(p: &Parser, start: usize, end: usize) -> Option<Vec<Binding>> {
+/// Parses `a, b: alias, ...` between the parens of a pattern (shared with
+/// the let-else pattern). None on failure.
+pub(super) fn parse_bindings(p: &Parser, start: usize, end: usize) -> Option<Vec<Binding>> {
     let src = p.bytes;
     let mut bindings = Vec::new();
     let mut i = start;

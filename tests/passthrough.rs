@@ -223,3 +223,22 @@ fn object_property_and_method_named_try() {
         "const machine = { try(x: number) { return x + 1; } };\nconst spec = { try: 1 };\nmachine.try(spec.try);\n",
     );
 }
+
+#[test]
+fn plain_if_else_statement() {
+    assert_passthrough(
+        "function f(a: boolean): number {\n  if (a) {\n    return 1;\n  } else {\n    return 2;\n  }\n}\n",
+    );
+}
+
+#[test]
+fn function_named_some_called_after_const() {
+    // `const Some = ...` has no pattern parens, so it is never a let-else.
+    assert_passthrough("const Some = (x: number) => x + 1;\nconst y = Some(2);\n");
+}
+
+#[test]
+fn object_method_named_const() {
+    // A method *named* `const` is followed by `(`, not `<ident>(`.
+    assert_passthrough("const machine = { const(x: number) { return x; } };\nmachine.const(1);\n");
+}

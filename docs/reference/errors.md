@@ -115,6 +115,36 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 
 ---
 
+## let-else 에러
+
+### `let-else cannot be used inside a match expression, a template interpolation, or a `try` — it compiles to statements in the enclosing function`
+
+- **원인**: let-else 문이 match 표현식(스크루티니·가드·암 본문), 템플릿 보간,
+  또는 try의 식 내부에서 사용됨. try와 같은 위치 제약입니다.
+- **위치**: 해당 문의 선언 키워드(`const`/`let`/`var`).
+- **해결**: 로직을 별도 함수로 추출합니다
+  ([language.md §6.4](./language.md#64-사용-위치와-발산-제약)).
+
+### ``let-else: the `else` block must end with a `return`, `throw`, `break`, or `continue` statement``
+
+- **원인**: `else` 블록이 발산하지 않음. 블록이 발산하지 않으면 블록 뒤의
+  구조 분해가 케이스 미보장 상태로 실행됩니다. 검사는 구문 수준이므로
+  마지막 최상위 문장이 네 키워드 중 하나로 시작해야 합니다 —
+  `if (c) return a; else return b;`로 끝나는 블록도 거부됩니다.
+- **위치**: `else` 키워드.
+- **해결**: 블록의 마지막 문장을 `return`/`throw`/`break`/`continue`로
+  끝나게 재구성합니다.
+
+```rl
+function f(): number {
+  const Some(v) = find() else { log(); };
+  return v;
+}
+// rlc: file.rl:2:26: let-else: the `else` block must end with a `return`, ...
+```
+
+---
+
 ## 출력 검증 에러
 
 ### `generated TypeScript failed to parse: <상세> (line <행>, col <열> of the generated output). This is either invalid TypeScript passed through from the source or an rlc bug; use --no-verify to bypass.`

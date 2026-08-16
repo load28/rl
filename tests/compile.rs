@@ -673,6 +673,134 @@ fn try_inside_template_interpolation_is_an_error() {
 }
 
 /* ------------------------------------------------------------------ */
+/* let-else — Rust-style refutable binding                             */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn let_else_emits_guard_and_bind() {
+    let out = ok(
+        "function f(): number {\n  const Some(value) = find() else { return 0; };\n  return value;\n}\n",
+    );
+    assert!(
+        out.contains(
+            "const $rl_t0 = (find()); if ($rl_t0.kind !== \"Some\") { return 0; } const { value } = $rl_t0;"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn let_else_binding_alias_and_keyword() {
+    let out = ok(
+        "function f(): string {\n  let Some(value: user) = find() else { throw new Error(\"none\"); };\n  return user;\n}\n",
+    );
+    assert!(out.contains("let { value: user } = $rl_t0;"), "{out}");
+}
+
+#[test]
+fn let_else_empty_bindings_checks_only() {
+    let out =
+        ok("function f(): number {\n  const Ok() = check() else { return -1; };\n  return 1;\n}\n");
+    assert!(
+        out.contains("if ($rl_t0.kind !== \"Ok\") { return -1; }"),
+        "{out}"
+    );
+    assert!(!out.contains("} = $rl_t0;"), "{out}");
+}
+
+#[test]
+fn let_else_shares_try_temp_counter() {
+    let out = ok(
+        "function f(): X {\n  const n = try g();\n  const Some(v) = h(n) else { return fallback(); };\n  return wrap(v);\n}\n",
+    );
+    assert!(out.contains("if ($rl_t0.kind !== \"Ok\")"), "{out}");
+    assert!(
+        out.contains("const $rl_t1 = (h(n)); if ($rl_t1.kind !== \"Some\")"),
+        "{out}"
+    );
+}
+
+#[test]
+fn let_else_diverges_via_throw_and_continue() {
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { throw new Error(\"no\"); };\n  return v;\n}\n",
+    );
+    ok(
+        "function f(): number {\n  for (const x of xs) {\n    const Some(v) = find(x) else { continue; };\n    use(v);\n  }\n  return 0;\n}\n",
+    );
+}
+
+#[test]
+fn let_else_expression_may_be_a_match() {
+    let out = ok(
+        "function f(): number {\n  const Some(v) = match (x) { A => some(1), _ => none() } else { return 0; };\n  return v;\n}\n",
+    );
+    assert!(out.contains("if ($rl_t0.kind !== \"Some\")"), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn let_else_non_diverging_else_is_error() {
+    let e =
+        err("function f(): number {\n  const Some(v) = find() else { log(); };\n  return v;\n}\n");
+    assert!(
+        e.message.contains("must end with a `return`"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 26)); // points at the `else` keyword
+}
+
+#[test]
+fn let_else_empty_else_block_is_error() {
+    let e = err("function f(): number {\n  const Some(v) = find() else { };\n  return v;\n}\n");
+    assert!(
+        e.message.contains("must end with a `return`"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn let_else_inside_match_arm_is_error() {
+    let e = err(
+        "const x = match (r) {\n  Ok(value) => { const Some(v) = h(value) else { return 0; }; return v; },\n  _ => 0,\n};\n",
+    );
+    assert!(
+        e.message.contains("let-else cannot be used inside"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn let_else_without_semicolon_is_not_recognized() {
+    // No terminating `;` → not rl syntax; the (invalid-TS) source passes
+    // through and the output self-check reports it.
+    let e = err(
+        "function f(): number {\n  const Some(v) = find() else { return 0; }\n  return v;\n}\n",
+    );
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn let_else_requires_parens_on_the_pattern() {
+    // `const Point = e else { ... };` (no parens) is not rl syntax — the
+    // invalid-TS text passes through to the output self-check.
+    let e =
+        err("function f(): number {\n  const Point = find() else { return 0; };\n  return 1;\n}\n");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+/* ------------------------------------------------------------------ */
 /* swc output verification                                             */
 /* ------------------------------------------------------------------ */
 
