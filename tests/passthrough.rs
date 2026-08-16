@@ -188,6 +188,13 @@ const r: Result<number, string> = Result.Err("nope");
 }
 
 #[test]
+fn bitwise_or_arguments_untouched() {
+    // `|` in ordinary expression positions (including a method named
+    // `match`) never becomes an or-pattern.
+    assert_passthrough("const m = matcher.match(a | b);\nconst flags = READ | WRITE;\n");
+}
+
+#[test]
 fn ts_try_catch_finally_block() {
     assert_passthrough(
         "try {\n  risky();\n} catch (e) {\n  handle(e);\n} finally {\n  done();\n}\n",

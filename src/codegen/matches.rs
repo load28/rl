@@ -24,14 +24,19 @@ pub(super) fn emit_match(e: &Emitter, expr: &MatchExpr) -> String {
                 has_wildcard = true;
                 "default".to_string()
             }
-            Pattern::Tag { tag, .. } => format!("case \"{}\"", tag),
+            // or-pattern alternatives share one body via switch fallthrough
+            Pattern::Tags(alts) => alts
+                .iter()
+                .map(|t| format!("case \"{}\"", t.tag))
+                .collect::<Vec<_>>()
+                .join(": "),
         };
 
         let mut bind = String::new();
-        if let Pattern::Tag {
-            bindings: Some(bindings),
-            ..
-        } = &arm.pattern
+        // sema guarantees every alternative binds the same set, so the
+        // shared destructuring can come from the first alternative
+        if let Pattern::Tags(alts) = &arm.pattern
+            && let Some(bindings) = &alts[0].bindings
             && !bindings.is_empty()
         {
             let parts = bindings

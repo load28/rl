@@ -176,6 +176,33 @@ console.log(describe(Msg.Quit));
 }
 
 #[test]
+fn runtime_or_patterns_share_one_body() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Key {
+  Enter(),
+  Escape,
+  Tab,
+  Char(ch: string),
+}
+
+function action(k: Key): string {
+  return match (k) {
+    Enter => "submit",
+    Escape | Tab => "cancel",
+    Char(ch) => "type:" + ch,
+  };
+}
+
+console.log(action(Key.Enter()));
+console.log(action(Key.Escape));
+console.log(action(Key.Tab));
+console.log(action(Key.Char("z")));
+"#);
+    assert_eq!(lines, vec!["submit", "cancel", "cancel", "type:z"]);
+}
+
+#[test]
 fn runtime_generic_enum() {
     require_toolchain!();
     let lines = run(r#"

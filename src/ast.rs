@@ -124,12 +124,22 @@ pub(crate) struct Arm {
 pub(crate) enum Pattern {
     /// The final `_` arm.
     Wildcard,
-    /// `Tag` or `Tag(bindings...)`. `bindings` is `None` when there are no
-    /// parens at all.
-    Tag {
-        tag: String,
-        bindings: Option<Vec<Binding>>,
-    },
+    /// One or more `|`-separated tag alternatives: `Tag`, `Tag(bindings...)`,
+    /// `A | B(x)`. The parser guarantees the list is non-empty; a plain tag
+    /// pattern is a single-element list. The semantic phase guarantees every
+    /// alternative binds the same (field, name) set, so codegen can emit one
+    /// shared destructuring from the first alternative.
+    Tags(Vec<TagPattern>),
+}
+
+/// One tag alternative inside a pattern.
+#[derive(Debug)]
+pub(crate) struct TagPattern {
+    pub tag: String,
+    /// Byte offset of the tag, for error reporting.
+    pub tag_off: usize,
+    /// `None` = no parens at all; `Some(vec)` = a (possibly empty) binding list.
+    pub bindings: Option<Vec<Binding>>,
 }
 
 /// One binding inside a pattern's parens: `name` or `name: alias`.

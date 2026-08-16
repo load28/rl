@@ -208,6 +208,115 @@ fn error_position_reported_inside_template_interpolation() {
 }
 
 /* ------------------------------------------------------------------ */
+/* or-patterns                                                         */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn or_pattern_emits_fallthrough_cases() {
+    let out = ok(r#"
+enum Key { Enter(), Escape, Tab, Char(ch: string) }
+const action = match (key) {
+  Enter => "submit",
+  Escape | Tab => "cancel",
+  Char(ch) => "type:" + ch,
+};
+"#);
+    assert!(
+        out.contains("case \"Escape\": case \"Tab\": { return (\"cancel\"); }"),
+        "{out}"
+    );
+}
+
+#[test]
+fn or_pattern_with_identical_bindings_shares_destructuring() {
+    let out = ok("const r = match (x) { A(v) | B(v) => v, _ => 0 };");
+    assert!(
+        out.contains("case \"A\": case \"B\": { const { v } = $rl_m; return (v); }"),
+        "{out}"
+    );
+}
+
+#[test]
+fn or_pattern_binding_order_is_insensitive() {
+    let out = ok("const r = match (p) { A(x, y) | B(y, x) => x + y, _ => 0 };");
+    assert!(
+        out.contains("case \"A\": case \"B\": { const { x, y } = $rl_m;"),
+        "{out}"
+    );
+}
+
+#[test]
+fn or_pattern_counts_for_exhaustiveness() {
+    ok(r#"
+enum Dir { North(), South, East, West }
+const f = (d: Dir) => match (d) {
+  North | South => 1,
+  East | West => 2,
+};
+"#);
+    let e = err(r#"
+enum Dir { North(), South, East, West }
+const f = (d: Dir) => match (d) {
+  North | South => 1,
+  East => 2,
+};
+"#);
+    assert!(e.message.contains("missing \"West\""), "{}", e.message);
+}
+
+#[test]
+fn or_pattern_duplicate_tag_is_error() {
+    // duplicate inside one arm
+    let e = err("const r = match (x) { A | A => 1, _ => 0 };");
+    assert!(e.message.contains("duplicate arm \"A\""), "{}", e.message);
+    // duplicate across arms
+    let e = err("const r = match (x) { A | B => 1, B => 2, _ => 0 };");
+    assert!(e.message.contains("duplicate arm \"B\""), "{}", e.message);
+}
+
+#[test]
+fn or_pattern_binding_mismatch_is_error() {
+    let e = err("const r = match (x) { A(v) | B(w) => v, _ => 0 };");
+    assert!(
+        e.message
+            .contains("or-pattern alternatives must bind the same fields"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (1, 30)); // points at the offending alternative
+
+    // an alias changes the bound name, so it must match too
+    let e = err("const r = match (x) { A(v) | B(v: w) => w, _ => 0 };");
+    assert!(
+        e.message
+            .contains("or-pattern alternatives must bind the same fields"),
+        "{}",
+        e.message
+    );
+
+    // a binding-free alternative cannot pair with a binding one
+    let e = err("const r = match (x) { A | B(v) => 1, _ => 0 };");
+    assert!(
+        e.message
+            .contains("or-pattern alternatives must bind the same fields"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn or_pattern_double_pipe_is_not_rl_syntax() {
+    // `A || B` is not an or-pattern; the candidate fails to parse and the
+    // (invalid-TS) text passes through to the output self-check.
+    let e = err("const r = match (x) { A || B => 1 };");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+/* ------------------------------------------------------------------ */
 /* exhaustiveness — an rlc error, not a tsc error                      */
 /* ------------------------------------------------------------------ */
 

@@ -61,6 +61,19 @@ struct Checker {
     match_checks: Vec<MatchCheck>,
 }
 
+/// The (field, bound name) pairs a tag alternative destructures, sorted so
+/// alternatives compare as sets. No parens and empty parens both bind nothing.
+fn binding_set(bindings: &Option<Vec<Binding>>) -> Vec<(&str, &str)> {
+    let mut set: Vec<(&str, &str)> = bindings
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|b| (b.name.as_str(), b.alias.as_deref().unwrap_or(&b.name)))
+        .collect();
+    set.sort_unstable();
+    set
+}
+
 impl Checker {
     /// `nested` is true inside any recursively parsed sub-program (match
     /// scrutinee, arm body, template interpolation, try expression) — the
@@ -145,14 +158,27 @@ impl Checker {
                         ));
                     }
                 }
-                Pattern::Tag { tag, .. } => {
-                    if seen.contains(&tag.as_str()) {
-                        return Err(RlError::at(
-                            arm.pattern_off,
-                            format!("match: duplicate arm \"{}\"", tag),
-                        ));
+                Pattern::Tags(alts) => {
+                    // Codegen emits one destructuring shared by every
+                    // alternative (switch fallthrough), so all alternatives
+                    // must bind the exact same (field, name) set.
+                    let first_set = binding_set(&alts[0].bindings);
+                    for alt in alts {
+                        if seen.contains(&alt.tag.as_str()) {
+                            return Err(RlError::at(
+                                alt.tag_off,
+                                format!("match: duplicate arm \"{}\"", alt.tag),
+                            ));
+                        }
+                        seen.push(&alt.tag);
+                        if binding_set(&alt.bindings) != first_set {
+                            return Err(RlError::at(
+                                alt.tag_off,
+                                "match: or-pattern alternatives must bind the same fields"
+                                    .to_string(),
+                            ));
+                        }
                     }
-                    seen.push(tag);
                 }
             }
         }
@@ -167,9 +193,11 @@ impl Checker {
                 tags: expr
                     .arms
                     .iter()
-                    .filter_map(|a| match &a.pattern {
-                        Pattern::Tag { tag, .. } => Some(tag.clone()),
-                        Pattern::Wildcard => None,
+                    .flat_map(|a| match &a.pattern {
+                        Pattern::Tags(alts) => {
+                            alts.iter().map(|t| t.tag.clone()).collect::<Vec<_>>()
+                        }
+                        Pattern::Wildcard => Vec::new(),
                     })
                     .collect(),
             });
