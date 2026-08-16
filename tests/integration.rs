@@ -422,6 +422,89 @@ console.log(Result.isErr(Result.fromThrowable(() => JSON.parse("{"))));
 }
 
 #[test]
+fn runtime_std_new_combinators() {
+    require_toolchain!();
+    let dir = tmpdir();
+    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    let code = compile(
+        r#"
+import { Option, Result } from "./rl.js";
+
+console.log(JSON.stringify(Option.zip(Option.Some(1), Option.Some("a"))));
+console.log(JSON.stringify(Option.zip(Option.Some(1), Option.None)));
+console.log(JSON.stringify(Option.flatten(Option.Some(Option.Some(2)))));
+console.log(JSON.stringify(Option.collect([Option.Some(1), Option.Some(2)])));
+console.log(JSON.stringify(Option.collect([Option.Some(1), Option.None])));
+console.log(JSON.stringify(Option.transpose(Option.Some(Result.Ok<number, string>(3)))));
+console.log(JSON.stringify(Result.collect([Result.Ok(1), Result.Ok(2)])));
+console.log(JSON.stringify(Result.collect([Result.Ok<number, string>(1), Result.Err<number, string>("x")])));
+console.log(JSON.stringify(Result.flatten(Result.Ok<Result<number, string>, string>(Result.Ok(4)))));
+const nested: Result<Option<number>, string> = Result.Ok(Option.None);
+console.log(JSON.stringify(Result.transpose(nested)));
+Result.fromPromise(Promise.resolve(5))
+  .then((r) => console.log(JSON.stringify(r)))
+  .then(() => Result.fromPromise(Promise.reject("boom")))
+  .then((r) => console.log(JSON.stringify(r)));
+"#,
+        &Options::default(),
+    )
+    .expect("rl compile failed");
+    fs::write(dir.join("main.ts"), &code).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg(dir.join("rl.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args([
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+        ])
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---compiled---\n{code}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Some","value":[1,"a"]}"#,
+            r#"{"kind":"None"}"#,
+            r#"{"kind":"Some","value":2}"#,
+            r#"{"kind":"Some","value":[1,2]}"#,
+            r#"{"kind":"None"}"#,
+            r#"{"kind":"Ok","value":{"kind":"Some","value":3}}"#,
+            r#"{"kind":"Ok","value":[1,2]}"#,
+            r#"{"kind":"Err","error":"x"}"#,
+            r#"{"kind":"Ok","value":4}"#,
+            r#"{"kind":"None"}"#,
+            r#"{"kind":"Ok","value":5}"#,
+            r#"{"kind":"Err","error":"boom"}"#,
+        ]
+    );
+}
+
+#[test]
 fn runtime_try_error_propagation() {
     require_toolchain!();
     let dir = tmpdir();
