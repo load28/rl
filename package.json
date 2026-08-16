@@ -1,0 +1,24 @@
+{
+  "name": "rl-lang",
+  "version": "0.1.0",
+  "description": "A tiny TypeScript preprocessor: Rust-style match expressions and variant types on top of 100%-compatible TypeScript.",
+  "type": "module",
+  "bin": {
+    "rlc": "bin/rlc.js"
+  },
+  "exports": {
+    ".": "./src/compile.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "files": [
+    "src",
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
