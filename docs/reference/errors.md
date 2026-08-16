@@ -11,19 +11,13 @@ rlc가 내는 모든 진단 메시지의 형식·원인·해결 방법입니다.
 rlc: <파일>:<행>:<열>: <메시지>
 ```
 
-- 행·열은 원본 `.rl` 소스 기준 1-기반이며, 열은 UTF-8 코드 포인트 단위입니다.
+- 행·열은 원본 `.rl` 소스 기준 1-기반입니다.
 - 위치를 특정할 수 없는 에러(출력 검증 실패)는 `rlc: <파일>: <메시지>`로
   위치 없이 출력됩니다.
-- Rust API에서는 같은 정보가 [`CompileError`](../../src/error.rs)로 반환되고,
-  `Display` 구현이 위 형식(선두 `rlc: ` 제외)을 만듭니다.
 
-에러 계층 원칙: 아래 rl 수준 에러는 전부 **rlc가 직접** 보고합니다. rlc가
-방출한 코드가 tsc 에러를 만들지 않아야 하며, 통과 영역에 사용자가 쓴 TS
-코드의 타입 에러는 tsc의 책임입니다.
-
-파싱이 "실패"하는 것은 에러가 아닙니다 — rl 구문으로 완전히 파싱되지 않는
-텍스트는 조용히 원문 통과합니다. 에러는 **rl 구문임이 확정된 뒤의 규칙
-위반**에만 발생합니다.
+rl 구문으로 완전히 파싱되지 않는 텍스트는 에러가 아니라 조용히 원문
+통과합니다. 에러는 **rl 구문임이 확정된 뒤의 규칙 위반**에만 발생합니다.
+통과 영역에 쓴 TypeScript 코드의 타입 에러는 rlc가 아니라 tsc가 보고합니다.
 
 ---
 
@@ -40,10 +34,10 @@ enum Shape { Circle(r: number), Circle(d: number) }
 // rlc: file.rl:1:33: enum Shape: duplicate case "Circle"
 ```
 
-### `enum <이름>: invalid type for field ` `` `<필드>` `` `: <swc 메시지>`
+### `enum <이름>: invalid type for field ` `` `<필드>` `` `: <상세>`
 
 - **원인**: 필드의 타입 표기가 TypeScript 타입 문법으로 파싱되지 않음.
-  swc 파서가 검출하며, 원래 swc 메시지가 뒤에 붙습니다.
+  파서가 알려준 상세 메시지가 뒤에 붙습니다.
 - **위치**: 해당 필드의 타입 시작 지점.
 - **해결**: 타입 표기를 고칩니다. 검사를 끄려면 `--no-verify`
   (라이브러리에서는 `Options { verify: false }`) — 이 경우 잘못된 타입이
@@ -60,8 +54,7 @@ enum E { A(x: number]) }
 
 ### `match: the wildcard arm `_` must be the last arm`
 
-- **원인**: `_` 암 뒤에 다른 암이 있음. `_`는 `switch`의 `default`가 되므로
-  뒤의 암이 도달 불가능해지는 것을 막습니다.
+- **원인**: `_` 암 뒤에 다른 암이 있음. `_` 뒤의 암은 도달 불가능합니다.
 - **위치**: 해당 `_` 패턴.
 - **해결**: `_` 암을 마지막으로 옮깁니다.
 
@@ -73,13 +66,12 @@ enum E { A(x: number]) }
 
 ### `match on enum <이름> is not exhaustive: missing "<케이스>", ... (add the missing arms or a final `_` arm)`
 
-- **원인**: `_` 없는 match의 암 태그들이 이 파일에 선언된 rl enum
-  `<이름>`의 케이스들인데, 일부 케이스가 커버되지 않음. 후보 enum이 여럿이면
-  빠진 케이스가 가장 적은 것을 기준으로 보고합니다.
+- **원인**: `_` 없는 match가 같은 파일에 선언된 rl enum `<이름>`의 케이스를
+  전부 커버하지 않음.
 - **위치**: `match` 키워드.
 - **해결**: 빠진 케이스의 암을 추가하거나 마지막에 `_` 암을 둡니다.
 - **참고**: 다른 파일에서 import한 enum이나 손으로 쓴 유니언에 대한 match는
-  후보가 없으므로 이 검사를 받지 않습니다 — 런타임 가드만 남습니다
+  이 검사를 받지 않습니다 — 런타임 가드만 남습니다
   ([language.md §3.6](./language.md#36-소진성-검사)).
 
 ```
@@ -92,16 +84,16 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 
 ## 출력 검증 에러
 
-### `generated TypeScript failed to parse: <swc 메시지> (line <행>, col <열> of the generated output). This is either invalid TypeScript passed through from the source or an rlc bug; use --no-verify to bypass.`
+### `generated TypeScript failed to parse: <상세> (line <행>, col <열> of the generated output). This is either invalid TypeScript passed through from the source or an rlc bug; use --no-verify to bypass.`
 
-- **원인**: 최종 생성된 TypeScript 전체를 swc로 파싱하는 자가 검사 실패.
-  둘 중 하나입니다 — ① 통과 영역의 소스가 애초에 유효한 TS가 아니었거나
-  (swc가 아직 모르는 최신 문법 포함), ② rlc가 잘못된 코드를 방출하는 버그.
+- **원인**: 최종 생성된 TypeScript를 검증하는 자가 검사 실패. 둘 중
+  하나입니다 — ① 통과 영역의 소스가 애초에 유효한 TS가 아니었거나
+  (검증기가 아직 모르는 최신 문법 포함), ② rlc의 버그.
 - **위치**: 원본이 아닌 **생성물 기준** 행·열이 메시지 안에 표기되며, 에러
   자체는 위치 없이(`파일: 메시지`) 보고됩니다.
-- **해결**: 소스의 해당 부분이 유효한 TS인지 확인합니다. 유효한데 swc가
-  거부하는 최신 문법이라면 `--no-verify`로 우회합니다. 소스가 유효한데도
-  발생하면 rlc 버그이므로 제보해 주세요.
+- **해결**: 소스의 해당 부분이 유효한 TS인지 확인합니다. 유효한데 거부되는
+  최신 문법이라면 `--no-verify`로 우회합니다. 소스가 유효한데도 발생하면
+  rlc 버그이므로 제보해 주세요.
 
 ---
 

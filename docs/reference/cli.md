@@ -1,6 +1,6 @@
 # rlc CLI 레퍼런스
 
-rl 소스를 TypeScript로 컴파일하는 커맨드라인 도구 `rlc`의 규범적 명세입니다.
+rl 소스를 TypeScript로 컴파일하는 커맨드라인 도구 `rlc`의 사용법입니다.
 언어 자체는 [`language.md`](./language.md), 진단 메시지는
 [`errors.md`](./errors.md) 참조.
 
@@ -25,7 +25,7 @@ cargo build --release        # → target/release/rlc
 | `-p, --print` | 파일을 쓰는 대신 컴파일 결과를 stdout으로 출력합니다. |
 | `--check` | 컴파일만 하고 아무것도 쓰지 않습니다 (문법·소진성 검사 용도). |
 | `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
-| `--no-verify` | swc 검증(필드 타입 검사 + 생성물 자가 검사)을 생략합니다. swc가 아직 모르는 최신 TS 문법을 통과 영역에 쓴 코드를 위한 탈출구입니다. |
+| `--no-verify` | 필드 타입 검사와 생성물 자가 검사를 생략합니다. 검증기가 아직 모르는 최신 TS 문법을 쓴 코드를 위한 탈출구입니다. |
 | `-h, --help` | 도움말을 출력하고 종료합니다 (종료 코드 0). |
 | `-v, --version` | 버전만 출력하고 종료합니다 (종료 코드 0). |
 
