@@ -183,13 +183,19 @@ rl 구문은 유효한 TS가 아니므로 기존 TS 파서에 통째로 태울 �
 ## 개발
 
 ```sh
-cargo test   # tsc/node가 있으면 타입체크·런타임 통합 테스트까지 수행
+cargo test                                  # tsc/node가 있으면 타입체크·런타임 통합 테스트까지 수행
+cargo fmt --check                           # 포매팅 검사
+cargo clippy --all-targets -- -D warnings   # 린트
 ```
 
 - `src/scanner.rs` — 바이트 단위 저수준 스캔
-- `src/transform.rs` — 메인 변환 + enum/match 파싱·방출 + 소진성 검사
+- `src/transform/` — 메인 변환 루프(`mod.rs`) + enum 파싱·방출(`enums.rs`) +
+  match 파싱·방출(`matches.rs`) + 소진성 검사
 - `src/verify.rs` — swc 기반 검증
 - `docs/design/rust-rewrite.md` — Rust 재작성 설계 문서
 - `docs/design/enum-and-error-layers.md` — enum 키워드 통합과 에러 계층 설계
+- `CLAUDE.md` — 설계 계약·검증 게이트·태스크 관리 규칙
+- `docs/tasks/INDEX.md` — 모든 작업의 태스크 인덱스 (단일 진실 소스)
+- `CONTRIBUTING.md` — 기여 가이드
 
 `examples/shapes.rl` → `examples/shapes.ts`가 전체 동작 예시입니다.
