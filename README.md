@@ -15,6 +15,20 @@ Rust 스타일의 **`enum`** (태그드 유니언) 선언과 **`match`** 표현�
    컴파일 결과물은 타입 트릭 없는 순수한 TypeScript이며, tsc는 평범한 TS 코드를
    볼 뿐입니다.
 
+## 문서
+
+이 README는 튜토리얼입니다. 정확한 동작은 레퍼런스가 규정합니다:
+
+- [`docs/reference/language.md`](./docs/reference/language.md) — **언어 레퍼런스**:
+  문법, rl enum/TS enum 판별 규칙, 방출 코드 형태, 소진성 검사 알고리즘,
+  예약어, 제한사항.
+- [`docs/reference/cli.md`](./docs/reference/cli.md) — **CLI 레퍼런스**:
+  옵션, 입출력 경로 규칙, 종료 코드.
+- [`docs/reference/errors.md`](./docs/reference/errors.md) — **에러 레퍼런스**:
+  모든 진단 메시지의 형식·원인·해결.
+- Rust API 문서: `cargo doc --open` (`rlc::compile` / `Options` / `CompileError`).
+- [`docs/design/`](./docs/design/) — 설계 결정 기록.
+
 ## 사용법
 
 ```sh
@@ -192,6 +206,7 @@ cargo clippy --all-targets -- -D warnings   # 린트
 - `src/transform/` — 메인 변환 루프(`mod.rs`) + enum 파싱·방출(`enums.rs`) +
   match 파싱·방출(`matches.rs`) + 소진성 검사
 - `src/verify.rs` — swc 기반 검증
+- `docs/reference/` — 언어·CLI·에러 레퍼런스 (규범 문서)
 - `docs/design/rust-rewrite.md` — Rust 재작성 설계 문서
 - `docs/design/enum-and-error-layers.md` — enum 키워드 통합과 에러 계층 설계
 - `CLAUDE.md` — 설계 계약·검증 게이트·태스크 관리 규칙

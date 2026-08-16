@@ -41,6 +41,7 @@ tests/
   passthrough.rs "유효한 TS는 바이트 그대로 통과" 계약 테스트
   integration.rs tsc 타입체크 + node 실행 통합 테스트 (tsc/node 없으면 skip)
 docs/
+  reference/     규범 레퍼런스 — language.md(언어) / cli.md / errors.md
   design/        설계 문서
   tasks/         태스크 관리 (아래 참조)
 ```
@@ -121,3 +122,6 @@ CI(`.github/workflows/ci.yml`)가 동일한 게이트를 강제합니다.
   `compile()` 경계에서만 한다.
 - 새 기능에는 반드시 세 계층 테스트를 추가: 출력 단위 테스트(compile.rs),
   통과 계약이 걸리면 passthrough.rs, 타입/런타임 의미가 걸리면 integration.rs.
+- **언어 표면(구문, 판별 규칙, 방출 코드, 에러 메시지, CLI 동작)을 바꾸는
+  변경은 반드시 `docs/reference/`의 해당 문서를 함께 갱신한다.** 레퍼런스는
+  규범 문서다 — 구현과 어긋나면 버그로 취급한다.

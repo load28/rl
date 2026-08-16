@@ -1,6 +1,19 @@
 use std::fmt;
 
 /// A compile error with a position in the original `.rl` source.
+///
+/// `Display` renders the CLI's diagnostic format, `file:line:col: message`
+/// (position omitted when there is none):
+///
+/// ```
+/// let err = rlc::CompileError {
+///     message: "match: duplicate arm \"Circle\"".to_string(),
+///     filename: Some("shapes.rl".to_string()),
+///     line: 3,
+///     col: 7,
+/// };
+/// assert_eq!(err.to_string(), "shapes.rl:3:7: match: duplicate arm \"Circle\"");
+/// ```
 #[derive(Debug, Clone)]
 pub struct CompileError {
     /// Human-readable description of the error.
