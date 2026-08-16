@@ -22,9 +22,11 @@
 //!
 //! Module layout: this file owns the main scan loop and shared token rules;
 //! [`enums`] parses rl `enum` declarations; [`matches`] parses `match`
-//! expressions; [`tries`] parses `try` statements.
+//! expressions; [`tries`] parses `try` statements; [`lets`] parses let-else
+//! statements.
 
 mod enums;
+mod lets;
 mod matches;
 mod tries;
 
@@ -256,18 +258,29 @@ impl Parser<'_> {
                 }
 
                 // `const|let|var <binding> = try <expr>;` — the `= try`
-                // sequence is never valid TypeScript.
-                if !dotted
-                    && (word == "const" || word == "let" || word == "var")
-                    && let Some((parsed_end, stmt)) = tries::parse_try_decl(self, i, j, end)
-                {
-                    flush_verbatim(&mut segments, seg_start, i);
-                    segments.push(Segment::Try(stmt));
-                    seg_start = parsed_end;
-                    i = parsed_end;
-                    prev_sig = b';';
-                    prev_word = "";
-                    continue;
+                // sequence is never valid TypeScript — and
+                // `const|let|var Tag(...) = <expr> else { ... };` — a
+                // declaration keyword is never followed by `<ident>(` in
+                // valid TypeScript.
+                if !dotted && (word == "const" || word == "let" || word == "var") {
+                    if let Some((parsed_end, stmt)) = tries::parse_try_decl(self, i, j, end) {
+                        flush_verbatim(&mut segments, seg_start, i);
+                        segments.push(Segment::Try(stmt));
+                        seg_start = parsed_end;
+                        i = parsed_end;
+                        prev_sig = b';';
+                        prev_word = "";
+                        continue;
+                    }
+                    if let Some((parsed_end, stmt)) = lets::parse_let_else(self, i, j, end) {
+                        flush_verbatim(&mut segments, seg_start, i);
+                        segments.push(Segment::LetElse(stmt));
+                        seg_start = parsed_end;
+                        i = parsed_end;
+                        prev_sig = b';';
+                        prev_word = "";
+                        continue;
+                    }
                 }
 
                 i = j;

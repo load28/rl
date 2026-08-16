@@ -176,6 +176,71 @@ console.log(describe(Msg.Quit));
 }
 
 #[test]
+fn runtime_or_patterns_share_one_body() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Key {
+  Enter(),
+  Escape,
+  Tab,
+  Char(ch: string),
+}
+
+function action(k: Key): string {
+  return match (k) {
+    Enter => "submit",
+    Escape | Tab => "cancel",
+    Char(ch) => "type:" + ch,
+  };
+}
+
+console.log(action(Key.Enter()));
+console.log(action(Key.Escape));
+console.log(action(Key.Tab));
+console.log(action(Key.Char("z")));
+"#);
+    assert_eq!(lines, vec!["submit", "cancel", "cancel", "type:z"]);
+}
+
+#[test]
+fn runtime_match_guards_fall_through_top_to_bottom() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Score {
+  Graded(points: number),
+  Pending,
+}
+
+function grade(s: Score): string {
+  return match (s) {
+    Graded(points) if points >= 90 => "A",
+    Graded(points) if points >= 80 => "B",
+    Graded(points) => "F",
+    Pending => "-",
+  };
+}
+
+function tally(s: Score): number {
+  return match (s) {
+    Graded(points) if points > 0 => {
+      const doubled = points * 2;
+      return doubled;
+    },
+    _ => 0,
+  };
+}
+
+console.log(grade(Score.Graded(95)));
+console.log(grade(Score.Graded(85)));
+console.log(grade(Score.Graded(10)));
+console.log(grade(Score.Pending));
+console.log(tally(Score.Graded(3)));
+console.log(tally(Score.Graded(-1)));
+"#);
+    assert_eq!(lines, vec!["A", "B", "F", "-", "6", "0"]);
+}
+
+#[test]
 fn runtime_generic_enum() {
     require_toolchain!();
     let lines = run(r#"
@@ -357,6 +422,89 @@ console.log(Result.isErr(Result.fromThrowable(() => JSON.parse("{"))));
 }
 
 #[test]
+fn runtime_std_new_combinators() {
+    require_toolchain!();
+    let dir = tmpdir();
+    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    let code = compile(
+        r#"
+import { Option, Result } from "./rl.js";
+
+console.log(JSON.stringify(Option.zip(Option.Some(1), Option.Some("a"))));
+console.log(JSON.stringify(Option.zip(Option.Some(1), Option.None)));
+console.log(JSON.stringify(Option.flatten(Option.Some(Option.Some(2)))));
+console.log(JSON.stringify(Option.collect([Option.Some(1), Option.Some(2)])));
+console.log(JSON.stringify(Option.collect([Option.Some(1), Option.None])));
+console.log(JSON.stringify(Option.transpose(Option.Some(Result.Ok<number, string>(3)))));
+console.log(JSON.stringify(Result.collect([Result.Ok(1), Result.Ok(2)])));
+console.log(JSON.stringify(Result.collect([Result.Ok<number, string>(1), Result.Err<number, string>("x")])));
+console.log(JSON.stringify(Result.flatten(Result.Ok<Result<number, string>, string>(Result.Ok(4)))));
+const nested: Result<Option<number>, string> = Result.Ok(Option.None);
+console.log(JSON.stringify(Result.transpose(nested)));
+Result.fromPromise(Promise.resolve(5))
+  .then((r) => console.log(JSON.stringify(r)))
+  .then(() => Result.fromPromise(Promise.reject("boom")))
+  .then((r) => console.log(JSON.stringify(r)));
+"#,
+        &Options::default(),
+    )
+    .expect("rl compile failed");
+    fs::write(dir.join("main.ts"), &code).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg(dir.join("rl.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args([
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+        ])
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---compiled---\n{code}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Some","value":[1,"a"]}"#,
+            r#"{"kind":"None"}"#,
+            r#"{"kind":"Some","value":2}"#,
+            r#"{"kind":"Some","value":[1,2]}"#,
+            r#"{"kind":"None"}"#,
+            r#"{"kind":"Ok","value":{"kind":"Some","value":3}}"#,
+            r#"{"kind":"Ok","value":[1,2]}"#,
+            r#"{"kind":"Err","error":"x"}"#,
+            r#"{"kind":"Ok","value":4}"#,
+            r#"{"kind":"None"}"#,
+            r#"{"kind":"Ok","value":5}"#,
+            r#"{"kind":"Err","error":"boom"}"#,
+        ]
+    );
+}
+
+#[test]
 fn runtime_try_error_propagation() {
     require_toolchain!();
     let dir = tmpdir();
@@ -436,6 +584,83 @@ console.log(JSON.stringify(checked("4")));
             r#"{"kind":"Ok","value":40}"#,
         ]
     );
+}
+
+#[test]
+fn runtime_let_else_narrows_and_diverges() {
+    require_toolchain!();
+    // tsc --strict must accept the emitted destructuring: the diverging
+    // else block narrows the temporary to the matched case.
+    let dir = tmpdir();
+    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    let code = compile(
+        r#"
+import { Option, Result } from "./rl.js";
+
+function findUser(id: number): Option<string> {
+  return id === 1 ? Option.Some("amy") : Option.None;
+}
+
+function greet(id: number): string {
+  const Some(value: user) = findUser(id) else { return "who?"; };
+  return "hello, " + user;
+}
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("bad") : Result.Ok(n);
+}
+
+function double(raw: string): number {
+  const Ok(value) = parseNum(raw) else { return -1; };
+  return value * 2;
+}
+
+console.log(greet(1));
+console.log(greet(2));
+console.log(double("21"));
+console.log(double("x"));
+"#,
+        &Options::default(),
+    )
+    .expect("rl compile failed");
+    fs::write(dir.join("main.ts"), &code).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg(dir.join("rl.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args([
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+        ])
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---compiled---\n{code}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines, vec!["hello, amy", "who?", "42", "-1"]);
 }
 
 /* ------------------------------------------------------------------ */

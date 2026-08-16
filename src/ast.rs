@@ -37,8 +37,39 @@ pub(crate) enum Segment {
     Match(MatchExpr),
     /// An rl `try` statement (Rust-style error propagation).
     Try(TryStmt),
+    /// An rl let-else statement (Rust-style refutable binding).
+    LetElse(LetElseStmt),
     /// A template literal; its interpolations are recursively parsed.
     Template(Template),
+}
+
+/// A structurally parsed rl let-else statement:
+/// `const|let|var Tag(bindings...) = <expr> else { ... };`. Like
+/// [`TryStmt`] it compiles to statements in the enclosing function scope:
+/// evaluate once, run the (diverging) `else` block unless the value's
+/// `kind` is the pattern's tag, then destructure the bindings.
+#[derive(Debug)]
+pub(crate) struct LetElseStmt {
+    /// Byte offset of the declaration keyword, for error reporting.
+    pub keyword_off: usize,
+    /// The declaration keyword: `const`, `let`, or `var`.
+    pub kw: String,
+    /// The pattern's case tag.
+    pub tag: String,
+    /// The pattern's bindings. Possibly empty — the parens are mandatory
+    /// (`const Tag() = ... else ...;` checks the case without binding).
+    pub bindings: Vec<Binding>,
+    /// The expression after `=`, recursively parsed.
+    pub expr: Program,
+    /// The `else { ... }` block body, recursively parsed (braces excluded).
+    pub else_body: Program,
+    /// Byte offset of the `else` keyword, for error reporting.
+    pub else_off: usize,
+    /// Whether the else block's last top-level statement starts with
+    /// `return`, `throw`, `break`, or `continue` — the syntactic stand-in
+    /// for Rust's "the else block must diverge" rule. Computed by the
+    /// parser (which stays infallible), enforced by sema.
+    pub diverges: bool,
 }
 
 /// A structurally parsed rl `try` statement: `try <expr>;` or
@@ -104,12 +135,15 @@ pub(crate) struct MatchExpr {
     pub arms: Vec<Arm>,
 }
 
-/// One `pattern => body` arm of a match.
+/// One `pattern (if guard)? => body` arm of a match.
 #[derive(Debug)]
 pub(crate) struct Arm {
     pub pattern: Pattern,
     /// Byte offset of the pattern, for error reporting.
     pub pattern_off: usize,
+    /// `Some` for a guarded arm (`pattern if <cond> => body`). The parser
+    /// never attaches a guard to a wildcard pattern (`_ if` fails the parse).
+    pub guard: Option<GuardExpr>,
     /// Raw span of the body (used for `await` detection).
     pub body_span: Span,
     /// The body, recursively parsed. For block bodies the span excludes the
@@ -119,17 +153,36 @@ pub(crate) struct Arm {
     pub block: bool,
 }
 
+/// The `if <cond>` guard of a match arm.
+#[derive(Debug)]
+pub(crate) struct GuardExpr {
+    /// Raw span of the condition (used for `await` detection).
+    pub span: Span,
+    /// The condition, recursively parsed.
+    pub expr: Program,
+}
+
 /// A match arm's pattern.
 #[derive(Debug)]
 pub(crate) enum Pattern {
     /// The final `_` arm.
     Wildcard,
-    /// `Tag` or `Tag(bindings...)`. `bindings` is `None` when there are no
-    /// parens at all.
-    Tag {
-        tag: String,
-        bindings: Option<Vec<Binding>>,
-    },
+    /// One or more `|`-separated tag alternatives: `Tag`, `Tag(bindings...)`,
+    /// `A | B(x)`. The parser guarantees the list is non-empty; a plain tag
+    /// pattern is a single-element list. The semantic phase guarantees every
+    /// alternative binds the same (field, name) set, so codegen can emit one
+    /// shared destructuring from the first alternative.
+    Tags(Vec<TagPattern>),
+}
+
+/// One tag alternative inside a pattern.
+#[derive(Debug)]
+pub(crate) struct TagPattern {
+    pub tag: String,
+    /// Byte offset of the tag, for error reporting.
+    pub tag_off: usize,
+    /// `None` = no parens at all; `Some(vec)` = a (possibly empty) binding list.
+    pub bindings: Option<Vec<Binding>>,
 }
 
 /// One binding inside a pattern's parens: `name` or `name: alias`.

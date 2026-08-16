@@ -7,9 +7,9 @@
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](./Cargo.toml)
 
 **rl**은 [Civet](https://civet.dev)처럼 TypeScript 위에 얹히는 언어입니다.
-추가하는 것은 딱 세 가지 — 태그드 유니언 **`enum`** 선언, 패턴 매칭
-**`match`** 표현식, 에러 전파 **`try`** 문. 나머지는 전부 그냥
-TypeScript입니다.
+추가하는 것은 딱 네 가지 — 태그드 유니언 **`enum`** 선언, 패턴 매칭
+**`match`** 표현식(or-패턴·가드 지원), 에러 전파 **`try`** 문, 값 추출
+**`let-else`** 문. 나머지는 전부 그냥 TypeScript입니다.
 
 ```rl
 // shapes.rl

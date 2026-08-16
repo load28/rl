@@ -208,6 +208,242 @@ fn error_position_reported_inside_template_interpolation() {
 }
 
 /* ------------------------------------------------------------------ */
+/* or-patterns                                                         */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn or_pattern_emits_fallthrough_cases() {
+    let out = ok(r#"
+enum Key { Enter(), Escape, Tab, Char(ch: string) }
+const action = match (key) {
+  Enter => "submit",
+  Escape | Tab => "cancel",
+  Char(ch) => "type:" + ch,
+};
+"#);
+    assert!(
+        out.contains("case \"Escape\": case \"Tab\": { return (\"cancel\"); }"),
+        "{out}"
+    );
+}
+
+#[test]
+fn or_pattern_with_identical_bindings_shares_destructuring() {
+    let out = ok("const r = match (x) { A(v) | B(v) => v, _ => 0 };");
+    assert!(
+        out.contains("case \"A\": case \"B\": { const { v } = $rl_m; return (v); }"),
+        "{out}"
+    );
+}
+
+#[test]
+fn or_pattern_binding_order_is_insensitive() {
+    let out = ok("const r = match (p) { A(x, y) | B(y, x) => x + y, _ => 0 };");
+    assert!(
+        out.contains("case \"A\": case \"B\": { const { x, y } = $rl_m;"),
+        "{out}"
+    );
+}
+
+#[test]
+fn or_pattern_counts_for_exhaustiveness() {
+    ok(r#"
+enum Dir { North(), South, East, West }
+const f = (d: Dir) => match (d) {
+  North | South => 1,
+  East | West => 2,
+};
+"#);
+    let e = err(r#"
+enum Dir { North(), South, East, West }
+const f = (d: Dir) => match (d) {
+  North | South => 1,
+  East => 2,
+};
+"#);
+    assert!(e.message.contains("missing \"West\""), "{}", e.message);
+}
+
+#[test]
+fn or_pattern_duplicate_tag_is_error() {
+    // duplicate inside one arm
+    let e = err("const r = match (x) { A | A => 1, _ => 0 };");
+    assert!(e.message.contains("duplicate arm \"A\""), "{}", e.message);
+    // duplicate across arms
+    let e = err("const r = match (x) { A | B => 1, B => 2, _ => 0 };");
+    assert!(e.message.contains("duplicate arm \"B\""), "{}", e.message);
+}
+
+#[test]
+fn or_pattern_binding_mismatch_is_error() {
+    let e = err("const r = match (x) { A(v) | B(w) => v, _ => 0 };");
+    assert!(
+        e.message
+            .contains("or-pattern alternatives must bind the same fields"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (1, 30)); // points at the offending alternative
+
+    // an alias changes the bound name, so it must match too
+    let e = err("const r = match (x) { A(v) | B(v: w) => w, _ => 0 };");
+    assert!(
+        e.message
+            .contains("or-pattern alternatives must bind the same fields"),
+        "{}",
+        e.message
+    );
+
+    // a binding-free alternative cannot pair with a binding one
+    let e = err("const r = match (x) { A | B(v) => 1, _ => 0 };");
+    assert!(
+        e.message
+            .contains("or-pattern alternatives must bind the same fields"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn or_pattern_double_pipe_is_not_rl_syntax() {
+    // `A || B` is not an or-pattern; the candidate fails to parse and the
+    // (invalid-TS) text passes through to the output self-check.
+    let e = err("const r = match (x) { A || B => 1 };");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+/* ------------------------------------------------------------------ */
+/* guards                                                              */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn guarded_match_compiles_to_if_chain() {
+    let out = ok(r#"
+enum Score { Graded(points: number), Pending }
+const grade = match (s) {
+  Graded(points) if points >= 90 => "A",
+  Graded(points) => "F",
+  Pending => "-",
+};
+"#);
+    assert!(!out.contains("switch ("), "{out}");
+    assert!(
+        out.contains(
+            "if ($rl_m.kind === \"Graded\") { const { points } = $rl_m; if ((points >= 90)) return (\"A\"); }"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "if ($rl_m.kind === \"Graded\") { const { points } = $rl_m; return (\"F\"); }"
+        ),
+        "{out}"
+    );
+    // the same fail-fast runtime guard as the switch emission
+    assert!(
+        out.contains("throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m));"),
+        "{out}"
+    );
+}
+
+#[test]
+fn guard_free_match_still_emits_switch() {
+    let out = ok("const r = match (x) { A => 1, _ => 0 };");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+    assert!(!out.contains("$rl_b"), "{out}");
+}
+
+#[test]
+fn repeated_guarded_tags_are_allowed() {
+    let out =
+        ok("const r = match (x) { A(v) if v > 9 => 2, A(v) if v > 0 => 1, A => 0, _ => -1 };");
+    assert_eq!(out.matches("$rl_m.kind === \"A\"").count(), 3, "{out}");
+}
+
+#[test]
+fn guard_after_unguarded_same_tag_is_duplicate() {
+    // the unguarded A already covers the tag, so the guarded arm is unreachable
+    let e = err("const r = match (x) { A => 1, A if c => 2, _ => 0 };");
+    assert!(e.message.contains("duplicate arm \"A\""), "{}", e.message);
+}
+
+#[test]
+fn guarded_arms_do_not_satisfy_exhaustiveness() {
+    let e = err(
+        "const f = (o: Option<number>) => match (o) { Some(value) if value > 0 => value, None => 0 };",
+    );
+    assert!(
+        e.message
+            .contains("match on built-in enum Option is not exhaustive: missing \"Some\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn fully_guarded_match_is_not_exhaustive() {
+    // guarded tags still identify the enum — they just cover nothing
+    let e =
+        err("const f = (o: Option<number>) => match (o) { Some(value) if value > 0 => value };");
+    assert!(e.message.contains("\"None\""), "{}", e.message);
+    assert!(e.message.contains("\"Some\""), "{}", e.message);
+}
+
+#[test]
+fn guard_with_or_pattern_emits_combined_condition() {
+    let out = ok("const r = match (x) { A(v) | B(v) if v > 0 => v, _ => 0 };");
+    assert!(
+        out.contains(
+            "if ($rl_m.kind === \"A\" || $rl_m.kind === \"B\") { const { v } = $rl_m; if ((v > 0)) return (v); }"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn guarded_block_body_uses_labeled_break() {
+    let out = ok("const r = match (x) { A(v) if v > 0 => { log(v); }, _ => 0 };");
+    assert!(out.contains("$rl_b: {"), "{out}");
+    assert!(out.contains("break $rl_b;"), "{out}");
+}
+
+#[test]
+fn await_in_guard_makes_match_async() {
+    let out = ok(
+        "async function f(x: T) { return match (x) { A(u) if await allowed(u) => 1, _ => 0 }; }",
+    );
+    assert!(out.contains("(await (async () => {"), "{out}");
+}
+
+#[test]
+fn wildcard_with_guard_is_not_rl_syntax() {
+    // `_ if ...` does not parse as an rl match; the (invalid-TS) text passes
+    // through and the output self-check reports it.
+    let e = err("const r = match (x) { A => 1, _ if c => 0 };");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn try_inside_guard_is_an_error() {
+    let e = err(
+        "const r = match (x) {\n  A(v) if run(() => { try g(); return true; }) => v,\n  _ => 0,\n};\n",
+    );
+    assert!(
+        e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
+}
+
+/* ------------------------------------------------------------------ */
 /* exhaustiveness — an rlc error, not a tsc error                      */
 /* ------------------------------------------------------------------ */
 
@@ -431,6 +667,134 @@ fn try_inside_template_interpolation_is_an_error() {
     let e = err("const s = `${run(() => { try g(); return h(); })}`;\n");
     assert!(
         e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
+}
+
+/* ------------------------------------------------------------------ */
+/* let-else — Rust-style refutable binding                             */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn let_else_emits_guard_and_bind() {
+    let out = ok(
+        "function f(): number {\n  const Some(value) = find() else { return 0; };\n  return value;\n}\n",
+    );
+    assert!(
+        out.contains(
+            "const $rl_t0 = (find()); if ($rl_t0.kind !== \"Some\") { return 0; } const { value } = $rl_t0;"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn let_else_binding_alias_and_keyword() {
+    let out = ok(
+        "function f(): string {\n  let Some(value: user) = find() else { throw new Error(\"none\"); };\n  return user;\n}\n",
+    );
+    assert!(out.contains("let { value: user } = $rl_t0;"), "{out}");
+}
+
+#[test]
+fn let_else_empty_bindings_checks_only() {
+    let out =
+        ok("function f(): number {\n  const Ok() = check() else { return -1; };\n  return 1;\n}\n");
+    assert!(
+        out.contains("if ($rl_t0.kind !== \"Ok\") { return -1; }"),
+        "{out}"
+    );
+    assert!(!out.contains("} = $rl_t0;"), "{out}");
+}
+
+#[test]
+fn let_else_shares_try_temp_counter() {
+    let out = ok(
+        "function f(): X {\n  const n = try g();\n  const Some(v) = h(n) else { return fallback(); };\n  return wrap(v);\n}\n",
+    );
+    assert!(out.contains("if ($rl_t0.kind !== \"Ok\")"), "{out}");
+    assert!(
+        out.contains("const $rl_t1 = (h(n)); if ($rl_t1.kind !== \"Some\")"),
+        "{out}"
+    );
+}
+
+#[test]
+fn let_else_diverges_via_throw_and_continue() {
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { throw new Error(\"no\"); };\n  return v;\n}\n",
+    );
+    ok(
+        "function f(): number {\n  for (const x of xs) {\n    const Some(v) = find(x) else { continue; };\n    use(v);\n  }\n  return 0;\n}\n",
+    );
+}
+
+#[test]
+fn let_else_expression_may_be_a_match() {
+    let out = ok(
+        "function f(): number {\n  const Some(v) = match (x) { A => some(1), _ => none() } else { return 0; };\n  return v;\n}\n",
+    );
+    assert!(out.contains("if ($rl_t0.kind !== \"Some\")"), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn let_else_non_diverging_else_is_error() {
+    let e =
+        err("function f(): number {\n  const Some(v) = find() else { log(); };\n  return v;\n}\n");
+    assert!(
+        e.message.contains("must end with a `return`"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 26)); // points at the `else` keyword
+}
+
+#[test]
+fn let_else_empty_else_block_is_error() {
+    let e = err("function f(): number {\n  const Some(v) = find() else { };\n  return v;\n}\n");
+    assert!(
+        e.message.contains("must end with a `return`"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn let_else_inside_match_arm_is_error() {
+    let e = err(
+        "const x = match (r) {\n  Ok(value) => { const Some(v) = h(value) else { return 0; }; return v; },\n  _ => 0,\n};\n",
+    );
+    assert!(
+        e.message.contains("let-else cannot be used inside"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn let_else_without_semicolon_is_not_recognized() {
+    // No terminating `;` → not rl syntax; the (invalid-TS) source passes
+    // through and the output self-check reports it.
+    let e = err(
+        "function f(): number {\n  const Some(v) = find() else { return 0; }\n  return v;\n}\n",
+    );
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn let_else_requires_parens_on_the_pattern() {
+    // `const Point = e else { ... };` (no parens) is not rl syntax — the
+    // invalid-TS text passes through to the output self-check.
+    let e =
+        err("function f(): number {\n  const Point = find() else { return 0; };\n  return 1;\n}\n");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
         "{}",
         e.message
     );

@@ -60,15 +60,29 @@ enum E { A(x: number]) }
 
 ### `match: duplicate arm "<태그>"`
 
-- **원인**: 같은 태그의 암이 두 번 나옴 (두 번째 암은 도달 불가능).
-- **위치**: 중복된(두 번째) 암의 패턴.
+- **원인**: **무가드 암이 이미 덮은 태그**가 다시 나옴 (두 번째 암은 도달
+  불가능). or-패턴의 대안도 각각 하나의 태그로 셉니다 — `A | A => ..`,
+  `A | B => .., B => ..`, `A => .., A if c => ..` 모두 해당. 가드 암끼리는
+  같은 태그를 반복할 수 있으므로 에러가 아닙니다.
+- **위치**: 중복된(두 번째) 태그.
 - **해결**: 암을 하나로 합치거나 태그를 확인합니다.
+
+### `match: or-pattern alternatives must bind the same fields`
+
+- **원인**: or-패턴의 대안들이 서로 다른 (필드, 바인딩 이름) 집합을 바인딩함.
+  대안들은 하나의 본문(과 하나의 구조 분해)을 공유하므로 같은 집합을
+  바인딩해야 합니다 — `A(x) | B(y)`, `A(v) | B(v: w)`, `A | B(x)`는 안 되고
+  `A(x) | B(x)`, `A(x, y) | B(y, x)`는 됩니다.
+- **위치**: 첫 대안과 바인딩이 다른 대안의 태그.
+- **해결**: 대안들의 바인딩을 같은 집합으로 맞추거나 암을 분리합니다.
 
 ### `match on enum <이름> is not exhaustive: missing "<케이스>", ... (add the missing arms or a final `_` arm)`
 
 - **원인**: `_` 없는 match가 같은 파일에 선언된 rl enum `<이름>`의 케이스를
   전부 커버하지 않음. 내장 enum(`Option`/`Result`)에 걸린 경우
   `match on built-in enum <이름> is not exhaustive: ...`로 보고됩니다.
+  **가드 암은 케이스를 커버하지 못합니다** — 조건이 거짓일 수 있으므로, 그
+  태그를 커버하려면 무가드 암이 따로 필요합니다.
 - **위치**: `match` 키워드.
 - **해결**: 빠진 케이스의 암을 추가하거나 마지막에 `_` 암을 둡니다.
 - **참고**: 다른 파일에서 import한 enum이나 손으로 쓴 유니언에 대한 match는
@@ -98,6 +112,36 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 - **참고**: 모듈 최상위(함수 밖)의 try는 이 검사로 잡히지 않고, 생성물의
   최상위 `return`이 모듈에서 유효하지 않아 출력 검증 에러(아래)로
   드러납니다.
+
+---
+
+## let-else 에러
+
+### `let-else cannot be used inside a match expression, a template interpolation, or a `try` — it compiles to statements in the enclosing function`
+
+- **원인**: let-else 문이 match 표현식(스크루티니·가드·암 본문), 템플릿 보간,
+  또는 try의 식 내부에서 사용됨. try와 같은 위치 제약입니다.
+- **위치**: 해당 문의 선언 키워드(`const`/`let`/`var`).
+- **해결**: 로직을 별도 함수로 추출합니다
+  ([language.md §6.4](./language.md#64-사용-위치와-발산-제약)).
+
+### ``let-else: the `else` block must end with a `return`, `throw`, `break`, or `continue` statement``
+
+- **원인**: `else` 블록이 발산하지 않음. 블록이 발산하지 않으면 블록 뒤의
+  구조 분해가 케이스 미보장 상태로 실행됩니다. 검사는 구문 수준이므로
+  마지막 최상위 문장이 네 키워드 중 하나로 시작해야 합니다 —
+  `if (c) return a; else return b;`로 끝나는 블록도 거부됩니다.
+- **위치**: `else` 키워드.
+- **해결**: 블록의 마지막 문장을 `return`/`throw`/`break`/`continue`로
+  끝나게 재구성합니다.
+
+```rl
+function f(): number {
+  const Some(v) = find() else { log(); };
+  return v;
+}
+// rlc: file.rl:2:26: let-else: the `else` block must end with a `return`, ...
+```
 
 ---
 

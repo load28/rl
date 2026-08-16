@@ -7,7 +7,7 @@
 //! The scrutinee and every arm body are recursively parsed sub-programs.
 
 use super::{Parser, is_reserved};
-use crate::ast::{Arm, Binding, MatchExpr, Pattern, Span};
+use crate::ast::{Arm, Binding, GuardExpr, MatchExpr, Pattern, Span, TagPattern};
 use crate::scanner::*;
 
 /// `j` is just past the `match` keyword. On success returns the index just
@@ -69,27 +69,51 @@ fn parse_arms(p: &Parser, start: usize, end: usize) -> Option<Vec<Arm>> {
             pattern = Pattern::Wildcard;
             i += 1;
         } else if is_ident_start(src[i]) {
-            let j = ident_end(src, i, end);
-            let tag = &p.src[i..j];
-            if is_reserved(tag) {
-                return None;
-            }
+            let (j, first) = parse_tag_pattern(p, i, end)?;
+            let mut alts = vec![first];
             i = skip_ws_comments(src, j, end);
-            let mut bindings = None;
-            if at(src, i, end) == Some(b'(') {
-                let close = find_matching(src, i, end)?;
-                bindings = Some(parse_bindings(p, i + 1, close)?);
-                i = close + 1;
+            // `|`-separated alternatives; `||` is never an alternative
+            // separator, so it fails the parse and passes through.
+            while at(src, i, end) == Some(b'|') && at(src, i + 1, end) != Some(b'|') {
+                let k = skip_ws_comments(src, i + 1, end);
+                if k >= end || !is_ident_start(src[k]) {
+                    return None;
+                }
+                let (m, alt) = parse_tag_pattern(p, k, end)?;
+                alts.push(alt);
+                i = skip_ws_comments(src, m, end);
             }
-            pattern = Pattern::Tag {
-                tag: tag.to_string(),
-                bindings,
-            };
+            pattern = Pattern::Tags(alts);
         } else {
             return None;
         }
 
         i = skip_ws_comments(src, i, end);
+
+        // optional guard: `if <cond>` between the pattern and `=>`. Only tag
+        // patterns take a guard — `_ if` never parses, so it passes through.
+        let mut guard = None;
+        if matches!(pattern, Pattern::Tags(_))
+            && i < end
+            && is_ident_start(src[i])
+            && ident_end(src, i, end) == i + 2
+            && &src[i..i + 2] == b"if"
+        {
+            let g_start = skip_ws_comments(src, i + 2, end);
+            let g_end = scan_guard_end(src, g_start, end)?;
+            if p.src[g_start..g_end].trim().is_empty() {
+                return None;
+            }
+            guard = Some(GuardExpr {
+                span: Span {
+                    start: g_start,
+                    end: g_end,
+                },
+                expr: p.parse_range(g_start, g_end),
+            });
+            i = g_end;
+        }
+
         if !(at(src, i, end) == Some(b'=') && at(src, i + 1, end) == Some(b'>')) {
             return None;
         }
@@ -121,6 +145,7 @@ fn parse_arms(p: &Parser, start: usize, end: usize) -> Option<Vec<Arm>> {
         arms.push(Arm {
             pattern,
             pattern_off,
+            guard,
             body_span,
             body: p.parse_range(body_span.start, body_span.end),
             block,
@@ -139,8 +164,36 @@ fn parse_arms(p: &Parser, start: usize, end: usize) -> Option<Vec<Arm>> {
     Some(arms)
 }
 
-/// Parses `a, b: alias, ...` between the parens of a pattern. None on failure.
-fn parse_bindings(p: &Parser, start: usize, end: usize) -> Option<Vec<Binding>> {
+/// Parses one `Tag` / `Tag(bindings...)` alternative starting at the
+/// identifier at `i`. Returns the index just past the alternative.
+fn parse_tag_pattern(p: &Parser, i: usize, end: usize) -> Option<(usize, TagPattern)> {
+    let src = p.bytes;
+    let tag_off = i;
+    let j = ident_end(src, i, end);
+    let tag = &p.src[i..j];
+    if is_reserved(tag) {
+        return None;
+    }
+    let mut k = skip_ws_comments(src, j, end);
+    let mut bindings = None;
+    if at(src, k, end) == Some(b'(') {
+        let close = find_matching(src, k, end)?;
+        bindings = Some(parse_bindings(p, k + 1, close)?);
+        k = close + 1;
+    }
+    Some((
+        k,
+        TagPattern {
+            tag: tag.to_string(),
+            tag_off,
+            bindings,
+        },
+    ))
+}
+
+/// Parses `a, b: alias, ...` between the parens of a pattern (shared with
+/// the let-else pattern). None on failure.
+pub(super) fn parse_bindings(p: &Parser, start: usize, end: usize) -> Option<Vec<Binding>> {
     let src = p.bytes;
     let mut bindings = Vec::new();
     let mut i = start;
@@ -188,6 +241,55 @@ fn parse_bindings(p: &Parser, start: usize, end: usize) -> Option<Vec<Binding>> 
         return None;
     }
     Some(bindings)
+}
+
+/// Scans a guard condition until the arm's top-level `=>`, returning the
+/// index of its `=`. None on anything a guard cannot contain at its top
+/// level (`,`, `;`, a closer) — the candidate then passes through.
+fn scan_guard_end(src: &[u8], mut i: usize, end: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    while i < end {
+        let c = src[i];
+        if c == b'/' && at(src, i + 1, end) == Some(b'/') {
+            i = line_end(src, i, end);
+            continue;
+        }
+        if c == b'/' && at(src, i + 1, end) == Some(b'*') {
+            i = match find_subslice(src, b"*/", i + 2, end) {
+                Some(e) => e + 2,
+                None => end,
+            };
+            continue;
+        }
+        if c == b'"' || c == b'\'' {
+            i = scan_string(src, i, end);
+            continue;
+        }
+        if c == b'`' {
+            i = skip_template(src, i, end);
+            continue;
+        }
+        if c == b'=' && at(src, i + 1, end) == Some(b'>') {
+            if depth == 0 {
+                return Some(i);
+            }
+            i += 2;
+            continue;
+        }
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            b',' | b';' if depth == 0 => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Scans an arm's expression body until a top-level `,` or closing bracket.

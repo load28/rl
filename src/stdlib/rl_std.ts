@@ -56,6 +56,33 @@ export const Option = {
   /** Unwraps to a nullable value: `None` becomes `null`. */
   toNullable: <T>(o: Option<T>): T | null =>
     o.kind === "Some" ? o.value : null,
+  /** Pairs two options: `Some` of the tuple only when both are `Some`. */
+  zip: <T, U>(a: Option<T>, b: Option<U>): Option<[T, U]> =>
+    a.kind === "Some" && b.kind === "Some"
+      ? { kind: "Some", value: [a.value, b.value] }
+      : { kind: "None" },
+  /** Flattens one level of nesting: `Some(Some(x))` becomes `Some(x)`. */
+  flatten: <T>(o: Option<Option<T>>): Option<T> =>
+    o.kind === "Some" ? o.value : { kind: "None" },
+  /**
+   * Swaps the layers: `Some(Ok(x))` → `Ok(Some(x))`, `Some(Err(e))` →
+   * `Err(e)`, `None` → `Ok(None)`.
+   */
+  transpose: <T, E>(o: Option<Result<T, E>>): Result<Option<T>, E> =>
+    o.kind === "None"
+      ? { kind: "Ok", value: { kind: "None" } }
+      : o.value.kind === "Ok"
+        ? { kind: "Ok", value: { kind: "Some", value: o.value.value } }
+        : o.value,
+  /** Collects an array: all `Some` → `Some` of the values, any `None` → `None`. */
+  collect: <T>(items: readonly Option<T>[]): Option<T[]> => {
+    const values: T[] = [];
+    for (const o of items) {
+      if (o.kind === "None") return { kind: "None" };
+      values.push(o.value);
+    }
+    return { kind: "Some", value: values };
+  },
 };
 
 /** Constructors and combinators for `Result`. */
@@ -109,5 +136,33 @@ export const Result = {
     } catch (error) {
       return { kind: "Err", error };
     }
+  },
+  /** Awaits `p`, capturing a rejection as `Err` — `fromThrowable`'s async twin. */
+  fromPromise: <T>(p: Promise<T>): Promise<Result<T, unknown>> =>
+    p.then(
+      (value): Result<T, unknown> => ({ kind: "Ok", value }),
+      (error): Result<T, unknown> => ({ kind: "Err", error }),
+    ),
+  /** Flattens one level of nesting: `Ok(Ok(x))` becomes `Ok(x)`. */
+  flatten: <T, E>(r: Result<Result<T, E>, E>): Result<T, E> =>
+    r.kind === "Ok" ? r.value : r,
+  /**
+   * Swaps the layers: `Ok(Some(x))` → `Some(Ok(x))`, `Ok(None)` → `None`,
+   * `Err(e)` → `Some(Err(e))`.
+   */
+  transpose: <T, E>(r: Result<Option<T>, E>): Option<Result<T, E>> =>
+    r.kind === "Err"
+      ? { kind: "Some", value: r }
+      : r.value.kind === "Some"
+        ? { kind: "Some", value: { kind: "Ok", value: r.value.value } }
+        : { kind: "None" },
+  /** Collects an array: all `Ok` → `Ok` of the values, otherwise the first `Err`. */
+  collect: <T, E>(items: readonly Result<T, E>[]): Result<T[], E> => {
+    const values: T[] = [];
+    for (const r of items) {
+      if (r.kind === "Err") return r;
+      values.push(r.value);
+    }
+    return { kind: "Ok", value: values };
   },
 };

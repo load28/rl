@@ -31,9 +31,9 @@ pub(crate) fn emit(program: &Program, src: &str) -> String {
 
 pub(super) struct Emitter<'a> {
     pub(super) bytes: &'a [u8],
-    /// File-wide counter for `try` temporaries — unlike the match IIFE's
-    /// `$rl_m`, try statements emit into the enclosing scope, so every
-    /// temporary needs a unique name (`$rl_t0`, `$rl_t1`, ...).
+    /// File-wide counter for `try` and let-else temporaries — unlike the
+    /// match IIFE's `$rl_m`, these statements emit into the enclosing
+    /// scope, so every temporary needs a unique name (`$rl_t0`, `$rl_t1`, ...).
     try_seq: Cell<usize>,
 }
 
@@ -50,6 +50,9 @@ impl Emitter<'_> {
                     out.extend_from_slice(matches::emit_match(self, expr).as_bytes());
                 }
                 Segment::Try(stmt) => out.extend_from_slice(self.emit_try(stmt).as_bytes()),
+                Segment::LetElse(stmt) => {
+                    out.extend_from_slice(self.emit_let_else(stmt).as_bytes());
+                }
                 Segment::Template(template) => self.emit_template(template, &mut out),
             }
         }
@@ -70,6 +73,44 @@ impl Emitter<'_> {
         let mut code = format!("const {tmp} = ({expr}); if ({tmp}.kind !== \"Ok\") return {tmp};");
         if let Some((kw, binding)) = &stmt.decl {
             code.push_str(&format!(" {kw} {binding} = {tmp}.value;"));
+        }
+        code
+    }
+
+    /// Emits a let-else statement: evaluate once, run the (diverging) `else`
+    /// block unless the tag matches, then destructure the bindings. Like
+    /// `try`, emitted on one line into the enclosing scope; the diverging
+    /// `else` block is what lets tsc narrow the temporary to the matched
+    /// case for the destructuring — no type-level tricks.
+    fn emit_let_else(&self, stmt: &LetElseStmt) -> String {
+        let n = self.try_seq.get();
+        self.try_seq.set(n + 1);
+        let tmp = format!("$rl_t{n}");
+        let expr = self.emit_program(&stmt.expr);
+        let expr = expr.trim();
+        let body = self.emit_program(&stmt.else_body);
+        let body = body.trim();
+        // a trailing line comment would swallow the closing brace
+        let nl = if body.rsplit('\n').next().unwrap_or("").contains("//") {
+            "\n"
+        } else {
+            ""
+        };
+        let mut code = format!(
+            "const {tmp} = ({expr}); if ({tmp}.kind !== \"{}\") {{ {body}{nl} }}",
+            stmt.tag
+        );
+        if !stmt.bindings.is_empty() {
+            let parts = stmt
+                .bindings
+                .iter()
+                .map(|b| match &b.alias {
+                    Some(alias) => format!("{}: {}", b.name, alias),
+                    None => b.name.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            code.push_str(&format!(" {} {{ {} }} = {tmp};", stmt.kw, parts));
         }
         code
     }
