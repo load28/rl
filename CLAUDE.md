@@ -31,10 +31,16 @@ src/
   lib.rs         공개 API: compile(source, &Options) -> Result<String, CompileError>
   error.rs       CompileError(공개) / RlError(내부, 바이트 오프셋) / line_col
   scanner.rs     바이트 단위 저수준 스캔 (문자열/템플릿/주석/정규식/괄호 매칭)
-  transform/
-    mod.rs       메인 변환 루프, Ctx, 템플릿 재귀, 소진성 검사
-    enums.rs     rl enum 파싱·방출 (TS enum 구분 규칙 포함)
-    matches.rs   match 표현식 파싱·방출 (switch IIFE)
+  ast.rs         타입드 AST — 단계 간 계약 (Program/Segment/EnumDecl/MatchExpr...)
+  parser/
+    mod.rs       메인 스캔 루프 → Program (무오류 구조 파싱, 템플릿 재귀)
+    enums.rs     rl enum 구조 파싱 (TS enum 구분 규칙 포함)
+    matches.rs   match 표현식 구조 파싱 (scrutinee/arm body 재귀 파싱)
+  sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입, 소진성
+  codegen/
+    mod.rs       Program → TypeScript 방출 (verbatim 구간은 바이트 그대로 복사)
+    enums.rs     enum 방출 (유니언 type + 생성자 const)
+    matches.rs   match 방출 (switch IIFE)
   verify.rs      swc 기반 검증 — 타입 조각 검사 + 출력 자가 검사
 tests/
   compile.rs     컴파일 출력 스냅샷/에러 단위 테스트
@@ -42,12 +48,15 @@ tests/
   integration.rs tsc 타입체크 + node 실행 통합 테스트 (tsc/node 없으면 skip)
 docs/
   reference/     규범 레퍼런스 — language.md(언어) / cli.md / errors.md
-  design/        설계 문서
+  design/        설계 문서 (compiler-architecture.md — 파이프라인 규범 설명)
   tasks/         태스크 관리 (아래 참조)
 ```
 
-파이프라인: `compile()` = transform(스캔+변환) → check_exhaustiveness →
-verify_output(swc 파싱 자가 검사, `--no-verify`로 생략 가능).
+파이프라인 (swc 스타일 단계 분리): `compile()` = parser::parse(무오류 구조
+파싱 → AST) → sema::check(모든 rl 수준 에러 + 소진성) → codegen::emit(무오류
+방출) → verify_output(swc 파싱 자가 검사, `--no-verify`로 생략 가능).
+새 기능은 해당 단계에만 손댄다: 새 구문 = ast + parser(+codegen), 새 검사 =
+sema, 방출 형태 변경 = codegen.
 
 ## 명령어
 

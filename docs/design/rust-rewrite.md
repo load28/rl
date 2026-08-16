@@ -2,6 +2,10 @@
 
 2026-08-16 · 브레인스토밍 세션 결과를 반영한 설계 문서.
 
+> **참고**: 이 문서의 모듈 배치(`transform.rs` 단일 패스)는 역사적 기록이다.
+> 현재 구조는 [`compiler-architecture.md`](./compiler-architecture.md)의
+> 단계 분리 파이프라인(ast / parser / sema / codegen)이 규범이다 (TASK-010).
+
 ## 배경
 
 v0.1은 의존성 없는 JavaScript(Node)로 구현되어 언어 스펙을 검증했다:
