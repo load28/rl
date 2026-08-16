@@ -9,7 +9,7 @@
 | ID | 제목 | 상태 | 시작일 | 완료일 | 문서 |
 |----|------|------|--------|--------|------|
 | TASK-001 | 태스크 관리 체계 및 CLAUDE.md 구축 | 완료 | 2026-08-16 | 2026-08-16 | [TASK-001](./TASK-001-task-system-and-claude-docs.md) |
-| TASK-002 | transform.rs 모듈 분리 | 대기 | 2026-08-16 | — | [TASK-002](./TASK-002-transform-module-split.md) |
+| TASK-002 | transform.rs 모듈 분리 | 완료 | 2026-08-16 | 2026-08-16 | [TASK-002](./TASK-002-transform-module-split.md) |
 | TASK-003 | 포매팅 표준화 및 린트 게이트 | 대기 | 2026-08-16 | — | [TASK-003](./TASK-003-formatting-and-lint-gates.md) |
 | TASK-004 | 패키지 메타데이터·라이선스·거버넌스 문서 | 대기 | 2026-08-16 | — | [TASK-004](./TASK-004-governance-and-metadata.md) |
 | TASK-005 | CI 파이프라인 구축 | 대기 | 2026-08-16 | — | [TASK-005](./TASK-005-ci-pipeline.md) |

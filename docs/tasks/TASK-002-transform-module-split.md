@@ -1,9 +1,9 @@
 # TASK-002: transform.rs 모듈 분리
 
-- **상태**: 대기
+- **상태**: 완료
 - **시작일**: 2026-08-16
-- **완료일**: —
-- **커밋**: —
+- **완료일**: 2026-08-16
+- **커밋**: (해시는 커밋 후 다음 커밋에서 기입)
 
 ## 목적
 
@@ -33,10 +33,16 @@
 
 ## 검증
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test` — 테스트 코드 무변경으로 59개 전체 통과
+- [x] `cargo fmt --check` — 기존 스타일 유지 (TASK-003에서 일괄 정규화 예정)
+- [x] `cargo clippy --all-targets -- -D warnings` — 경고 0개
+- [x] `cargo test` — 테스트 코드 무변경으로 59개 전체 통과
+- [x] 추가 검증: `examples/shapes.rl` 컴파일 출력이 기존 커밋된
+  `examples/shapes.ts`와 바이트 단위 동일 (배너 제외 diff 없음)
 
 ## 결과
 
-—
+- 삭제: `src/transform.rs` (958줄 단일 파일)
+- 신규: `src/transform/mod.rs` (변환 루프 + Ctx + 소진성 검사),
+  `src/transform/enums.rs` (enum 파싱·방출),
+  `src/transform/matches.rs` (match 파싱·방출)
+- 공개 API·방출 결과·에러 메시지 모두 변경 없음. 코드 이동만 수행.
