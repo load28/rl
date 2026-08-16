@@ -57,7 +57,12 @@ export const Shape = {
   `kind` 필드를 가진 모든 태그드 유니언에 쓸 수 있습니다. `await`, 중첩
   match, 템플릿 리터럴 보간 내부 사용 모두 동작합니다.
 - **컴파일 시점 소진성 검사** — 빠진 케이스는 tsc에 위임하지 않고 rlc가
-  `파일:행:열`과 함께 직접 에러로 보고합니다.
+  `파일:행:열`과 함께 직접 에러로 보고합니다. `Option`/`Result`는 내장
+  enum이라 선언 없이도 검사됩니다.
+- **`Option`/`Result` 표준 라이브러리** — `rlc --emit-std src/rl.ts`로
+  Rust 스타일 `Option<T>`/`Result<T, E>`와 함수형 콤비네이터(`map`,
+  `andThen`, `unwrapOr`, ...)가 담긴 순수 TypeScript 모듈을 생성해
+  import해서 씁니다.
 - **깨끗한 에러 계층** — rl 수준 에러(중복 케이스, 소진되지 않은 match,
   잘못된 필드 타입)는 전부 rlc의 책임. 방출되는 코드는 타입 트릭 없는 순수
   TypeScript라서 rlc가 만든 코드가 tsc 에러를 일으키지 않습니다.
@@ -83,6 +88,7 @@ rlc -o out/ src/         # 출력 디렉터리 지정
 rlc -p file.rl           # stdout으로 출력
 rlc --check src/         # 컴파일만 하고 쓰지 않음 (문법 검사)
 rlc --no-verify file.rl  # swc 출력 검증 생략
+rlc --emit-std src/rl.ts # Option/Result 표준 라이브러리 모듈 생성
 ```
 
 전체 동작 예시는 [`examples/shapes.rl`](./examples/shapes.rl) →
@@ -152,6 +158,34 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
      (add the missing arms or a final `_` arm)
 ```
 
+### `Option` / `Result` — Rust 스타일 함수형 프로그래밍
+
+표준 라이브러리 모듈을 생성해 import하면 `Option`/`Result`와 콤비네이터를
+바로 쓸 수 있습니다. 두 타입은 **내장 enum**이라 match 소진성 검사도
+선언 없이 동작합니다:
+
+```sh
+rlc --emit-std src/rl.ts
+```
+
+```rl
+import { Option, Result } from "./rl.js";
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("not a number") : Result.Ok(n);
+}
+
+const label = match (parseNum(input)) {
+  Ok(value) => `n=${value}`,
+  Err(error) => `error: ${error}`,   // Err 암을 빼면 rlc 컴파일 에러
+};
+
+const port = Option.unwrapOr(Option.fromNullable(config.port), 8080);
+```
+
+전체 API는 [표준 라이브러리 레퍼런스](./docs/reference/std.md) 참조.
+
 문법·판별 규칙·방출 코드의 정확한 정의는
 [언어 레퍼런스](./docs/reference/language.md)를 참고하세요.
 
@@ -160,6 +194,7 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 | 문서 | 내용 |
 |------|------|
 | [언어 레퍼런스](./docs/reference/language.md) | 문법, rl enum/TS enum 판별 규칙, 방출 코드, 소진성 검사, 제한사항 |
+| [표준 라이브러리 레퍼런스](./docs/reference/std.md) | `Option`/`Result` 모듈 API, 값의 형태 계약 |
 | [CLI 레퍼런스](./docs/reference/cli.md) | 옵션, 입출력 경로 규칙, 종료 코드 |
 | [에러 레퍼런스](./docs/reference/errors.md) | 모든 진단 메시지의 형식·원인·해결 |
 | [설계 문서](./docs/design/) | 아키텍처와 설계 결정 기록 |

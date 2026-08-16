@@ -7,8 +7,10 @@
 //! non-exhaustive matches, bad field types — are rlc compile errors with
 //! exact positions; the emitted output is plain TypeScript.
 //!
-//! The whole public API is [`compile`] plus its [`Options`] and error type
-//! [`CompileError`]. The `rlc` binary in this crate is a thin CLI over it.
+//! The whole public API is [`compile`] plus its [`Options`], error type
+//! [`CompileError`], and the standard library source [`STD_SOURCE`]
+//! (`Option`/`Result` with functional combinators, written out by
+//! `rlc --emit-std`). The `rlc` binary in this crate is a thin CLI over it.
 //!
 //! # Example
 //!
@@ -47,9 +49,11 @@ mod error;
 mod parser;
 mod scanner;
 mod sema;
+mod stdlib;
 mod verify;
 
 pub use error::CompileError;
+pub use stdlib::STD_SOURCE;
 
 use error::{RlError, line_col};
 

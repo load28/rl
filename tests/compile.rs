@@ -279,6 +279,58 @@ const f = (e: AppEvent) => match (e) {
 }
 
 #[test]
+fn match_on_builtin_option_is_exhaustiveness_checked() {
+    // Option/Result are built-in enums: checked without a local declaration.
+    let e = err("const f = (o: Option<number>) => match (o) { Some(value) => value };\n");
+    assert!(
+        e.message
+            .contains("match on built-in enum Option is not exhaustive: missing \"None\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn match_on_builtin_result_is_exhaustiveness_checked() {
+    let e = err("const f = (r: Result<number, string>) => match (r) { Err(error) => error };\n");
+    assert!(
+        e.message
+            .contains("match on built-in enum Result is not exhaustive: missing \"Ok\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn full_match_on_builtin_enums_compiles() {
+    let out = ok(r#"
+const f = (o: Option<number>) => match (o) { Some(value) => value, None => 0 };
+const g = (r: Result<number, string>) => match (r) { Ok(value) => value, Err(error) => error.length };
+"#);
+    assert!(out.contains("case \"Some\""));
+    assert!(out.contains("case \"Err\""));
+}
+
+#[test]
+fn wildcard_exempts_builtin_exhaustiveness() {
+    ok("const f = (o: Option<number>) => match (o) { Some(value) => value, _ => 0 };\n");
+}
+
+#[test]
+fn local_enum_shadows_builtin() {
+    // A file-local rl enum named Option replaces the built-in for this file.
+    let e =
+        err("enum Option { Some(), Stale }\nconst f = (o: Option) => match (o) { Some => 1 };\n");
+    assert!(
+        e.message
+            .contains("match on enum Option is not exhaustive: missing \"Stale\""),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("built-in"), "{}", e.message);
+}
+
+#[test]
 fn missing_cases_are_all_listed() {
     let e = err(r#"enum Dir { North, South, East, West(deg: number) }
 const f = (d: Dir) => match (d) { North => 1 };

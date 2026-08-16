@@ -24,6 +24,7 @@ cargo build --release        # → target/release/rlc
 | `-o, --out-dir <dir>` | 출력을 `<dir>` 아래에 씁니다 (경로 규칙은 아래). 필요한 중간 디렉터리는 자동 생성됩니다. |
 | `-p, --print` | 파일을 쓰는 대신 컴파일 결과를 stdout으로 출력합니다. |
 | `--check` | 컴파일만 하고 아무것도 쓰지 않습니다 (문법·소진성 검사 용도). |
+| `--emit-std <file>` | 표준 라이브러리 모듈(`Option`/`Result` + 콤비네이터, [`std.md`](./std.md))을 `<file>`에 씁니다. 입력 없이 단독으로 쓸 수도, 컴파일과 함께 쓸 수도 있습니다. 배너가 붙으며 `--no-banner`로 생략합니다. |
 | `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
 | `--no-verify` | 필드 타입 검사와 생성물 자가 검사를 생략합니다. 검증기가 아직 모르는 최신 TS 문법을 쓴 코드를 위한 탈출구입니다. |
 | `-h, --help` | 도움말을 출력하고 종료합니다 (종료 코드 0). |
@@ -92,11 +93,15 @@ rlc -o dist/ src/           # dist/ 아래에 트리 미러
 rlc -p file.rl > out.ts     # stdout으로 출력
 rlc --check src/            # CI용: 검사만, 쓰기 없음
 rlc --no-verify file.rl     # swc 검증 생략
+rlc --emit-std src/rl.ts    # 표준 라이브러리 모듈 생성
 ```
 
-빌드 파이프라인에서는 tsc 앞 단계로 실행합니다:
+빌드 파이프라인에서는 tsc 앞 단계로 실행합니다 (표준 라이브러리를 쓴다면
+모듈 생성을 앞에 둡니다):
 
 ```jsonc
 // package.json
-{ "scripts": { "build": "rlc src/ && tsc" } }
+{ "scripts": { "build": "rlc --emit-std src/rl.ts && rlc src/ && tsc" } }
 ```
+
+`--emit-std` 성공 시 stderr에 `rlc: std → <파일>` 진행 로그가 출력됩니다.

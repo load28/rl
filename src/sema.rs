@@ -17,7 +17,9 @@
 //!   type parses as a TypeScript type fragment (via [`crate::verify`]).
 //! - `match`: the wildcard `_` arm is last; no duplicate arm tags.
 //! - exhaustiveness: a wildcard-free match whose arm tags all belong to an
-//!   enum declared in this file must cover every case of that enum. Matches
+//!   enum declared in this file — or to a built-in enum (`Option`, `Result`;
+//!   see [`crate::stdlib::BUILTIN_ENUMS`]) — must cover every case of that
+//!   enum. A file-local enum shadows a built-in of the same name. Matches
 //!   whose tags belong to no known enum (imported enums, hand-written
 //!   unions) are not checked — rlc has no type information for them.
 
@@ -162,38 +164,53 @@ impl Checker {
     }
 
     /// Resolves the deferred exhaustiveness checks against the collected
-    /// enum registry.
+    /// enum registry plus the built-in enums (`Option`, `Result`). Local
+    /// enums are tried first, so on a tie they win, and a local enum shadows
+    /// a built-in of the same name entirely.
     fn check_exhaustiveness(&self) -> Result<(), RlError> {
         for check in &self.match_checks {
-            let mut best: Option<(&str, Vec<&str>)> = None; // candidate with fewest missing cases
+            // candidate with fewest missing cases: (name, is_builtin, missing)
+            let mut best: Option<(&str, bool, Vec<&str>)> = None;
             let mut satisfied = false;
-            for (name, cases) in self.enums.iter() {
-                if !check.tags.iter().all(|t| cases.contains(t)) {
+            let locals = self.enums.iter().map(|(name, cases)| {
+                let cases: Vec<&str> = cases.iter().map(String::as_str).collect();
+                (name.as_str(), false, cases)
+            });
+            let builtins = crate::stdlib::BUILTIN_ENUMS
+                .iter()
+                .filter(|(name, _)| !self.enums.contains_key(*name))
+                .map(|(name, cases)| (*name, true, cases.to_vec()));
+            for (name, builtin, cases) in locals.chain(builtins) {
+                if !check.tags.iter().all(|t| cases.contains(&t.as_str())) {
                     continue; // not a candidate: some arm tag is not a case of this enum
                 }
                 let missing: Vec<&str> = cases
                     .iter()
-                    .filter(|c| !check.tags.contains(c))
-                    .map(String::as_str)
+                    .filter(|c| !check.tags.iter().any(|t| t.as_str() == **c))
+                    .copied()
                     .collect();
                 if missing.is_empty() {
                     satisfied = true;
                     break;
                 }
-                if best.as_ref().is_none_or(|(_, m)| missing.len() < m.len()) {
-                    best = Some((name, missing));
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, _, m)| missing.len() < m.len())
+                {
+                    best = Some((name, builtin, missing));
                 }
             }
-            if let (false, Some((name, missing))) = (satisfied, best) {
+            if let (false, Some((name, builtin, missing))) = (satisfied, best) {
                 let list = missing
                     .iter()
                     .map(|m| format!("\"{m}\""))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let qualifier = if builtin { "built-in " } else { "" };
                 return Err(RlError::at(
                     check.offset,
                     format!(
-                        "match on enum {name} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
+                        "match on {qualifier}enum {name} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
                     ),
                 ));
             }

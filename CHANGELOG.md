@@ -8,6 +8,13 @@
 
 ### Added
 
+- `Option`/`Result` 표준 라이브러리: `rlc --emit-std <file>`이 함수형
+  콤비네이터(`map`/`andThen`/`unwrapOr` 등)를 담은 순수 TypeScript 모듈을
+  생성 (`docs/reference/std.md`, 라이브러리 API `rlc::STD_SOURCE`).
+  `Option`(Some/None)·`Result`(Ok/Err)는 내장 enum으로 인식되어 파일에 선언이
+  없어도 match 소진성 검사를 받는다 — 같은 이름의 로컬 rl enum이 있으면
+  로컬이 우선. (TASK-011)
+
 - 태스크 관리 체계 (`docs/tasks/`) 및 `CLAUDE.md` 작업 가이드. (TASK-001)
 - 린트 게이트: `Cargo.toml [lints]` — `unsafe_code` 금지, `missing_docs` 경고,
   clippy `dbg_macro`/`todo`/`unimplemented`. (TASK-003)

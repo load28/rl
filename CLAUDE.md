@@ -37,6 +37,10 @@ src/
     enums.rs     rl enum 구조 파싱 (TS enum 구분 규칙 포함)
     matches.rs   match 표현식 구조 파싱 (scrutinee/arm body 재귀 파싱)
   sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입, 소진성
+                 (내장 Option/Result 포함, 로컬 선언이 섀도잉)
+  stdlib.rs      표준 라이브러리 — STD_SOURCE(공개) / BUILTIN_ENUMS(내부)
+  stdlib/
+    rl_std.ts    std 모듈 본체 (Option/Result + 콤비네이터, --emit-std로 방출)
   codegen/
     mod.rs       Program → TypeScript 방출 (verbatim 구간은 바이트 그대로 복사)
     enums.rs     enum 방출 (유니언 type + 생성자 const)
@@ -45,9 +49,10 @@ src/
 tests/
   compile.rs     컴파일 출력 스냅샷/에러 단위 테스트
   passthrough.rs "유효한 TS는 바이트 그대로 통과" 계약 테스트
+  stdlib.rs      std 모듈 계약 테스트 (통과 + rl enum 방출 형태와 바이트 일치)
   integration.rs tsc 타입체크 + node 실행 통합 테스트 (tsc/node 없으면 skip)
 docs/
-  reference/     규범 레퍼런스 — language.md(언어) / cli.md / errors.md
+  reference/     규범 레퍼런스 — language.md(언어) / cli.md / errors.md / std.md
   design/        설계 문서 (compiler-architecture.md — 파이프라인 규범 설명)
   tasks/         태스크 관리 (아래 참조)
 ```

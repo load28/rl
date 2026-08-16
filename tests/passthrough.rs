@@ -166,3 +166,23 @@ fn ts_computed_member_enum() {
 fn multibyte_content_preserved() {
     assert_passthrough("const 인사말 = \"안녕하세요 🎉\"; // 한글 주석과 match (x) { A => 1 }\n");
 }
+
+#[test]
+fn plain_ts_using_option_result_names_is_untouched() {
+    // The built-in Option/Result enums must never affect pure TypeScript: a
+    // file that works with these names on its own (import, constructors, a
+    // switch over the tags) contains no rl syntax and passes through.
+    assert_passthrough(
+        r#"
+import { Option, Result } from "./rl.js";
+const o = Option.Some(1);
+switch (o.kind) {
+  case "Some":
+    break;
+  case "None":
+    break;
+}
+const r: Result<number, string> = Result.Err("nope");
+"#,
+    );
+}
