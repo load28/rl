@@ -5,8 +5,41 @@
 //! Rust-style `enum` declarations (plain TypeScript enums pass through
 //! untouched) and `match` expressions. rl-level errors — duplicate cases,
 //! non-exhaustive matches, bad field types — are rlc compile errors with
-//! exact positions; the emitted output is plain TypeScript. See
-//! `docs/design/` for the architecture and decisions.
+//! exact positions; the emitted output is plain TypeScript.
+//!
+//! The whole public API is [`compile`] plus its [`Options`] and error type
+//! [`CompileError`]. The `rlc` binary in this crate is a thin CLI over it.
+//!
+//! # Example
+//!
+//! ```
+//! use rlc::{compile, Options};
+//!
+//! let source = r#"
+//! export enum Shape {
+//!   Circle(radius: number),
+//!   Point,
+//! }
+//!
+//! const area = match (Shape.Circle(2)) {
+//!   Circle(radius) => Math.PI * radius * radius,
+//!   Point => 0,
+//! };
+//! "#;
+//!
+//! let ts = compile(source, &Options::default())?;
+//! assert!(ts.contains(r#"{ kind: "Circle"; radius: number }"#));
+//! assert!(ts.contains("switch ($rl_m.kind)"));
+//! # Ok::<(), rlc::CompileError>(())
+//! ```
+//!
+//! # Documentation
+//!
+//! - `docs/reference/language.md` — normative language reference (grammar,
+//!   enum/TS-enum disambiguation, emitted code shapes, exhaustiveness).
+//! - `docs/reference/cli.md` / `docs/reference/errors.md` — CLI and
+//!   diagnostics reference.
+//! - `docs/design/` — architecture and design decisions.
 
 mod error;
 mod scanner;
@@ -19,11 +52,23 @@ use error::{RlError, line_col};
 use transform::Ctx;
 
 /// Compilation options for [`compile`].
+///
+/// The default is no filename and verification enabled:
+///
+/// ```
+/// let opts = rlc::Options::default();
+/// assert_eq!(opts.filename, None);
+/// assert!(opts.verify);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Options<'a> {
-    /// Reported in error messages.
+    /// Filename reported in [`CompileError`]s (and their `Display` output).
+    /// `None` renders as `<input>`.
     pub filename: Option<&'a str>,
     /// Validate enum field types and the generated output with swc.
+    /// Corresponds to the CLI's `--no-verify` escape hatch when `false`;
+    /// disabling it lets syntactically bad field types flow into the output
+    /// (where tsc will report them) and skips the emitted-code self-check.
     pub verify: bool,
 }
 
@@ -37,6 +82,33 @@ impl Default for Options<'_> {
 }
 
 /// Compile rl source text to TypeScript source text.
+///
+/// Only rl `enum` declarations and `match` expressions are rewritten;
+/// everything else — including all plain TypeScript `enum` forms — passes
+/// through byte for byte. A candidate construct that does not fully parse as
+/// rl syntax is passed through untouched rather than reported as an error.
+/// The output has no generated banner comment (that is added by the CLI).
+///
+/// # Errors
+///
+/// Returns a [`CompileError`] with a 1-based position in `source` for every
+/// rl-level rule violation: duplicate enum cases, invalid field types,
+/// duplicate or misplaced `match` arms, and non-exhaustive matches over enums
+/// declared in this source. With [`Options::verify`] enabled, a final
+/// self-check that the generated output parses as TypeScript can also fail
+/// (reported without a position). See `docs/reference/errors.md` for the
+/// full catalogue.
+///
+/// ```
+/// use rlc::{compile, Options};
+///
+/// let source = "enum E { A(x: number), B }\nconst v = match (E.A(1)) { A(x) => x };";
+/// let options = Options { filename: Some("demo.rl"), verify: true };
+/// let err = compile(source, &options).unwrap_err();
+/// assert_eq!((err.line, err.col), (2, 11));
+/// assert!(err.message.contains(r#"not exhaustive: missing "B""#));
+/// assert!(err.to_string().starts_with("demo.rl:2:11: "));
+/// ```
 pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> {
     let to_compile_error = |e: RlError| {
         let (line, col) = match e.offset {

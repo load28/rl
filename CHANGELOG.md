@@ -15,6 +15,8 @@
 - 패키지 메타데이터: `repository`, `rust-version`, `keywords`, `categories`,
   릴리스 프로파일(lto, strip). (TASK-004)
 - CI 파이프라인: fmt/clippy/test 게이트, tsc·node 통합 테스트 포함. (TASK-005)
+- 라이브러리 수준 문서화: 규범 레퍼런스 `docs/reference/`(언어·CLI·에러) 신설,
+  공개 API rustdoc·doctest 확충, README 문서 안내 섹션. (TASK-007)
 
 ### Changed
 
