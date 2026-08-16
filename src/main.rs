@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use rlc::{Options, compile};
+use rlc::{ImportRewrite, Options, compile};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -28,6 +28,9 @@ Options:
   --emit-std <file>     write the standard library module (Option/Result) to <file>
   --no-banner           omit the \"generated\" banner comment
   --no-verify           skip swc validation of types and generated output
+  --rewrite-imports <js|bare|off>
+                        how relative .rl import specifiers are emitted:
+                        js = ./x.js (default), bare = ./x, off = untouched
   -h, --help            show this help
   -v, --version         show version"
     );
@@ -71,6 +74,7 @@ fn main() -> ExitCode {
     let mut check = false;
     let mut banner = true;
     let mut verify = true;
+    let mut rewrite_imports = ImportRewrite::default();
 
     let mut it = argv.iter();
     while let Some(a) = it.next() {
@@ -91,6 +95,19 @@ fn main() -> ExitCode {
                 Some(dir) => out_dir = Some(PathBuf::from(dir)),
                 None => {
                     eprintln!("rlc: --out-dir requires a value");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--rewrite-imports" => match it.next().map(String::as_str) {
+                Some("js") => rewrite_imports = ImportRewrite::Js,
+                Some("bare") => rewrite_imports = ImportRewrite::Bare,
+                Some("off") => rewrite_imports = ImportRewrite::Off,
+                Some(other) => {
+                    eprintln!("rlc: --rewrite-imports expects js, bare, or off (got {other})");
+                    return ExitCode::FAILURE;
+                }
+                None => {
+                    eprintln!("rlc: --rewrite-imports requires a value (js, bare, or off)");
                     return ExitCode::FAILURE;
                 }
             },
@@ -183,6 +200,7 @@ fn main() -> ExitCode {
         let options = Options {
             filename: Some(&filename),
             verify,
+            rewrite_imports,
         };
         let mut code = match compile(&source, &options) {
             Ok(c) => c,

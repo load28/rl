@@ -242,3 +242,36 @@ fn object_method_named_const() {
     // A method *named* `const` is followed by `(`, not `<ident>(`.
     assert_passthrough("const machine = { const(x: number) { return x; } };\nmachine.const(1);\n");
 }
+
+#[test]
+fn import_specifiers_without_rl_extension_untouched() {
+    assert_passthrough(
+        r#"
+import { a } from "./mod.js";
+import def from "../other";
+import * as ns from "pkg";
+export { b } from "./re.ts";
+import "polyfill";
+"#,
+    );
+}
+
+#[test]
+fn rl_specifier_in_string_comment_and_template_untouched() {
+    assert_passthrough(
+        "const s = \"import x from './a.rl'\";\n// import y from \"./b.rl\";\nconst t = `from \"./c.rl\"`;\n",
+    );
+}
+
+#[test]
+fn dynamic_import_of_rl_path_untouched() {
+    // Dynamic import is out of scope for specifier rewriting.
+    assert_passthrough("const m = import(\"./x.rl\");\n");
+}
+
+#[test]
+fn export_declarations_are_not_reexports() {
+    // `export` followed by a declaration must never be scanned for a
+    // module specifier, even if a `from` + string appears later.
+    assert_passthrough("export const from = 1;\nexport function f() { return \"./x.rl\"; }\n");
+}

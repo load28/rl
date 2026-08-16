@@ -27,6 +27,7 @@ cargo build --release        # → target/release/rlc
 | `--emit-std <file>` | 표준 라이브러리 모듈(`Option`/`Result` + 콤비네이터, [`std.md`](./std.md))을 `<file>`에 씁니다. 입력 없이 단독으로 쓸 수도, 컴파일과 함께 쓸 수도 있습니다. 배너가 붙으며 `--no-banner`로 생략합니다. |
 | `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
 | `--no-verify` | 필드 타입 검사와 생성물 자가 검사를 생략합니다. 검증기가 아직 모르는 최신 TS 문법을 쓴 코드를 위한 탈출구입니다. |
+| `--rewrite-imports <js\|bare\|off>` | 상대 경로 `.rl` import 지정자의 방출 형태 ([`language.md` §7](./language.md#7-모듈-rl-import-지정자-재작성)): `js`(기본) = `./x.js`, `bare` = `./x`, `off` = 재작성 끔. 그 외 값은 에러입니다. |
 | `-h, --help` | 도움말을 출력하고 종료합니다 (종료 코드 0). |
 | `-v, --version` | 버전만 출력하고 종료합니다 (종료 코드 0). |
 
@@ -94,6 +95,7 @@ rlc -p file.rl > out.ts     # stdout으로 출력
 rlc --check src/            # CI용: 검사만, 쓰기 없음
 rlc --no-verify file.rl     # swc 검증 생략
 rlc --emit-std src/rl.ts    # 표준 라이브러리 모듈 생성
+rlc --rewrite-imports bare src/   # .rl import를 확장자 없이 방출 (번들러용)
 ```
 
 빌드 파이프라인에서는 tsc 앞 단계로 실행합니다 (표준 라이브러리를 쓴다면

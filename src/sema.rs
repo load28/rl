@@ -92,7 +92,7 @@ impl Checker {
     fn visit_program(&mut self, program: &Program, nested: bool) -> Result<(), RlError> {
         for segment in &program.segments {
             match segment {
-                Segment::Verbatim(_) => {}
+                Segment::Verbatim(_) | Segment::RlImport(_) => {}
                 Segment::Enum(decl) => self.check_enum(decl)?,
                 Segment::Match(expr) => self.check_match(expr)?,
                 Segment::Try(stmt) => self.check_try(stmt, nested)?,

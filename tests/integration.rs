@@ -713,3 +713,80 @@ const f = (e: AppEvent) => match (e) {
     );
     assert!(ok, "{out}");
 }
+
+/* ------------------------------------------------------------------ */
+/* import specifier rewriting                                          */
+/* ------------------------------------------------------------------ */
+
+const ERROR_RL: &str = "export enum CalcError { DivByZero, Overflow(limit: number) }\n";
+const MAIN_RL: &str = r#"import { CalcError } from "./error.rl";
+const e = CalcError.Overflow(9);
+const msg = match (e) {
+  Overflow(limit) => `over ${limit}`,
+  _ => "other",
+};
+console.log(msg);
+export {};
+"#;
+
+#[test]
+fn cross_file_rl_import_typechecks_and_runs() {
+    require_toolchain!();
+    let dir = tmpdir();
+    let error_ts = compile(ERROR_RL, &Options::default()).expect("rl compile failed");
+    let main_ts = compile(MAIN_RL, &Options::default()).expect("rl compile failed");
+    assert!(main_ts.contains("\"./error.js\""), "{main_ts}");
+    fs::write(dir.join("error.ts"), &error_ts).unwrap();
+    fs::write(dir.join("main.ts"), &main_ts).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args(TSC_FLAGS)
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---main.ts---\n{main_ts}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "over 9");
+}
+
+#[test]
+fn cross_file_rl_import_bare_mode_typechecks() {
+    require_toolchain!();
+    let dir = tmpdir();
+    let opts = Options {
+        rewrite_imports: rlc::ImportRewrite::Bare,
+        ..Options::default()
+    };
+    let error_ts = compile(ERROR_RL, &opts).expect("rl compile failed");
+    let main_ts = compile(MAIN_RL, &opts).expect("rl compile failed");
+    assert!(main_ts.contains("\"./error\""), "{main_ts}");
+    fs::write(dir.join("error.ts"), &error_ts).unwrap();
+    fs::write(dir.join("main.ts"), &main_ts).unwrap();
+    // extensionless specifiers need `moduleResolution: bundler` (already in
+    // TSC_FLAGS); type-check only — Node ESM cannot resolve them at runtime.
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg("--noEmit")
+        .args(TSC_FLAGS)
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---main.ts---\n{main_ts}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

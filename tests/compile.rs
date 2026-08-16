@@ -833,3 +833,96 @@ fn filename_appears_in_error_display() {
     let e = compile("const r = match (x) { A => 1, A => 2 };", &opts).expect_err("expected error");
     assert_eq!(e.to_string(), "demo.rl:1:31: match: duplicate arm \"A\"");
 }
+
+/* ------------------------------------------------------------------ */
+/* import specifier rewriting                                          */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn relative_rl_import_is_rewritten_to_js_by_default() {
+    let out = ok("import { CalcError } from \"./error.rl\";\n");
+    assert_eq!(out, "import { CalcError } from \"./error.js\";\n");
+}
+
+#[test]
+fn rewrite_covers_all_static_import_forms() {
+    let out = ok(r#"
+import def from "./a.rl";
+import def2, { named as alias } from "./b.rl";
+import * as ns from "./c.rl";
+import type { T } from "./d.rl";
+import "./side.rl";
+export { x, y as z } from "./e.rl";
+export * from "./f.rl";
+export * as g from "./g.rl";
+export type { U } from "./h.rl";
+"#);
+    for stem in ["a", "b", "c", "d", "side", "e", "f", "g", "h"] {
+        assert!(out.contains(&format!("\"./{stem}.js\"")), "{out}");
+        assert!(!out.contains(&format!("\"./{stem}.rl\"")), "{out}");
+    }
+}
+
+#[test]
+fn rewrite_keeps_quote_style_and_parent_paths() {
+    let out = ok("import a from './x.rl';\nimport b from \"../up/y.rl\";\n");
+    assert_eq!(
+        out,
+        "import a from './x.js';\nimport b from \"../up/y.js\";\n"
+    );
+}
+
+#[test]
+fn bare_mode_strips_the_extension() {
+    let opts = Options {
+        rewrite_imports: rlc::ImportRewrite::Bare,
+        ..Options::default()
+    };
+    let out = compile("import { E } from \"./error.rl\";\n", &opts).unwrap();
+    assert_eq!(out, "import { E } from \"./error\";\n");
+}
+
+#[test]
+fn off_mode_leaves_the_specifier_untouched() {
+    let opts = Options {
+        rewrite_imports: rlc::ImportRewrite::Off,
+        ..Options::default()
+    };
+    let src = "import { E } from \"./error.rl\";\n";
+    assert_eq!(compile(src, &opts).unwrap(), src);
+}
+
+#[test]
+fn non_relative_rl_specifiers_are_untouched() {
+    // Only relative paths are rewritten — package-like and absolute
+    // specifiers keep their bytes.
+    let src = "import a from \"pkg.rl\";\nimport b from \"/abs/x.rl\";\nimport c from \"@scope/p/x.rl\";\n";
+    assert_eq!(ok(src), src);
+}
+
+#[test]
+fn dynamic_import_and_import_meta_are_untouched() {
+    let src = "const m = import(\"./x.rl\");\nconst u = import.meta.url;\n";
+    assert_eq!(ok(src), src);
+}
+
+#[test]
+fn import_assignment_is_untouched() {
+    // TS import-assignment is not a static import declaration.
+    let src = "import fs = require(\"./legacy.rl\");\n";
+    assert_eq!(ok(src), src);
+}
+
+#[test]
+fn rewrite_composes_with_rl_constructs_in_the_same_file() {
+    let out = ok(r#"
+import { CalcError } from "./error.rl";
+enum Shape { Circle(radius: number), Point }
+const area = match (Shape.Point) {
+  Circle(radius) => radius,
+  Point => 0,
+};
+"#);
+    assert!(out.contains("\"./error.js\""), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+}

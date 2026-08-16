@@ -8,6 +8,13 @@
 
 ### Added
 
+- `.rl` 간 import: 상대 경로 `.rl` import 지정자를 방출 시 재작성
+  (`import { E } from "./error.rl"` → `"./error.js"`). 정적 import 선언과
+  re-export 대상, 동적 import·비상대 경로는 통과. CLI `--rewrite-imports
+  <js|bare|off>` (기본 `js`), 라이브러리 `Options::rewrite_imports`
+  (`ImportRewrite`). 모듈 그래프 로드맵의 1단계
+  (`docs/design/module-graph.md`). (TASK-020)
+
 - `try` 문 — Rust의 `?`에 해당하는 에러 전파: `const n = try f();` /
   `try f();`가 `Err`면 둘러싼 함수에서 즉시 return하는 문장으로 컴파일된다
   (IIFE 없음, `await` 호환). TypeScript의 `try/catch` 블록·`try` 멤버

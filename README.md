@@ -60,6 +60,10 @@ export const Shape = {
 - **컴파일 시점 소진성 검사** — 빠진 케이스는 tsc에 위임하지 않고 rlc가
   `파일:행:열`과 함께 직접 에러로 보고합니다. `Option`/`Result`는 내장
   enum이라 선언 없이도 검사됩니다.
+- **`.rl` 간 import** — `import { E } from "./error.rl"`처럼 상대 경로로
+  다른 `.rl` 파일을 그대로 가리키면, 방출 시 지정자가 `./error.js`로
+  재작성되어 tsc/Node/번들러가 해석할 수 있습니다 (`--rewrite-imports`로
+  형태 변경·비활성화).
 - **`Option`/`Result` 표준 라이브러리** — `rlc --emit-std src/rl.ts`로
   Rust 스타일 `Option<T>`/`Result<T, E>`와 함수형 콤비네이터(`map`,
   `andThen`, `unwrapOr`, ...)가 담긴 순수 TypeScript 모듈을 생성해

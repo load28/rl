@@ -39,6 +39,12 @@ pub(crate) enum Segment {
     Try(TryStmt),
     /// An rl let-else statement (Rust-style refutable binding).
     LetElse(LetElseStmt),
+    /// The module specifier string (including quotes) of a static import
+    /// declaration or `export ... from` re-export, lifted only when it is a
+    /// relative path ending in `.rl`. The rest of the statement stays
+    /// verbatim; codegen rewrites the extension per
+    /// [`crate::ImportRewrite`].
+    RlImport(Span),
     /// A template literal; its interpolations are recursively parsed.
     Template(Template),
 }

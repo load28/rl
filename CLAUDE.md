@@ -17,7 +17,10 @@ Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드 
 1. **모든 유효한 TypeScript 파일은 그대로 유효한 `.rl` 파일이다.**
    컴파일러는 rl `enum`/`match` 구문만 변환하고 나머지는 바이트 단위 그대로
    통과시킨다. 구문이 완전하게 파싱될 때만 변환하고, 조금이라도 어긋나면 원문
-   그대로 통과시킨다.
+   그대로 통과시킨다. 유일한 예외는 상대 경로 `.rl` import 지정자의 재작성
+   (TASK-020, `language.md` §7)이다 — 그런 지정자는 tsc가 어차피 해석하지
+   못하므로(`TS2307`) 동작하던 TS가 달라지는 일은 없고, `--rewrite-imports
+   off`로 끌 수 있다. 이 밖의 예외를 추가로 만들지 않는다.
 2. **에러 계층이 분리되어 있다.** rl 수준 에러(중복 케이스, 소진되지 않은 match,
    잘못된 필드 타입)는 전부 rlc가 `파일:행:열`과 함께 직접 보고한다. 생성되는
    코드는 타입 트릭 없는 순수 TypeScript이며, rlc가 방출한 코드 때문에 tsc
@@ -36,6 +39,7 @@ src/
   parser/
     mod.rs       메인 스캔 루프 → Program (무오류 구조 파싱, 템플릿 재귀)
     enums.rs     rl enum 구조 파싱 (TS enum 구분 규칙 포함)
+    imports.rs   정적 import/re-export의 상대 경로 .rl 지정자 추출
     matches.rs   match 표현식 구조 파싱 (scrutinee/arm body 재귀 파싱)
     tries.rs     try 문 구조 파싱 (유효 TS의 try 형태 배제 규칙 포함)
     lets.rs      let-else 문 구조 파싱 (발산 판정 포함)

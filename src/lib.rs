@@ -1,15 +1,17 @@
 //! rl — a tiny preprocessor language that compiles to TypeScript.
 //!
 //! Every valid TypeScript file is a valid `.rl` file and compiles to itself
-//! byte for byte; the compiler only rewrites the three constructs rl adds:
+//! byte for byte; the compiler only rewrites the four constructs rl adds —
 //! Rust-style `enum` declarations (plain TypeScript enums pass through
-//! untouched), `match` expressions, and `try` statements (Rust-`?`-style
-//! error propagation over `Result`). rl-level errors — duplicate cases,
-//! non-exhaustive matches, bad field types, misplaced `try` — are rlc
-//! compile errors with exact positions; the emitted output is plain
-//! TypeScript.
+//! untouched), `match` expressions, `try` statements (Rust-`?`-style error
+//! propagation over `Result`), and let-else statements — plus relative
+//! `.rl` import specifiers, which are rewritten to a consumable form (see
+//! [`ImportRewrite`]). rl-level errors — duplicate cases, non-exhaustive
+//! matches, bad field types, misplaced `try` — are rlc compile errors with
+//! exact positions; the emitted output is plain TypeScript.
 //!
-//! The whole public API is [`compile`] plus its [`Options`], error type
+//! The whole public API is [`compile`] plus its [`Options`] (with
+//! [`ImportRewrite`]), error type
 //! [`CompileError`], and the standard library source [`STD_SOURCE`]
 //! (`Option`/`Result` with functional combinators, written out by
 //! `rlc --emit-std`). The `rlc` binary in this crate is a thin CLI over it.
@@ -59,14 +61,35 @@ pub use stdlib::STD_SOURCE;
 
 use error::{RlError, line_col};
 
+/// How relative `.rl` import specifiers are rewritten in the emitted
+/// TypeScript. Applies to static `import` declarations and
+/// `export ... from` re-exports whose specifier is a relative path ending
+/// in `.rl`; every other specifier — and dynamic `import(...)` — passes
+/// through untouched. Corresponds to the CLI's `--rewrite-imports` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImportRewrite {
+    /// `"./x.rl"` → `"./x.js"` — works under both `moduleResolution:
+    /// nodenext` (Node ESM requires the extension) and `bundler` (tsc maps
+    /// `.js` to `.ts`). The default.
+    #[default]
+    Js,
+    /// `"./x.rl"` → `"./x"` — for bundler setups that prefer
+    /// extensionless specifiers.
+    Bare,
+    /// Leave `.rl` specifiers untouched (byte-for-byte passthrough).
+    Off,
+}
+
 /// Compilation options for [`compile`].
 ///
-/// The default is no filename and verification enabled:
+/// The default is no filename, verification enabled, and `.rl` import
+/// specifiers rewritten to `.js`:
 ///
 /// ```
 /// let opts = rlc::Options::default();
 /// assert_eq!(opts.filename, None);
 /// assert!(opts.verify);
+/// assert_eq!(opts.rewrite_imports, rlc::ImportRewrite::Js);
 /// ```
 #[derive(Debug, Clone)]
 pub struct Options<'a> {
@@ -78,6 +101,8 @@ pub struct Options<'a> {
     /// disabling it lets syntactically bad field types flow into the output
     /// (where tsc will report them) and skips the emitted-code self-check.
     pub verify: bool,
+    /// How relative `.rl` import specifiers are rewritten in the output.
+    pub rewrite_imports: ImportRewrite,
 }
 
 impl Default for Options<'_> {
@@ -85,16 +110,19 @@ impl Default for Options<'_> {
         Options {
             filename: None,
             verify: true,
+            rewrite_imports: ImportRewrite::default(),
         }
     }
 }
 
 /// Compile rl source text to TypeScript source text.
 ///
-/// Only rl `enum` declarations and `match` expressions are rewritten;
-/// everything else — including all plain TypeScript `enum` forms — passes
-/// through byte for byte. A candidate construct that does not fully parse as
-/// rl syntax is passed through untouched rather than reported as an error.
+/// Only rl constructs (`enum` declarations, `match` expressions, `try` and
+/// let-else statements) and relative `.rl` import specifiers (per
+/// [`Options::rewrite_imports`]) are rewritten; everything else — including
+/// all plain TypeScript `enum` forms — passes through byte for byte. A
+/// candidate construct that does not fully parse as rl syntax is passed
+/// through untouched rather than reported as an error.
 /// The output has no generated banner comment (that is added by the CLI).
 ///
 /// # Errors
@@ -111,7 +139,7 @@ impl Default for Options<'_> {
 /// use rlc::{compile, Options};
 ///
 /// let source = "enum E { A(x: number), B }\nconst v = match (E.A(1)) { A(x) => x };";
-/// let options = Options { filename: Some("demo.rl"), verify: true };
+/// let options = Options { filename: Some("demo.rl"), ..Options::default() };
 /// let err = compile(source, &options).unwrap_err();
 /// assert_eq!((err.line, err.col), (2, 11));
 /// assert!(err.message.contains(r#"not exhaustive: missing "B""#));
@@ -137,7 +165,7 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
     // tsc) → code emission (infallible).
     let program = parser::parse(source);
     sema::check(&program, options.verify).map_err(to_compile_error)?;
-    let code = codegen::emit(&program, source);
+    let code = codegen::emit(&program, source, options.rewrite_imports);
 
     if options.verify
         && let Err(message) = verify::verify_output(&code)

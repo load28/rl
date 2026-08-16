@@ -38,7 +38,11 @@ TypeScript 텍스트
 파싱된 파일은 `Program` = 소스 순서의 `Segment` 목록이다:
 
 - `Verbatim(Span)` — rl 구문이 아닌 모든 것. 원본 바이트 범위 그대로.
-- `Enum(EnumDecl)` / `Match(MatchExpr)` — 완전하게 파싱된 rl 구문.
+- `Enum(EnumDecl)` / `Match(MatchExpr)` / `Try(TryStmt)` /
+  `LetElse(LetElseStmt)` — 완전하게 파싱된 rl 구문.
+- `RlImport(Span)` — 정적 import/re-export의 상대 경로 `.rl` 지정자 문자열
+  (따옴표 포함). 문장의 나머지는 verbatim으로 남고, codegen이
+  `ImportRewrite` 모드에 따라 확장자를 재작성한다.
 - `Template(Template)` — 템플릿 리터럴. 보간(`${ }`)마다 재귀 `Program`.
 
 match의 scrutinee와 arm body도 재귀 `Program`이라 트리가 균일하다. 모든

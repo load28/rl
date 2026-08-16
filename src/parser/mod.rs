@@ -23,9 +23,11 @@
 //! Module layout: this file owns the main scan loop and shared token rules;
 //! [`enums`] parses rl `enum` declarations; [`matches`] parses `match`
 //! expressions; [`tries`] parses `try` statements; [`lets`] parses let-else
-//! statements.
+//! statements; [`imports`] lifts relative `.rl` module specifiers out of
+//! static import/re-export statements.
 
 mod enums;
+mod imports;
 mod lets;
 mod matches;
 mod tries;
@@ -226,6 +228,22 @@ impl Parser<'_> {
                         prev_word = "";
                         continue;
                     }
+                }
+
+                // Static import / re-export of a relative `.rl` path — only
+                // the specifier string is lifted; the clause before it and
+                // the rest of the statement stay verbatim.
+                if !dotted
+                    && (word == "import" || word == "export")
+                    && let Some(spec) = imports::parse_rl_import(self, word, j, end)
+                {
+                    flush_verbatim(&mut segments, seg_start, spec.start);
+                    segments.push(Segment::RlImport(spec));
+                    seg_start = spec.end;
+                    i = spec.end;
+                    prev_sig = b'"';
+                    prev_word = "";
+                    continue;
                 }
 
                 if !dotted
