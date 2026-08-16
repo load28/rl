@@ -112,3 +112,7 @@ const msg = match (Result.map(parseNum("42"), (n) => half(n))) {
 `Some`/`None`, `Ok`/`Err`에 대한 `_` 없는 match는 내장 enum 소진성 검사를
 받습니다 — 빠진 케이스는 rlc 컴파일 에러입니다
 ([language.md §4.2](./language.md#42-내장-enum과-소진성-검사)).
+
+`Result`를 반환하는 함수 안에서는 `try` 문으로 에러를 Rust의 `?`처럼 전파할
+수 있습니다: `const n = try parseNum(raw);`
+([language.md §5](./language.md#5-에러-전파-try-문)).

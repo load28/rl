@@ -16,18 +16,25 @@
 mod enums;
 mod matches;
 
+use std::cell::Cell;
+
 use crate::ast::*;
 
 /// Emits a whole program back to TypeScript text.
 pub(crate) fn emit(program: &Program, src: &str) -> String {
     let emitter = Emitter {
         bytes: src.as_bytes(),
+        try_seq: Cell::new(0),
     };
     emitter.emit_program(program)
 }
 
 pub(super) struct Emitter<'a> {
     pub(super) bytes: &'a [u8],
+    /// File-wide counter for `try` temporaries — unlike the match IIFE's
+    /// `$rl_m`, try statements emit into the enclosing scope, so every
+    /// temporary needs a unique name (`$rl_t0`, `$rl_t1`, ...).
+    try_seq: Cell<usize>,
 }
 
 impl Emitter<'_> {
@@ -42,12 +49,29 @@ impl Emitter<'_> {
                 Segment::Match(expr) => {
                     out.extend_from_slice(matches::emit_match(self, expr).as_bytes());
                 }
+                Segment::Try(stmt) => out.extend_from_slice(self.emit_try(stmt).as_bytes()),
                 Segment::Template(template) => self.emit_template(template, &mut out),
             }
         }
         // Safe: the output is a recombination of valid UTF-8 slices of the
         // input plus ASCII text emitted by the compiler.
         String::from_utf8(out).expect("codegen output is valid UTF-8")
+    }
+
+    /// Emits a `try` statement: evaluate once, early-return the `Err` from
+    /// the enclosing function, then bind the `Ok` value (declaration form).
+    /// Emitted on one line so source lines keep lining up roughly.
+    fn emit_try(&self, stmt: &TryStmt) -> String {
+        let n = self.try_seq.get();
+        self.try_seq.set(n + 1);
+        let tmp = format!("$rl_t{n}");
+        let expr = self.emit_program(&stmt.expr);
+        let expr = expr.trim();
+        let mut code = format!("const {tmp} = ({expr}); if ({tmp}.kind !== \"Ok\") return {tmp};");
+        if let Some((kw, binding)) = &stmt.decl {
+            code.push_str(&format!(" {kw} {binding} = {tmp}.value;"));
+        }
+        code
     }
 
     fn emit_template(&self, template: &Template, out: &mut Vec<u8>) {

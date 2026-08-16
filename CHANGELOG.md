@@ -8,6 +8,11 @@
 
 ### Added
 
+- `try` 문 — Rust의 `?`에 해당하는 에러 전파: `const n = try f();` /
+  `try f();`가 `Err`면 둘러싼 함수에서 즉시 return하는 문장으로 컴파일된다
+  (IIFE 없음, `await` 호환). TypeScript의 `try/catch` 블록·`try` 멤버
+  이름은 그대로 통과. match 내부·템플릿 보간에서는 명확한 컴파일 에러.
+  (TASK-012)
 - `Option`/`Result` 표준 라이브러리: `rlc --emit-std <file>`이 함수형
   콤비네이터(`map`/`andThen`/`unwrapOr` 등)를 담은 순수 TypeScript 모듈을
   생성 (`docs/reference/std.md`, 라이브러리 API `rlc::STD_SOURCE`).

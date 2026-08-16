@@ -85,6 +85,22 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 
 ---
 
+## try 에러
+
+### `` `try` cannot be used inside a match expression, a template interpolation, or another `try` — it compiles to a `return` from the enclosing function``
+
+- **원인**: `try` 문이 match 표현식(스크루티니·암 본문), 템플릿 보간, 또는
+  다른 try의 식 내부에서 사용됨. 그 위치의 `return`은 둘러싼 함수가 아니라
+  match의 switch IIFE 등에서 반환되어 Rust와 의미가 달라집니다.
+- **위치**: 해당 `try` 문의 시작 (선언 형태면 `const`/`let`/`var`).
+- **해결**: try를 쓰는 로직을 별도 함수로 추출한 뒤 match 암에서는 그 함수를
+  호출합니다 ([language.md §5.4](./language.md#54-사용-위치-제약)).
+- **참고**: 모듈 최상위(함수 밖)의 try는 이 검사로 잡히지 않고, 생성물의
+  최상위 `return`이 모듈에서 유효하지 않아 출력 검증 에러(아래)로
+  드러납니다.
+
+---
+
 ## 출력 검증 에러
 
 ### `generated TypeScript failed to parse: <상세> (line <행>, col <열> of the generated output). This is either invalid TypeScript passed through from the source or an rlc bug; use --no-verify to bypass.`

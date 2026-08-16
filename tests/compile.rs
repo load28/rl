@@ -341,6 +341,102 @@ const f = (d: Dir) => match (d) { North => 1 };
 }
 
 /* ------------------------------------------------------------------ */
+/* try — Rust-style error propagation                                  */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn try_decl_emits_early_return_and_bind() {
+    let out = ok("function f(): X {\n  const n = try g();\n  return h(n);\n}\n");
+    assert!(
+        out.contains(
+            "const $rl_t0 = (g()); if ($rl_t0.kind !== \"Ok\") return $rl_t0; const n = $rl_t0.value;"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn try_bare_statement_emits_early_return_only() {
+    let out = ok("function f(): X {\n  try g();\n  return h();\n}\n");
+    assert!(
+        out.contains("const $rl_t0 = (g()); if ($rl_t0.kind !== \"Ok\") return $rl_t0;"),
+        "{out}"
+    );
+    assert!(!out.contains("$rl_t0.value"), "{out}");
+}
+
+#[test]
+fn try_temporaries_are_unique_and_keep_declaration_keyword() {
+    let out = ok(
+        "function f(): X {\n  let a: number = try g();\n  var b = try h(a);\n  return k(b);\n}\n",
+    );
+    assert!(out.contains("let a: number = $rl_t0.value;"), "{out}");
+    assert!(out.contains("var b = $rl_t1.value;"), "{out}");
+}
+
+#[test]
+fn try_destructuring_binding_is_kept_verbatim() {
+    let out = ok("function f(): X {\n  const { a, b } = try g();\n  return a + b;\n}\n");
+    assert!(out.contains("const { a, b } = $rl_t0.value;"), "{out}");
+}
+
+#[test]
+fn try_expression_may_contain_a_match() {
+    let out = ok(
+        "function f(): X {\n  const x = try match (m) { Ok(value) => wrap(value), Err(error) => rewrap(error) };\n  return x;\n}\n",
+    );
+    assert!(out.contains("const $rl_t0 = ("), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn try_without_semicolon_is_not_recognized() {
+    // No terminating `;` → not rl syntax; the (invalid-TS) source passes
+    // through and the output self-check reports it.
+    let e = err("function f(): X {\n  const n = try g()\n  return h(n);\n}\n");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn try_inside_match_arm_is_an_error() {
+    let e = err(
+        "const x = match (r) {\n  Ok(value) => { const y = try f(value); return y; },\n  Err(error) => fallback(error),\n};\n",
+    );
+    assert!(
+        e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 18)); // points at the `const`
+}
+
+#[test]
+fn try_inside_match_scrutinee_is_an_error() {
+    let e = err(
+        "const x = match (run(() => { try g(); return h(); })) {\n  Ok(value) => value,\n  Err(error) => 0,\n};\n",
+    );
+    assert!(
+        e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn try_inside_template_interpolation_is_an_error() {
+    let e = err("const s = `${run(() => { try g(); return h(); })}`;\n");
+    assert!(
+        e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
+}
+
+/* ------------------------------------------------------------------ */
 /* swc output verification                                             */
 /* ------------------------------------------------------------------ */
 

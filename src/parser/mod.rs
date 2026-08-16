@@ -3,9 +3,9 @@
 //! The parser is **infallible**: it never reports an error. It scans the
 //! source byte by byte (skipping strings, comments, and regex literals) and
 //! lifts every construct that *fully* parses as rl syntax — an `enum`
-//! declaration or a `match` expression — into a typed AST node; everything
-//! else, including any candidate that deviates even slightly from rl syntax,
-//! is left as a verbatim byte range. This is how the "every valid TypeScript
+//! declaration, a `match` expression, or a `try` statement — into a typed
+//! AST node; everything else, including any candidate that deviates even
+//! slightly from rl syntax, is left as a verbatim byte range. This is how the "every valid TypeScript
 //! file is a valid .rl file" contract is implemented: construct-hood is a
 //! purely structural decision made here, and all rl-level *errors* (duplicate
 //! cases, misplaced wildcard, non-exhaustive match, bad field types) are the
@@ -22,10 +22,11 @@
 //!
 //! Module layout: this file owns the main scan loop and shared token rules;
 //! [`enums`] parses rl `enum` declarations; [`matches`] parses `match`
-//! expressions.
+//! expressions; [`tries`] parses `try` statements.
 
 mod enums;
 mod matches;
+mod tries;
 
 use crate::ast::*;
 use crate::scanner::*;
@@ -234,6 +235,37 @@ impl Parser<'_> {
                     seg_start = parsed_end;
                     i = parsed_end;
                     prev_sig = b')';
+                    prev_word = "";
+                    continue;
+                }
+
+                // `try <expr>;` — never valid TypeScript in expression
+                // position (`try { ... }` blocks and member names are
+                // structurally excluded by the sub-parser).
+                if !dotted
+                    && word == "try"
+                    && let Some((parsed_end, stmt)) = tries::parse_try_stmt(self, j, end)
+                {
+                    flush_verbatim(&mut segments, seg_start, i);
+                    segments.push(Segment::Try(stmt));
+                    seg_start = parsed_end;
+                    i = parsed_end;
+                    prev_sig = b';';
+                    prev_word = "";
+                    continue;
+                }
+
+                // `const|let|var <binding> = try <expr>;` — the `= try`
+                // sequence is never valid TypeScript.
+                if !dotted
+                    && (word == "const" || word == "let" || word == "var")
+                    && let Some((parsed_end, stmt)) = tries::parse_try_decl(self, i, j, end)
+                {
+                    flush_verbatim(&mut segments, seg_start, i);
+                    segments.push(Segment::Try(stmt));
+                    seg_start = parsed_end;
+                    i = parsed_end;
+                    prev_sig = b';';
                     prev_word = "";
                     continue;
                 }

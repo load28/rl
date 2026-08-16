@@ -16,6 +16,10 @@
 //! - `enum`: no duplicate case tags; with verification enabled, every field
 //!   type parses as a TypeScript type fragment (via [`crate::verify`]).
 //! - `match`: the wildcard `_` arm is last; no duplicate arm tags.
+//! - `try`: only allowed in the top-level statement stream — inside a match
+//!   expression, a template interpolation, or another try's expression its
+//!   emitted `return` would not exit the enclosing function, so it is an
+//!   error there.
 //! - exhaustiveness: a wildcard-free match whose arm tags all belong to an
 //!   enum declared in this file — or to a built-in enum (`Option`, `Result`;
 //!   see [`crate::stdlib::BUILTIN_ENUMS`]) — must cover every case of that
@@ -45,7 +49,7 @@ pub(crate) fn check(program: &Program, verify: bool) -> Result<(), RlError> {
         enums: BTreeMap::new(),
         match_checks: Vec::new(),
     };
-    checker.visit_program(program)?;
+    checker.visit_program(program, false)?;
     checker.check_exhaustiveness()
 }
 
@@ -58,22 +62,38 @@ struct Checker {
 }
 
 impl Checker {
-    fn visit_program(&mut self, program: &Program) -> Result<(), RlError> {
+    /// `nested` is true inside any recursively parsed sub-program (match
+    /// scrutinee, arm body, template interpolation, try expression) — the
+    /// contexts where a `try` statement is not allowed.
+    fn visit_program(&mut self, program: &Program, nested: bool) -> Result<(), RlError> {
         for segment in &program.segments {
             match segment {
                 Segment::Verbatim(_) => {}
                 Segment::Enum(decl) => self.check_enum(decl)?,
                 Segment::Match(expr) => self.check_match(expr)?,
+                Segment::Try(stmt) => self.check_try(stmt, nested)?,
                 Segment::Template(template) => {
                     for chunk in &template.chunks {
                         if let TemplateChunk::Interp(interp) = chunk {
-                            self.visit_program(interp)?;
+                            self.visit_program(interp, true)?;
                         }
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    fn check_try(&mut self, stmt: &TryStmt, nested: bool) -> Result<(), RlError> {
+        if nested {
+            return Err(RlError::at(
+                stmt.keyword_off,
+                "`try` cannot be used inside a match expression, a template interpolation, \
+                 or another `try` — it compiles to a `return` from the enclosing function"
+                    .to_string(),
+            ));
+        }
+        self.visit_program(&stmt.expr, true)
     }
 
     fn check_enum(&mut self, decl: &EnumDecl) -> Result<(), RlError> {
@@ -156,9 +176,9 @@ impl Checker {
         }
 
         // children, in source order: scrutinee first, then arm bodies
-        self.visit_program(&expr.scrutinee)?;
+        self.visit_program(&expr.scrutinee, true)?;
         for arm in &expr.arms {
-            self.visit_program(&arm.body)?;
+            self.visit_program(&arm.body, true)?;
         }
         Ok(())
     }

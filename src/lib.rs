@@ -1,11 +1,13 @@
 //! rl — a tiny preprocessor language that compiles to TypeScript.
 //!
 //! Every valid TypeScript file is a valid `.rl` file and compiles to itself
-//! byte for byte; the compiler only rewrites the two constructs rl adds:
+//! byte for byte; the compiler only rewrites the three constructs rl adds:
 //! Rust-style `enum` declarations (plain TypeScript enums pass through
-//! untouched) and `match` expressions. rl-level errors — duplicate cases,
-//! non-exhaustive matches, bad field types — are rlc compile errors with
-//! exact positions; the emitted output is plain TypeScript.
+//! untouched), `match` expressions, and `try` statements (Rust-`?`-style
+//! error propagation over `Result`). rl-level errors — duplicate cases,
+//! non-exhaustive matches, bad field types, misplaced `try` — are rlc
+//! compile errors with exact positions; the emitted output is plain
+//! TypeScript.
 //!
 //! The whole public API is [`compile`] plus its [`Options`], error type
 //! [`CompileError`], and the standard library source [`STD_SOURCE`]
