@@ -16,7 +16,8 @@ pub(crate) fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
-fn at(src: &[u8], i: usize, end: usize) -> Option<u8> {
+/// The byte at `i`, or None at or past `end`.
+pub(crate) fn at(src: &[u8], i: usize, end: usize) -> Option<u8> {
     if i < end { Some(src[i]) } else { None }
 }
 
@@ -182,6 +183,53 @@ pub(crate) fn scan_regex(src: &[u8], mut i: usize, end: usize) -> Option<usize> 
         }
     }
     None
+}
+
+/// Scans a type annotation until a top-level `,` or closing bracket.
+pub(crate) fn scan_type_end(src: &[u8], mut i: usize, end: usize) -> usize {
+    let mut depth = 0usize;
+    while i < end {
+        let c = src[i];
+        if c == b'/' && at(src, i + 1, end) == Some(b'/') {
+            i = line_end(src, i, end);
+            continue;
+        }
+        if c == b'/' && at(src, i + 1, end) == Some(b'*') {
+            i = match find_subslice(src, b"*/", i + 2, end) {
+                Some(e) => e + 2,
+                None => end,
+            };
+            continue;
+        }
+        if c == b'"' || c == b'\'' {
+            i = scan_string(src, i, end);
+            continue;
+        }
+        if c == b'`' {
+            i = skip_template(src, i, end);
+            continue;
+        }
+        if c == b'=' && at(src, i + 1, end) == Some(b'>') {
+            i += 2;
+            continue;
+        }
+        match c {
+            b'(' | b'[' | b'{' | b'<' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth == 0 {
+                    return i;
+                }
+                depth -= 1;
+            }
+            b'>' => {
+                depth = depth.saturating_sub(1);
+            }
+            b',' if depth == 0 => return i,
+            _ => {}
+        }
+        i += 1;
+    }
+    i
 }
 
 /// True if the range contains an `await` token in code position (including

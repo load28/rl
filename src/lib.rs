@@ -41,15 +41,17 @@
 //!   diagnostics reference.
 //! - `docs/design/` — architecture and design decisions.
 
+mod ast;
+mod codegen;
 mod error;
+mod parser;
 mod scanner;
-mod transform;
+mod sema;
 mod verify;
 
 pub use error::CompileError;
 
 use error::{RlError, line_col};
-use transform::Ctx;
 
 /// Compilation options for [`compile`].
 ///
@@ -123,13 +125,13 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
         }
     };
 
-    let ctx = Ctx::new(source, options.verify);
-    let code = transform::transform(&ctx, 0, source.len()).map_err(to_compile_error)?;
-
-    // rlc owns exhaustiveness: wildcard-free matches over enums declared in
-    // this file must cover every case. This is an rl-level error, checked
-    // here — never delegated to tsc.
-    transform::check_exhaustiveness(&ctx).map_err(to_compile_error)?;
+    // The swc-style pipeline: structural parse (infallible; anything that is
+    // not fully rl syntax stays a verbatim byte range) → semantic checks
+    // (every rl-level error, including exhaustiveness — never delegated to
+    // tsc) → code emission (infallible).
+    let program = parser::parse(source);
+    sema::check(&program, options.verify).map_err(to_compile_error)?;
+    let code = codegen::emit(&program, source);
 
     if options.verify
         && let Err(message) = verify::verify_output(&code)
