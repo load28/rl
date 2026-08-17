@@ -20,12 +20,27 @@
  * a `.ts` file import `.rl` without the type checker complaining.
  * ----------------------------------------------------------------------- */
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import * as path from "node:path";
 import { promisify } from "node:util";
 
 import { createUnplugin } from "unplugin";
 
 const run = promisify(execFile);
+
+/**
+ * Default compiler: the prebuilt binary from an installed `rl-lang` npm
+ * package when present (spawned directly — no per-call node launcher),
+ * otherwise `rlc` from PATH as before.
+ */
+function defaultCompiler() {
+  try {
+    const require = createRequire(import.meta.url);
+    return require("rl-lang").binaryPath();
+  } catch {
+    return "rlc";
+  }
+}
 
 /** Virtual suffix that marks a compiled `.rl` module as TypeScript. */
 const TS_SUFFIX = ".ts";
@@ -38,13 +53,14 @@ const stdId = () => path.resolve(process.cwd(), `__rl_std__${TS_SUFFIX}`);
 
 /**
  * @typedef {object} Options
- * @property {string} [compiler] Path to the rlc binary (default: `"rlc"`).
+ * @property {string} [compiler] Path to the rlc binary (default: the
+ *   installed `rl-lang` package's binary, falling back to `"rlc"` on PATH).
  * @property {boolean} [verify] Run rlc's output self-check (default: true).
  */
 
 /** @type {import("unplugin").UnpluginFactory<Options | undefined>} */
 export const unpluginFactory = (options = {}) => {
-  const compiler = options.compiler ?? "rlc";
+  const compiler = options.compiler ?? defaultCompiler();
   const verify = options.verify ?? true;
 
   return {

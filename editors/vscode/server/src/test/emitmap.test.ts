@@ -1,4 +1,4 @@
-/* End-to-end tests for the virtual-document pipeline (TASK-048): the real
+/* End-to-end tests for the virtual-document pipeline (TASK-050): the real
  * `rlc --emit-map` output served to the TypeScript language service via
  * TsProject, with offsets translated through MappedDoc. These drive the
  * real compiler binary, so they skip when it is not on PATH — same rule as

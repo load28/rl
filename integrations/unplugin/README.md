@@ -19,7 +19,9 @@ export default defineConfig({ plugins: [rl()] });
 import { Notice, render } from "./notice.rl";
 ```
 
-`rlc`가 PATH에 있어야 합니다 (`cargo install --path .`).
+컴파일러는 [`rl-lang`](https://www.npmjs.com/package/rl-lang)을 함께
+설치하면 자동으로 찾습니다 (`npm install --save-dev rl-lang`). rl-lang이
+없으면 PATH의 `rlc`(`cargo install --path .`)로 폴백합니다.
 
 ## 서브패스
 
@@ -59,7 +61,7 @@ id에 `.ts`를 붙이는 이유는 **호스트의 TypeScript 처리에 그대로
 
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
-| `compiler` | `"rlc"` | rlc 실행 파일 경로 |
+| `compiler` | 설치된 `rl-lang`의 바이너리, 없으면 `"rlc"` | rlc 실행 파일 경로 |
 | `verify` | `true` | `false`면 `--no-verify`를 넘겨 방출물 자가 검사를 생략합니다 |
 
 ## 타입은 별도입니다

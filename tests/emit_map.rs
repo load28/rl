@@ -1,4 +1,4 @@
-//! Contract tests for `emit_mapped` (TASK-048): the tooling emission that
+//! Contract tests for `emit_mapped` (TASK-050): the tooling emission that
 //! feeds the language server's virtual TypeScript documents.
 //!
 //! The load-bearing invariant is that every mapping points at bytes that

@@ -184,7 +184,7 @@ fn symbols_mode(jobs: &[Job]) -> ExitCode {
 /// copied verbatim from the source (`rlc::emit_mapped`). Parse + emit only —
 /// no rl-level checks, no verification, `.rl`/`@rl/std` specifiers left
 /// untouched — so a buffer mid-edit still emits. This is the feed for the
-/// language server's virtual TypeScript documents (TASK-048).
+/// language server's virtual TypeScript documents (TASK-050).
 fn emit_map_mode(jobs: &[Job]) -> ExitCode {
     let mut entries: Vec<String> = Vec::new();
     let mut failed = false;

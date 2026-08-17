@@ -1,0 +1,168 @@
+# Release — build prebuilt rlc binaries and publish the npm packages.
+#
+# Trigger: push a tag `vX.Y.Z` (from a commit whose Cargo.toml version is
+# X.Y.Z — the verify job enforces the match). Publishing needs the NPM_TOKEN
+# repository secret (an npm automation token with publish rights to rl-lang
+# and the rl-lang-* platform packages).
+#
+# Pipeline: verify tag ↔ Cargo.toml → build 5 targets → assemble npm
+# platform packages + stamp versions → publish (platform packages first,
+# main package last, so rl-lang never points at missing optional deps) →
+# GitHub Release with binary archives.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub Release
+  id-token: write # npm --provenance
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract and compare versions
+        id: version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
+          echo "tag: $TAG_VERSION / Cargo.toml: $CARGO_VERSION"
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::tag v$TAG_VERSION does not match Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build ${{ matrix.key }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - key: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - key: darwin-x64
+            os: macos-latest
+            target: x86_64-apple-darwin
+          - key: darwin-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - key: win32-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Static musl binaries run on every Linux distro regardless of libc;
+      # musl-gcc compiles the one C/asm dependency (psm, via stacker).
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
+        env:
+          TARGET: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rlc-${{ matrix.key }}
+          path: target/${{ matrix.target }}/release/rlc${{ matrix.key == 'win32-x64' && '.exe' || '' }}
+          if-no-files-found: error
+
+  publish:
+    name: publish npm packages + GitHub Release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+
+      - name: Assemble platform packages
+        run: |
+          mkdir -p dist/packages dist/assets
+          for key in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+            exe=rlc; [ "$key" = "win32-x64" ] && exe=rlc.exe
+            node npm/scripts/make-platform-package.mjs \
+              "$key" "binaries/rlc-$key/$exe" dist/packages "$VERSION"
+            # Release archive alongside the npm package.
+            if [ "$key" = "win32-x64" ]; then
+              (cd "dist/packages/rl-lang-$key/bin" && zip -q "$OLDPWD/dist/assets/rlc-v$VERSION-$key.zip" "$exe")
+            else
+              tar -C "dist/packages/rl-lang-$key/bin" -czf "dist/assets/rlc-v$VERSION-$key.tar.gz" "$exe"
+            fi
+          done
+
+      - name: Smoke-test the linux-x64 binary
+        run: |
+          dist/packages/rl-lang-linux-x64/bin/rlc --version
+          # An rl-only enum (fields), so the output proves actual compilation
+          # rather than TS passthrough.
+          printf 'enum E { A(x: number) }\nconst v = E.A(1);\n' > /tmp/smoke.rl
+          dist/packages/rl-lang-linux-x64/bin/rlc -p /tmp/smoke.rl | grep -q 'kind: "A"'
+
+      - name: Stamp version into rl-lang
+        run: node npm/scripts/stamp-version.mjs "$VERSION"
+
+      # Platform packages first: the main package's optionalDependencies
+      # must be resolvable the moment rl-lang@VERSION appears.
+      - name: Publish platform packages
+        run: |
+          for key in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+            npm publish "dist/packages/rl-lang-$key" --provenance --access public
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish rl-lang
+        run: npm publish npm/rl-lang --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/assets/*
+          generate_release_notes: true

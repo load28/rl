@@ -146,7 +146,7 @@ function analyze(doc: TextDocument): Analyzed {
   return result;
 }
 
-// ----------------------------------------- virtual documents (TASK-048)
+// ----------------------------------------- virtual documents (TASK-050)
 
 /* The compiler's emitted TypeScript for each open .rl buffer, refreshed on
  * the validation cadence (`rlc --emit-map`). When current, it is what the
@@ -155,7 +155,7 @@ function analyze(doc: TextDocument): Analyzed {
  * scrutinees and the other rl constructs. Offsets are translated through
  * the emit mappings in both directions; while the entry lags the buffer
  * (or the compiler is missing) the raw text is served and offsets pass
- * through unchanged — the pre-TASK-048 error-recovery behavior. */
+ * through unchanged — the pre-TASK-050 error-recovery behavior. */
 
 interface VirtualEntry {
   version: number;
@@ -705,7 +705,7 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
     // Structural inference first (an `Enum.` mention in the scrutinee, or a
     // unique owner of the written tags) — it is exact when it fires. Then
     // the TypeScript-inferred type of the scrutinee expression, matched
-    // against the visible rl enums (TASK-048). Only then the full pool.
+    // against the visible rl enums (TASK-050). Only then the full pool.
     const inferred =
       analysis.inferEnum(masked, ctx.match, visible) ??
       tsScrutineeEnum(doc, ctx.match, visible);
@@ -760,7 +760,7 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
 
 /**
  * The visible rl enum a match scrutinee has, according to TypeScript's
- * inferred type of the scrutinee expression (TASK-048). The type name must
+ * inferred type of the scrutinee expression (TASK-050). The type name must
  * match a visible enum (pre-alias import names included), and when
  * TypeScript reports the declaring file it must be the file that enum
  * actually lives in — a same-named unrelated TS type is not a hit. Null

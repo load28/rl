@@ -191,7 +191,7 @@ export function runSymbols(
  * the buffer's TypeScript (parse + emit only — no rl-level checks, `.rl`
  * specifiers untouched) plus byte mappings for every chunk copied verbatim
  * from the source. The server serves this as the buffer's virtual document
- * to the TypeScript language service (TASK-048).
+ * to the TypeScript language service (TASK-050).
  * -------------------------------------------------------------------- */
 
 export interface EmitMapResult {

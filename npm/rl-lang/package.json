@@ -1,0 +1,40 @@
+{
+  "name": "rl-lang",
+  "version": "0.0.0-dev",
+  "description": "rl — a tiny TypeScript preprocessor adding Rust-style enums, match expressions, try, let-else, if let and the pipeline operator. Installs the rlc compiler.",
+  "license": "MIT",
+  "bin": {
+    "rlc": "bin/rlc.js"
+  },
+  "main": "index.js",
+  "files": [
+    "bin/rlc.js",
+    "index.js",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/load28/rl",
+    "directory": "npm/rl-lang"
+  },
+  "homepage": "https://github.com/load28/rl#readme",
+  "keywords": [
+    "typescript",
+    "compiler",
+    "preprocessor",
+    "enum",
+    "pattern-matching",
+    "match",
+    "rl"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "rl-lang-linux-x64": "0.0.0-dev",
+    "rl-lang-linux-arm64": "0.0.0-dev",
+    "rl-lang-darwin-x64": "0.0.0-dev",
+    "rl-lang-darwin-arm64": "0.0.0-dev",
+    "rl-lang-win32-x64": "0.0.0-dev"
+  }
+}

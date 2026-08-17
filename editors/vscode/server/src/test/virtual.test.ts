@@ -1,4 +1,4 @@
-/* Tests for the virtual-document offset mapping (TASK-048): byte↔UTF-16
+/* Tests for the virtual-document offset mapping (TASK-050): byte↔UTF-16
  * conversion and bidirectional chunk lookup over `rlc --emit-map` output. */
 import * as assert from "node:assert/strict";
 import { test } from "node:test";

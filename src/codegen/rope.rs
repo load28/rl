@@ -4,7 +4,7 @@
 //! text the compiler writes ([`Piece::Lit`]) or text copied from the source
 //! ([`Piece::Src`], carrying its source byte offset). Flattening the rope
 //! yields the exact same string the old `String` concatenation produced,
-//! plus the source↔output mappings language tooling consumes (TASK-048).
+//! plus the source↔output mappings language tooling consumes (TASK-050).
 //! Byte-identical output is the invariant: a rope is just the old string,
 //! remembered in pieces.
 
