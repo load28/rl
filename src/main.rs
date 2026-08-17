@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use rlc::{Options, compile};
+use rlc::{EnumSymbol, ExternEnum, ImportRewrite, Options, RlImportNames, compile};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -28,6 +28,12 @@ Options:
   --emit-std <file>     write the standard library module (Option/Result) to <file>
   --no-banner           omit the \"generated\" banner comment
   --no-verify           skip swc validation of types and generated output
+  --rewrite-imports <js|bare|off>
+                        how relative .rl import specifiers are emitted:
+                        js = ./x.js (default), bare = ./x, off = untouched
+  --symbols             print rl enum declarations (with positions) and the
+                        direct .rl imports of each input as JSON; compiles
+                        nothing (for language tooling)
   -h, --help            show this help
   -v, --version         show version"
     );
@@ -61,6 +67,195 @@ struct Job {
     out_path: PathBuf,
 }
 
+/// `--symbols`: prints, as a JSON array on stdout, each input file's rl
+/// enum declarations (positions included) and its direct relative `.rl`
+/// imports with the referenced files' exported declarations — the symbol
+/// interface language tooling consumes (module graph phase 3). Compiles
+/// nothing; unreadable *imported* files yield `"resolved": null` while
+/// unreadable *input* files fail the run.
+fn symbols_mode(jobs: &[Job]) -> ExitCode {
+    let mut entries: Vec<String> = Vec::new();
+    let mut failed = false;
+    for job in jobs {
+        let filename = job.file.display().to_string();
+        let source = match fs::read_to_string(&job.file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("rlc: {filename}: {e}");
+                failed = true;
+                continue;
+            }
+        };
+        let mut entry = format!("{{\"file\":{}", json_str(&filename));
+        entry.push_str(",\"enums\":");
+        entry.push_str(&enums_json(&source, &rlc::enum_symbols(&source)));
+        entry.push_str(",\"imports\":[");
+        let dir = job.file.parent().unwrap_or(Path::new("."));
+        let imports = rlc::rl_imports(&source)
+            .iter()
+            .map(|import| {
+                let mut o = format!("{{\"specifier\":{}", json_str(&import.specifier));
+                o.push_str(",\"names\":");
+                o.push_str(&names_json(&import.names));
+                let target = dir.join(&import.specifier);
+                match fs::read_to_string(&target) {
+                    Ok(imported_src) => {
+                        o.push_str(&format!(
+                            ",\"resolved\":{}",
+                            json_str(&target.display().to_string())
+                        ));
+                        let exported: Vec<EnumSymbol> = rlc::enum_symbols(&imported_src)
+                            .into_iter()
+                            .filter(|e| e.exported)
+                            .collect();
+                        o.push_str(",\"enums\":");
+                        o.push_str(&enums_json(&imported_src, &exported));
+                    }
+                    Err(_) => o.push_str(",\"resolved\":null,\"enums\":[]"),
+                }
+                o.push('}');
+                o
+            })
+            .collect::<Vec<_>>();
+        entry.push_str(&imports.join(","));
+        entry.push_str("]}");
+        entries.push(entry);
+    }
+    println!("[{}]", entries.join(","));
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn enums_json(source: &str, symbols: &[EnumSymbol]) -> String {
+    let objects = symbols
+        .iter()
+        .map(|e| {
+            let (line, col) = rlc::line_col(source, e.offset);
+            let cases = e
+                .cases
+                .iter()
+                .map(|c| {
+                    let (line, col) = rlc::line_col(source, c.offset);
+                    let fields = match &c.fields {
+                        None => "null".to_string(),
+                        Some(fields) => format!(
+                            "[{}]",
+                            fields
+                                .iter()
+                                .map(|f| format!(
+                                    "{{\"name\":{},\"optional\":{},\"type\":{}}}",
+                                    json_str(&f.name),
+                                    f.optional,
+                                    json_str(&f.ty)
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
+                    };
+                    format!(
+                        "{{\"tag\":{},\"line\":{line},\"col\":{col},\"fields\":{fields}}}",
+                        json_str(&c.tag)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"name\":{},\"exported\":{},\"generics\":{},\"line\":{line},\"col\":{col},\"cases\":[{cases}]}}",
+                json_str(&e.name),
+                e.exported,
+                json_str(&e.generics)
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", objects.join(","))
+}
+
+fn names_json(names: &RlImportNames) -> String {
+    match names {
+        RlImportNames::Namespace(ns) => {
+            format!("{{\"kind\":\"namespace\",\"name\":{}}}", json_str(ns))
+        }
+        RlImportNames::Named(entries) => format!(
+            "{{\"kind\":\"named\",\"entries\":[{}]}}",
+            entries
+                .iter()
+                .map(|(name, alias)| format!(
+                    "{{\"name\":{},\"alias\":{}}}",
+                    json_str(name),
+                    alias.as_deref().map_or("null".to_string(), json_str)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        RlImportNames::None => "{\"kind\":\"none\"}".to_string(),
+    }
+}
+
+/// Minimal JSON string encoding (quotes, backslashes, control characters).
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Collects enum declarations from the file's direct relative `.rl`
+/// imports, so matches over imported enums get exhaustiveness-checked
+/// (module graph phase 2). One hop, import declarations only — re-exports
+/// bring nothing into scope. A specifier that cannot be read is skipped
+/// silently: module resolution is tsc's domain (`TS2307`), and an unknown
+/// enum simply stays unchecked, exactly as before.
+fn collect_extern_enums(file: &Path, source: &str) -> Vec<ExternEnum> {
+    let dir = file.parent().unwrap_or(Path::new("."));
+    let mut externs: Vec<ExternEnum> = Vec::new();
+    for import in rlc::rl_imports(source) {
+        if matches!(import.names, RlImportNames::None) {
+            continue;
+        }
+        let Ok(imported_src) = fs::read_to_string(dir.join(&import.specifier)) else {
+            continue;
+        };
+        let decls = rlc::exported_enums(&imported_src);
+        let from = Some(import.specifier.clone());
+        match &import.names {
+            RlImportNames::Namespace(ns) => {
+                externs.extend(decls.into_iter().map(|d| ExternEnum {
+                    name: format!("{ns}.{}", d.name),
+                    from: from.clone(),
+                    ..d
+                }));
+            }
+            RlImportNames::Named(entries) => {
+                for (name, alias) in entries {
+                    if let Some(d) = decls.iter().find(|d| &d.name == name) {
+                        externs.push(ExternEnum {
+                            name: alias.clone().unwrap_or_else(|| name.clone()),
+                            tags: d.tags.clone(),
+                            from: from.clone(),
+                        });
+                    }
+                }
+            }
+            RlImportNames::None => unreachable!(),
+        }
+    }
+    externs
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
@@ -71,6 +266,8 @@ fn main() -> ExitCode {
     let mut check = false;
     let mut banner = true;
     let mut verify = true;
+    let mut symbols = false;
+    let mut rewrite_imports = ImportRewrite::default();
 
     let mut it = argv.iter();
     while let Some(a) = it.next() {
@@ -85,12 +282,26 @@ fn main() -> ExitCode {
             }
             "-p" | "--print" => print = true,
             "--check" => check = true,
+            "--symbols" => symbols = true,
             "--no-banner" => banner = false,
             "--no-verify" => verify = false,
             "-o" | "--out-dir" => match it.next() {
                 Some(dir) => out_dir = Some(PathBuf::from(dir)),
                 None => {
                     eprintln!("rlc: --out-dir requires a value");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--rewrite-imports" => match it.next().map(String::as_str) {
+                Some("js") => rewrite_imports = ImportRewrite::Js,
+                Some("bare") => rewrite_imports = ImportRewrite::Bare,
+                Some("off") => rewrite_imports = ImportRewrite::Off,
+                Some(other) => {
+                    eprintln!("rlc: --rewrite-imports expects js, bare, or off (got {other})");
+                    return ExitCode::FAILURE;
+                }
+                None => {
+                    eprintln!("rlc: --rewrite-imports requires a value (js, bare, or off)");
                     return ExitCode::FAILURE;
                 }
             },
@@ -169,6 +380,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if symbols {
+        return symbols_mode(&jobs);
+    }
+
     let mut failed = false;
     for job in &jobs {
         let filename = job.file.display().to_string();
@@ -180,9 +395,12 @@ fn main() -> ExitCode {
                 continue;
             }
         };
+        let extern_enums = collect_extern_enums(&job.file, &source);
         let options = Options {
             filename: Some(&filename),
             verify,
+            rewrite_imports,
+            extern_enums: &extern_enums,
         };
         let mut code = match compile(&source, &options) {
             Ok(c) => c,

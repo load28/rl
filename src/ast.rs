@@ -39,8 +39,39 @@ pub(crate) enum Segment {
     Try(TryStmt),
     /// An rl let-else statement (Rust-style refutable binding).
     LetElse(LetElseStmt),
+    /// A static import declaration or `export ... from` re-export whose
+    /// specifier is a relative path ending in `.rl`. Only the specifier
+    /// string is lifted out of the byte stream — the rest of the statement
+    /// stays verbatim; codegen rewrites the extension per
+    /// [`crate::ImportRewrite`]. The clause's imported names are recorded
+    /// for the declaration-collection API ([`crate::rl_imports`]).
+    RlImport(RlImportDecl),
     /// A template literal; its interpolations are recursively parsed.
     Template(Template),
+}
+
+/// See [`Segment::RlImport`].
+#[derive(Debug)]
+pub(crate) struct RlImportDecl {
+    /// Span of the specifier string, including quotes.
+    pub spec: Span,
+    /// What the statement brings into local scope.
+    pub names: RlImportNames,
+}
+
+/// The bindings a lifted `.rl` import brings into local scope. Collection
+/// is best-effort and never affects whether the specifier is lifted: an
+/// exotic clause entry (e.g. a string import name) is simply skipped, which
+/// only means no exhaustiveness information for that binding.
+#[derive(Debug)]
+pub(crate) enum RlImportNames {
+    /// `import * as ns from ...` — every export, namespace-qualified.
+    Namespace(String),
+    /// `import { a, b as c, type d } from ...` — (exported name, alias).
+    /// A default binding is not recorded (rl enums are named exports).
+    Named(Vec<(String, Option<String>)>),
+    /// A side-effect import or a re-export — nothing enters local scope.
+    None,
 }
 
 /// A structurally parsed rl let-else statement:
@@ -96,6 +127,8 @@ pub(crate) struct TryStmt {
 #[derive(Debug)]
 pub(crate) struct EnumDecl {
     pub name: String,
+    /// Byte offset of the name, for error reporting and the symbol API.
+    pub name_off: usize,
     pub exported: bool,
     /// The verbatim `<...>` generic parameter list, or `""`.
     pub generics: String,

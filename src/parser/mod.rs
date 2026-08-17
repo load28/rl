@@ -1,15 +1,17 @@
 //! Structural parsing of rl source into the AST.
 //!
-//! The parser is **infallible**: it never reports an error. It scans the
-//! source byte by byte (skipping strings, comments, and regex literals) and
-//! lifts every construct that *fully* parses as rl syntax — an `enum`
-//! declaration, a `match` expression, or a `try` statement — into a typed
+//! The parser is **infallible**: it never reports an error. The source is
+//! first lexed into a significant-token stream ([`crate::lexer`]); the
+//! parser walks that stream and lifts every construct that *fully* parses
+//! as rl syntax — an `enum` declaration, a `match` expression, a `try` or
+//! let-else statement, a relative `.rl` import specifier — into a typed
 //! AST node; everything else, including any candidate that deviates even
-//! slightly from rl syntax, is left as a verbatim byte range. This is how the "every valid TypeScript
-//! file is a valid .rl file" contract is implemented: construct-hood is a
-//! purely structural decision made here, and all rl-level *errors* (duplicate
-//! cases, misplaced wildcard, non-exhaustive match, bad field types) are the
-//! semantic phase's job ([`crate::sema`]).
+//! slightly from rl syntax, is left as a verbatim byte range. This is how
+//! the "every valid TypeScript file is a valid .rl file" contract is
+//! implemented: construct-hood is a purely structural decision made here,
+//! and all rl-level *errors* (duplicate cases, misplaced wildcard,
+//! non-exhaustive match, bad field types) are the semantic phase's job
+//! ([`crate::sema`]).
 //!
 //! Plain TypeScript enums keep working: an `enum` declaration is treated as
 //! an rl enum only when at least one case carries a payload `(...)` or the
@@ -17,21 +19,26 @@
 //! valid TS enum is ever lifted.
 //!
 //! Nested code (match scrutinees, arm bodies, template interpolations) is
-//! parsed recursively into sub-[`Program`]s with absolute byte spans, so
-//! every later phase can report exact positions.
+//! parsed recursively from sub-slices of the same token stream, with
+//! absolute byte spans, so every later phase can report exact positions.
 //!
-//! Module layout: this file owns the main scan loop and shared token rules;
-//! [`enums`] parses rl `enum` declarations; [`matches`] parses `match`
-//! expressions; [`tries`] parses `try` statements; [`lets`] parses let-else
-//! statements.
+//! Module layout: this file owns the main token loop and shared token
+//! rules; [`cursor`] is the token cursor sub-parsers consume; [`enums`]
+//! parses rl `enum` declarations; [`matches`] parses `match` expressions;
+//! [`tries`] parses `try` statements; [`lets`] parses let-else statements;
+//! [`imports`] lifts relative `.rl` module specifiers out of static
+//! import/re-export statements.
 
+mod cursor;
 mod enums;
+mod imports;
 mod lets;
 mod matches;
 mod tries;
 
 use crate::ast::*;
-use crate::scanner::*;
+use crate::lexer::{self, Token, TokenKind, TplPart};
+use cursor::Cursor;
 
 // Words that can never be a variant tag, match pattern tag, or binding name.
 // Meeting one of these while trying to parse an rl construct aborts the
@@ -82,36 +89,8 @@ const RESERVED: &[&str] = &[
     "yield",
 ];
 
-// After one of these words, a `/` starts a regex literal, not division.
-const REGEX_PRECEDING_WORDS: &[&str] = &[
-    "return",
-    "typeof",
-    "instanceof",
-    "in",
-    "of",
-    "new",
-    "delete",
-    "void",
-    "throw",
-    "case",
-    "do",
-    "else",
-    "yield",
-    "await",
-];
-
 pub(crate) fn is_reserved(word: &str) -> bool {
     RESERVED.contains(&word)
-}
-
-fn regex_allowed(prev_sig: u8, prev_word: &str) -> bool {
-    if !prev_word.is_empty() {
-        return REGEX_PRECEDING_WORDS.contains(&prev_word);
-    }
-    if prev_sig == 0 {
-        return true;
-    }
-    b"(,=:[!&|?{};~+-*%^<>".contains(&prev_sig)
 }
 
 /// Parses a whole source file into a [`Program`].
@@ -120,11 +99,12 @@ pub(crate) fn parse(src: &str) -> Program {
         src,
         bytes: src.as_bytes(),
     };
-    parser.parse_range(0, src.len())
+    let tokens = lexer::lex(src, 0, src.len());
+    parser.parse_tokens(&tokens, 0, src.len())
 }
 
 /// Shared state for one parse: the source in both views. The parser holds no
-/// mutable state — recursion carries explicit `(start, end)` ranges.
+/// mutable state — recursion carries explicit token slices and byte ranges.
 pub(crate) struct Parser<'a> {
     pub src: &'a str,
     pub bytes: &'a [u8],
@@ -137,162 +117,137 @@ fn flush_verbatim(segments: &mut Vec<Segment>, start: usize, end: usize) {
 }
 
 impl Parser<'_> {
-    /// Parses `bytes[start..end]` into a [`Program`] whose segments cover the
-    /// range exactly, in source order.
-    pub(crate) fn parse_range(&self, start: usize, end: usize) -> Program {
-        let src = self.bytes;
+    /// Parses a lexed token range covering `bytes[start..end]` into a
+    /// [`Program`] whose segments cover the byte range exactly, in source
+    /// order. Bytes between lifted constructs — trivia included — become
+    /// verbatim segments.
+    pub(crate) fn parse_tokens(&self, tokens: &[Token], start: usize, end: usize) -> Program {
         let mut segments: Vec<Segment> = Vec::new();
         let mut seg_start = start;
-        let mut i = start;
-        let mut prev_sig: u8 = 0; // last significant byte scanned
-        let mut prev_word: &str = ""; // last identifier/keyword scanned
+        let mut i = 0usize;
 
-        while i < end {
-            let c = src[i];
+        while i < tokens.len() {
+            let tok = &tokens[i];
+            let word = match tok.kind {
+                TokenKind::Template(ref parts) => {
+                    flush_verbatim(&mut segments, seg_start, tok.span.start);
+                    segments.push(Segment::Template(self.build_template(parts)));
+                    seg_start = tok.span.end;
+                    i += 1;
+                    continue;
+                }
+                TokenKind::Ident => &self.src[tok.span.start..tok.span.end],
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
 
-            // comments — stay verbatim
-            if c == b'/' && at(src, i + 1, end) == Some(b'/') {
-                i = line_end(src, i, end);
-                continue;
-            }
-            if c == b'/' && at(src, i + 1, end) == Some(b'*') {
-                i = match find_subslice(src, b"*/", i + 2, end) {
-                    Some(e) => e + 2,
-                    None => end,
-                };
-                continue;
-            }
+            // property access like `str.match(...)` never starts a construct
+            let dotted = cursor::dotted_at(tokens, 0, i);
+            let prev_word = match i.checked_sub(1).map(|p| &tokens[p]) {
+                Some(t) if matches!(t.kind, TokenKind::Ident) => {
+                    &self.src[t.span.start..t.span.end]
+                }
+                _ => "",
+            };
 
-            // string literals — stay verbatim
-            if c == b'"' || c == b'\'' {
-                i = scan_string(src, i, end);
-                prev_sig = c;
-                prev_word = "";
-                continue;
-            }
-
-            // template literals — interpolations are parsed recursively
-            if c == b'`' {
-                flush_verbatim(&mut segments, seg_start, i);
-                let (e, template) = self.parse_template(i, end);
-                segments.push(Segment::Template(template));
-                seg_start = e;
-                i = e;
-                prev_sig = b'`';
-                prev_word = "";
-                continue;
-            }
-
-            // regex literals — stay verbatim (heuristic: by preceding token)
-            if c == b'/'
-                && regex_allowed(prev_sig, prev_word)
-                && let Some(e) = scan_regex(src, i, end)
-            {
-                i = e;
-                prev_sig = b'/';
-                prev_word = "";
-                continue;
-            }
-
-            if is_ident_start(c) {
-                let j = ident_end(src, i, end);
-                let word = &self.src[i..j];
-                let dotted = prev_sig == b'.'; // property access like `str.match(...)`
-
-                // `const enum` / `declare enum` are TypeScript-only forms — never rl.
-                let ts_enum_prefix = prev_word == "const" || prev_word == "declare";
-                if !dotted && !ts_enum_prefix && (word == "enum" || word == "export") {
-                    let mut exported = false;
-                    let mut kw_end = j;
-                    if word == "export" {
-                        let k = skip_ws_comments(src, j, end);
-                        if k < end && is_ident_start(src[k]) {
-                            let m = ident_end(src, k, end);
-                            if &self.src[k..m] == "enum" {
-                                exported = true;
-                                kw_end = m;
-                            }
+            // `const enum` / `declare enum` are TypeScript-only forms — never rl.
+            let ts_enum_prefix = prev_word == "const" || prev_word == "declare";
+            if !dotted && !ts_enum_prefix && (word == "enum" || word == "export") {
+                let (kw_idx, exported) = if word == "enum" {
+                    (Some(i), false)
+                } else {
+                    match tokens.get(i + 1) {
+                        Some(t)
+                            if matches!(t.kind, TokenKind::Ident)
+                                && &self.src[t.span.start..t.span.end] == "enum" =>
+                        {
+                            (Some(i + 1), true)
                         }
+                        _ => (None, false),
                     }
-                    if (word == "enum" || exported)
-                        && let Some((parsed_end, decl)) =
-                            enums::parse_enum(self, kw_end, end, exported)
-                    {
-                        flush_verbatim(&mut segments, seg_start, i);
-                        segments.push(Segment::Enum(decl));
-                        seg_start = parsed_end;
-                        i = parsed_end;
-                        prev_sig = b';';
-                        prev_word = "";
-                        continue;
-                    }
-                }
-
-                if !dotted
-                    && word == "match"
-                    && let Some((parsed_end, expr)) = matches::parse_match(self, j, end)
+                };
+                if let Some(kw_idx) = kw_idx
+                    && let Some((cur, byte_end, decl)) =
+                        enums::parse_enum(Cursor::new(self, tokens, kw_idx + 1, end), exported)
                 {
-                    flush_verbatim(&mut segments, seg_start, i);
-                    segments.push(Segment::Match(expr));
-                    seg_start = parsed_end;
-                    i = parsed_end;
-                    prev_sig = b')';
-                    prev_word = "";
+                    flush_verbatim(&mut segments, seg_start, tok.span.start);
+                    segments.push(Segment::Enum(decl));
+                    seg_start = byte_end;
+                    i = cur.idx;
                     continue;
                 }
+            }
 
-                // `try <expr>;` — never valid TypeScript in expression
-                // position (`try { ... }` blocks and member names are
-                // structurally excluded by the sub-parser).
-                if !dotted
-                    && word == "try"
-                    && let Some((parsed_end, stmt)) = tries::parse_try_stmt(self, j, end)
-                {
-                    flush_verbatim(&mut segments, seg_start, i);
-                    segments.push(Segment::Try(stmt));
-                    seg_start = parsed_end;
-                    i = parsed_end;
-                    prev_sig = b';';
-                    prev_word = "";
-                    continue;
-                }
-
-                // `const|let|var <binding> = try <expr>;` — the `= try`
-                // sequence is never valid TypeScript — and
-                // `const|let|var Tag(...) = <expr> else { ... };` — a
-                // declaration keyword is never followed by `<ident>(` in
-                // valid TypeScript.
-                if !dotted && (word == "const" || word == "let" || word == "var") {
-                    if let Some((parsed_end, stmt)) = tries::parse_try_decl(self, i, j, end) {
-                        flush_verbatim(&mut segments, seg_start, i);
-                        segments.push(Segment::Try(stmt));
-                        seg_start = parsed_end;
-                        i = parsed_end;
-                        prev_sig = b';';
-                        prev_word = "";
-                        continue;
-                    }
-                    if let Some((parsed_end, stmt)) = lets::parse_let_else(self, i, j, end) {
-                        flush_verbatim(&mut segments, seg_start, i);
-                        segments.push(Segment::LetElse(stmt));
-                        seg_start = parsed_end;
-                        i = parsed_end;
-                        prev_sig = b';';
-                        prev_word = "";
-                        continue;
-                    }
-                }
-
-                i = j;
-                prev_word = word;
-                prev_sig = *word.as_bytes().last().unwrap();
+            // Static import / re-export of a relative `.rl` path — only
+            // the specifier string is lifted; the clause before it and
+            // the rest of the statement stay verbatim.
+            if !dotted
+                && (word == "import" || word == "export")
+                && let Some((cur, decl)) =
+                    imports::parse_rl_import(Cursor::new(self, tokens, i + 1, end), word)
+            {
+                flush_verbatim(&mut segments, seg_start, decl.spec.start);
+                seg_start = decl.spec.end;
+                segments.push(Segment::RlImport(decl));
+                i = cur.idx;
                 continue;
             }
 
-            if !is_ws(c) {
-                prev_sig = c;
-                prev_word = "";
+            if !dotted
+                && word == "match"
+                && let Some((cur, byte_end, expr)) =
+                    matches::parse_match(Cursor::new(self, tokens, i + 1, end), tok.span)
+            {
+                flush_verbatim(&mut segments, seg_start, tok.span.start);
+                segments.push(Segment::Match(expr));
+                seg_start = byte_end;
+                i = cur.idx;
+                continue;
             }
+
+            // `try <expr>;` — never valid TypeScript in expression
+            // position (`try { ... }` blocks and member names are
+            // structurally excluded by the sub-parser).
+            if !dotted
+                && word == "try"
+                && let Some((cur, byte_end, stmt)) =
+                    tries::parse_try_stmt(Cursor::new(self, tokens, i + 1, end), tok.span)
+            {
+                flush_verbatim(&mut segments, seg_start, tok.span.start);
+                segments.push(Segment::Try(stmt));
+                seg_start = byte_end;
+                i = cur.idx;
+                continue;
+            }
+
+            // `const|let|var <binding> = try <expr>;` — the `= try`
+            // sequence is never valid TypeScript — and
+            // `const|let|var Tag(...) = <expr> else { ... };` — a
+            // declaration keyword is never followed by `<ident>(` in
+            // valid TypeScript.
+            if !dotted && (word == "const" || word == "let" || word == "var") {
+                if let Some((cur, byte_end, stmt)) =
+                    tries::parse_try_decl(Cursor::new(self, tokens, i + 1, end), tok.span)
+                {
+                    flush_verbatim(&mut segments, seg_start, tok.span.start);
+                    segments.push(Segment::Try(stmt));
+                    seg_start = byte_end;
+                    i = cur.idx;
+                    continue;
+                }
+                if let Some((cur, byte_end, stmt)) =
+                    lets::parse_let_else(Cursor::new(self, tokens, i + 1, end), tok.span)
+                {
+                    flush_verbatim(&mut segments, seg_start, tok.span.start);
+                    segments.push(Segment::LetElse(stmt));
+                    seg_start = byte_end;
+                    i = cur.idx;
+                    continue;
+                }
+            }
+
             i += 1;
         }
 
@@ -300,41 +255,18 @@ impl Parser<'_> {
         Program { segments }
     }
 
-    /// `bytes[start]` is a backtick — splits the template into raw chunks and
-    /// recursively parsed `${ }` interpolations. Returns the index just past
-    /// the closing backtick (or `end` if unterminated).
-    fn parse_template(&self, start: usize, end: usize) -> (usize, Template) {
-        let src = self.bytes;
-        let mut chunks: Vec<TemplateChunk> = Vec::new();
-        let mut raw_start = start; // includes the opening backtick
-        let push_raw = |chunks: &mut Vec<TemplateChunk>, start: usize, end: usize| {
-            if start < end {
-                chunks.push(TemplateChunk::Raw(Span { start, end }));
-            }
-        };
-        let mut i = start + 1;
-        while i < end {
-            let c = src[i];
-            if c == b'\\' {
-                i = (i + 2).min(end);
-                continue;
-            }
-            if c == b'`' {
-                i += 1;
-                push_raw(&mut chunks, raw_start, i);
-                return (i, Template { chunks });
-            }
-            if c == b'$' && at(src, i + 1, end) == Some(b'{') {
-                push_raw(&mut chunks, raw_start, i);
-                let close = find_matching(src, i + 1, end).unwrap_or(end);
-                chunks.push(TemplateChunk::Interp(self.parse_range(i + 2, close)));
-                i = (close + 1).min(end);
-                raw_start = i;
-                continue;
-            }
-            i += 1;
-        }
-        push_raw(&mut chunks, raw_start, end);
-        (end, Template { chunks })
+    /// Turns a lexed template token into the AST template, recursively
+    /// parsing each interpolation's token stream.
+    fn build_template(&self, parts: &[TplPart]) -> Template {
+        let chunks = parts
+            .iter()
+            .map(|part| match part {
+                TplPart::Raw(span) => TemplateChunk::Raw(*span),
+                TplPart::Interp { span, tokens } => {
+                    TemplateChunk::Interp(self.parse_tokens(tokens, span.start, span.end))
+                }
+            })
+            .collect();
+        Template { chunks }
     }
 }

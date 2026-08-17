@@ -27,15 +27,19 @@
 //!   statement (`return`/`throw`/`break`/`continue`) — otherwise the
 //!   destructuring after the block would run with the case unproven.
 //! - exhaustiveness: a wildcard-free match whose arm tags all belong to an
-//!   enum declared in this file — or to a built-in enum (`Option`, `Result`;
-//!   see [`crate::stdlib::BUILTIN_ENUMS`]) — must cover every case of that
+//!   enum declared in this file, an imported declaration
+//!   ([`crate::Options::extern_enums`], collected by the CLI from direct
+//!   relative `.rl` imports), or a built-in enum (`Option`, `Result`; see
+//!   [`crate::stdlib::BUILTIN_ENUMS`]) — must cover every case of that
 //!   enum with unguarded arms (a guard may be false, so guarded arms
-//!   identify the enum but cover nothing). A file-local enum shadows a built-in of the same name. Matches
-//!   whose tags belong to no known enum (imported enums, hand-written
-//!   unions) are not checked — rlc has no type information for them.
+//!   identify the enum but cover nothing). Same-name shadowing runs
+//!   local > imported > built-in. Matches whose tags belong to no known
+//!   enum (hand-written unions, unresolved imports) are not checked — rlc
+//!   has no type information for them.
 
 use std::collections::BTreeMap;
 
+use crate::ExternEnum;
 use crate::ast::*;
 use crate::error::RlError;
 use crate::verify;
@@ -53,21 +57,30 @@ struct MatchCheck {
     covered: Vec<String>,
 }
 
-/// Checks a whole program; `verify` enables swc validation of field types.
-pub(crate) fn check(program: &Program, verify: bool) -> Result<(), RlError> {
+/// Checks a whole program; `verify` enables swc validation of field types;
+/// `externs` are enum declarations collected from imported modules
+/// ([`crate::Options::extern_enums`]).
+pub(crate) fn check(
+    program: &Program,
+    verify: bool,
+    externs: &[ExternEnum],
+) -> Result<(), RlError> {
     let mut checker = Checker {
         verify,
         enums: BTreeMap::new(),
+        externs,
         match_checks: Vec::new(),
     };
     checker.visit_program(program, false)?;
     checker.check_exhaustiveness()
 }
 
-struct Checker {
+struct Checker<'a> {
     verify: bool,
     /// rl enums declared in this file: name → case tags.
     enums: BTreeMap<String, Vec<String>>,
+    /// Enum declarations imported from other modules.
+    externs: &'a [ExternEnum],
     /// Wildcard-free matches to exhaustiveness-check after the walk.
     match_checks: Vec<MatchCheck>,
 }
@@ -85,14 +98,14 @@ fn binding_set(bindings: &Option<Vec<Binding>>) -> Vec<(&str, &str)> {
     set
 }
 
-impl Checker {
+impl Checker<'_> {
     /// `nested` is true inside any recursively parsed sub-program (match
     /// scrutinee, arm body, template interpolation, try expression) — the
     /// contexts where a `try` statement is not allowed.
     fn visit_program(&mut self, program: &Program, nested: bool) -> Result<(), RlError> {
         for segment in &program.segments {
             match segment {
-                Segment::Verbatim(_) => {}
+                Segment::Verbatim(_) | Segment::RlImport(_) => {}
                 Segment::Enum(decl) => self.check_enum(decl)?,
                 Segment::Match(expr) => self.check_match(expr)?,
                 Segment::Try(stmt) => self.check_try(stmt, nested)?,
@@ -261,23 +274,34 @@ impl Checker {
     }
 
     /// Resolves the deferred exhaustiveness checks against the collected
-    /// enum registry plus the built-in enums (`Option`, `Result`). Local
-    /// enums are tried first, so on a tie they win, and a local enum shadows
-    /// a built-in of the same name entirely.
+    /// enum registry, the imported declarations, and the built-in enums
+    /// (`Option`, `Result`), in that order — so on a tie the nearer origin
+    /// wins. A local enum shadows an imported or built-in enum of the same
+    /// name entirely; an imported enum likewise shadows a built-in.
     fn check_exhaustiveness(&self) -> Result<(), RlError> {
         for check in &self.match_checks {
-            // candidate with fewest missing cases: (name, is_builtin, missing)
-            let mut best: Option<(&str, bool, Vec<&str>)> = None;
+            // candidate with fewest missing cases: (name, origin, missing)
+            let mut best: Option<(&str, Origin, Vec<&str>)> = None;
             let mut satisfied = false;
             let locals = self.enums.iter().map(|(name, cases)| {
                 let cases: Vec<&str> = cases.iter().map(String::as_str).collect();
-                (name.as_str(), false, cases)
+                (name.as_str(), Origin::Local, cases)
             });
+            let externs = self
+                .externs
+                .iter()
+                .filter(|e| !self.enums.contains_key(&e.name))
+                .map(|e| {
+                    let cases: Vec<&str> = e.tags.iter().map(String::as_str).collect();
+                    (e.name.as_str(), Origin::Extern(e.from.as_deref()), cases)
+                });
             let builtins = crate::stdlib::BUILTIN_ENUMS
                 .iter()
-                .filter(|(name, _)| !self.enums.contains_key(*name))
-                .map(|(name, cases)| (*name, true, cases.to_vec()));
-            for (name, builtin, cases) in locals.chain(builtins) {
+                .filter(|(name, _)| {
+                    !self.enums.contains_key(*name) && !self.externs.iter().any(|e| e.name == *name)
+                })
+                .map(|(name, cases)| (*name, Origin::Builtin, cases.to_vec()));
+            for (name, origin, cases) in locals.chain(externs).chain(builtins) {
                 if !check.tags.iter().all(|t| cases.contains(&t.as_str())) {
                     continue; // not a candidate: some arm tag is not a case of this enum
                 }
@@ -295,24 +319,38 @@ impl Checker {
                     .as_ref()
                     .is_none_or(|(_, _, m)| missing.len() < m.len())
                 {
-                    best = Some((name, builtin, missing));
+                    best = Some((name, origin, missing));
                 }
             }
-            if let (false, Some((name, builtin, missing))) = (satisfied, best) {
+            if let (false, Some((name, origin, missing))) = (satisfied, best) {
                 let list = missing
                     .iter()
                     .map(|m| format!("\"{m}\""))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let qualifier = if builtin { "built-in " } else { "" };
+                let described = match origin {
+                    Origin::Local => format!("enum {name}"),
+                    Origin::Builtin => format!("built-in enum {name}"),
+                    Origin::Extern(Some(from)) => format!("enum {name} (imported from \"{from}\")"),
+                    Origin::Extern(None) => format!("imported enum {name}"),
+                };
                 return Err(RlError::at(
                     check.offset,
                     format!(
-                        "match on {qualifier}enum {name} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
+                        "match on {described} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
                     ),
                 ));
             }
         }
         Ok(())
     }
+}
+
+/// Where an exhaustiveness candidate was declared, for error messages and
+/// resolution order.
+#[derive(Clone, Copy)]
+enum Origin<'a> {
+    Local,
+    Extern(Option<&'a str>),
+    Builtin,
 }

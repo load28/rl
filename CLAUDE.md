@@ -17,7 +17,10 @@ Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드 
 1. **모든 유효한 TypeScript 파일은 그대로 유효한 `.rl` 파일이다.**
    컴파일러는 rl `enum`/`match` 구문만 변환하고 나머지는 바이트 단위 그대로
    통과시킨다. 구문이 완전하게 파싱될 때만 변환하고, 조금이라도 어긋나면 원문
-   그대로 통과시킨다.
+   그대로 통과시킨다. 유일한 예외는 상대 경로 `.rl` import 지정자의 재작성
+   (TASK-020, `language.md` §7)이다 — 그런 지정자는 tsc가 어차피 해석하지
+   못하므로(`TS2307`) 동작하던 TS가 달라지는 일은 없고, `--rewrite-imports
+   off`로 끌 수 있다. 이 밖의 예외를 추가로 만들지 않는다.
 2. **에러 계층이 분리되어 있다.** rl 수준 에러(중복 케이스, 소진되지 않은 match,
    잘못된 필드 타입)는 전부 rlc가 `파일:행:열`과 함께 직접 보고한다. 생성되는
    코드는 타입 트릭 없는 순수 TypeScript이며, rlc가 방출한 코드 때문에 tsc
@@ -32,15 +35,18 @@ src/
   lib.rs         공개 API: compile(source, &Options) -> Result<String, CompileError>
   error.rs       CompileError(공개) / RlError(내부, 바이트 오프셋) / line_col
   scanner.rs     바이트 단위 저수준 스캔 (문자열/템플릿/주석/정규식/괄호 매칭)
+  lexer.rs       유의 토큰 스트림 생성 (정규식 휴리스틱, 템플릿 중첩 렉싱)
   ast.rs         타입드 AST — 단계 간 계약 (Program/Segment/EnumDecl/MatchExpr...)
   parser/
-    mod.rs       메인 스캔 루프 → Program (무오류 구조 파싱, 템플릿 재귀)
+    mod.rs       메인 토큰 루프 → Program (무오류 구조 파싱, 템플릿 재귀)
+    cursor.rs    토큰 커서 (Copy 백트래킹, 괄호 매칭, 공용 토큰 스캔)
     enums.rs     rl enum 구조 파싱 (TS enum 구분 규칙 포함)
+    imports.rs   정적 import/re-export의 상대 경로 .rl 지정자 추출
     matches.rs   match 표현식 구조 파싱 (scrutinee/arm body 재귀 파싱)
     tries.rs     try 문 구조 파싱 (유효 TS의 try 형태 배제 규칙 포함)
     lets.rs      let-else 문 구조 파싱 (발산 판정 포함)
   sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입, 소진성
-                 (내장 Option/Result 포함, 로컬 선언이 섀도잉)
+                 (임포트 선언·내장 Option/Result 포함, 로컬 > 임포트 > 내장 섀도잉)
   stdlib.rs      표준 라이브러리 — STD_SOURCE(공개) / BUILTIN_ENUMS(내부)
   stdlib/
     rl_std.ts    std 모듈 본체 (Option/Result + 콤비네이터, --emit-std로 방출)
@@ -61,9 +67,10 @@ docs/
   tasks/         태스크 관리 (아래 참조)
 ```
 
-파이프라인 (swc 스타일 단계 분리): `compile()` = parser::parse(무오류 구조
-파싱 → AST) → sema::check(모든 rl 수준 에러 + 소진성) → codegen::emit(무오류
-방출) → verify_output(swc 파싱 자가 검사, `--no-verify`로 생략 가능).
+파이프라인 (swc 스타일 단계 분리): `compile()` = parser::parse(lexer::lex
+토큰화 → 무오류 구조 파싱 → AST) → sema::check(모든 rl 수준 에러 + 소진성) →
+codegen::emit(무오류 방출) → verify_output(swc 파싱 자가 검사, `--no-verify`로
+생략 가능).
 새 기능은 해당 단계에만 손댄다: 새 구문 = ast + parser(+codegen), 새 검사 =
 sema, 방출 형태 변경 = codegen.
 

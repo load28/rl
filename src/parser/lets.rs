@@ -17,173 +17,131 @@
 //! The "else block must diverge" rule is *computed* here (a bool on the AST
 //! node) but *enforced* by [`crate::sema`] — the parser stays infallible.
 
-use super::Parser;
+use super::cursor::{Cursor, dotted_at, skip_match_shape};
 use crate::ast::LetElseStmt;
-use crate::scanner::*;
+use crate::lexer::TokenKind;
 
-/// `i..j` is a `const`/`let`/`var` keyword. Parses
-/// `Tag(bindings...) = <expr> else { ... };`; on success returns the index
-/// just past the `;` and the parsed statement.
-pub(super) fn parse_let_else(
-    p: &Parser,
-    i: usize,
-    j: usize,
-    end: usize,
-) -> Option<(usize, LetElseStmt)> {
-    let src = p.bytes;
-
+/// `cur` is positioned just past a `const`/`let`/`var` keyword
+/// (`kw_span`). Parses `Tag(bindings...) = <expr> else { ... };`; on
+/// success returns the advanced cursor, the byte just past the `;`, and
+/// the parsed statement.
+pub(super) fn parse_let_else<'t>(
+    mut cur: Cursor<'t>,
+    kw_span: crate::ast::Span,
+) -> Option<(Cursor<'t>, usize, LetElseStmt)> {
     // pattern: `Tag(bindings...)`
-    let tag_start = skip_ws_comments(src, j, end);
-    if tag_start >= end || !is_ident_start(src[tag_start]) {
-        return None;
-    }
-    let tag_end = ident_end(src, tag_start, end);
-    let tag = &p.src[tag_start..tag_end];
+    let (tag, _) = cur.eat_ident()?;
     if super::is_reserved(tag) {
         return None; // `const enum E { ... }` and friends
     }
-    let open = skip_ws_comments(src, tag_end, end);
-    if at(src, open, end) != Some(b'(') {
+    if !cur.at_punct(b'(') {
         return None;
     }
-    let close = find_matching(src, open, end)?;
-    let bindings = super::matches::parse_bindings(p, open + 1, close)?;
+    let open = cur.idx;
+    let close = cur.find_close()?;
+    let bindings =
+        super::matches::parse_bindings(cur.sub(open + 1, close, cur.tokens[close].span.start))?;
+    cur.idx = close + 1;
 
-    // `=` (but not `==` / `=>`)
-    let eq = skip_ws_comments(src, close + 1, end);
-    if at(src, eq, end) != Some(b'=') || matches!(at(src, eq + 1, end), Some(b'=') | Some(b'>')) {
+    // `=` (but not `==` / `=>`; `=>` lexes as a fused Arrow token)
+    let eq = cur.eat_punct(b'=')?;
+    if matches!(cur.peek(), Some(t) if t.span.start == eq.end
+        && matches!(cur.parser.bytes[t.span.start], b'=' | b'>'))
+    {
         return None;
     }
 
     // `<expr> else`
-    let expr_start = skip_ws_comments(src, eq + 1, end);
-    let (expr_end, else_off) = scan_expr_until_else(src, expr_start, end)?;
-    if p.src[expr_start..expr_end].trim().is_empty() {
+    let expr_from = cur.idx;
+    let expr_start = cur.stop_byte_at(cur.idx);
+    let (expr_end, else_idx) = expr_until_else(&cur)?;
+    if cur.parser.src[expr_start..expr_end].trim().is_empty() {
         return None;
     }
+    let else_off = cur.tokens[else_idx].span.start;
+    cur.idx = else_idx + 1;
 
     // `{ ... };`
-    let b = skip_ws_comments(src, else_off + "else".len(), end);
-    if at(src, b, end) != Some(b'{') {
+    if !cur.at_punct(b'{') {
         return None;
     }
-    let close_brace = find_matching(src, b, end)?;
-    let semi = skip_ws_comments(src, close_brace + 1, end);
-    if at(src, semi, end) != Some(b';') {
-        return None;
-    }
+    let body_open = cur.idx;
+    let body_close = cur.find_close()?;
+    cur.idx = body_close + 1;
+    let semi = cur.eat_punct(b';')?;
 
+    let body_range = (
+        cur.tokens[body_open].span.start + 1,
+        cur.tokens[body_close].span.start,
+    );
+    let body_tokens = &cur.tokens[body_open + 1..body_close];
     Some((
-        semi + 1,
+        cur,
+        semi.end,
         LetElseStmt {
-            keyword_off: i,
-            kw: p.src[i..j].to_string(),
+            keyword_off: kw_span.start,
+            kw: cur.parser.src[kw_span.start..kw_span.end].to_string(),
             tag: tag.to_string(),
             bindings,
-            expr: p.parse_range(expr_start, expr_end),
-            else_body: p.parse_range(b + 1, close_brace),
+            expr: cur
+                .parser
+                .parse_tokens(&cur.tokens[expr_from..else_idx], expr_start, expr_end),
+            else_body: cur
+                .parser
+                .parse_tokens(body_tokens, body_range.0, body_range.1),
             else_off,
-            diverges: block_diverges(src, b + 1, close_brace),
+            diverges: block_diverges(cur.parser, body_tokens),
         },
     ))
 }
 
-/// Scans the bound expression until a top-level undotted `else`, returning
-/// `(expression end, offset of the else keyword)`. The same aborts as the
-/// try statement's expression scanner apply — anything that cannot appear
-/// at the top level of an expression (a bare `{`, a closer, `,`, `=` except
-/// `=>`, `:` without a pending `?`, `;`, an undotted statement-only
-/// keyword) fails the parse so the text passes through.
-fn scan_expr_until_else(src: &[u8], mut i: usize, end: usize) -> Option<(usize, usize)> {
+/// Scans the bound expression from `cur.idx` until a top-level undotted
+/// `else`, returning `(expression end byte, else token index)`. The same
+/// aborts as the try statement's expression scanner apply — anything that
+/// cannot appear at the top level of an expression (a bare `{`, a closer,
+/// `,`, `=` except the fused `=>`, `:` without a pending `?`, `;`, an
+/// undotted statement-only keyword) fails the parse so the text passes
+/// through.
+fn expr_until_else(cur: &Cursor) -> Option<(usize, usize)> {
     let mut depth = 0usize;
     let mut ternaries = 0usize;
-    let mut prev_sig = 0u8;
-    let mut expr_end = i;
-    while i < end {
-        let c = src[i];
-        if c == b'/' && at(src, i + 1, end) == Some(b'/') {
-            i = line_end(src, i, end);
-            continue;
-        }
-        if c == b'/' && at(src, i + 1, end) == Some(b'*') {
-            i = match find_subslice(src, b"*/", i + 2, end) {
-                Some(e) => e + 2,
-                None => end,
-            };
-            continue;
-        }
-        if c == b'"' || c == b'\'' {
-            i = scan_string(src, i, end);
-            prev_sig = c;
-            expr_end = i;
-            continue;
-        }
-        if c == b'`' {
-            i = skip_template(src, i, end);
-            prev_sig = b'`';
-            expr_end = i;
-            continue;
-        }
-        if c == b'=' && at(src, i + 1, end) == Some(b'>') {
-            i += 2;
-            prev_sig = b'>';
-            expr_end = i;
-            continue;
-        }
-        if is_ident_start(c) {
-            let j = ident_end(src, i, end);
-            if depth == 0 && prev_sig != b'.' {
-                if &src[i..j] == b"else" {
+    let mut expr_end = cur.stop_byte_at(cur.idx);
+    let mut k = cur.idx;
+    while k < cur.tokens.len() {
+        let t = &cur.tokens[k];
+        if let TokenKind::Ident = t.kind {
+            if depth == 0 && !dotted_at(cur.tokens, cur.idx, k) {
+                let word = cur.text(t);
+                if word == "else" {
                     return if ternaries == 0 {
-                        Some((expr_end, i))
+                        Some((expr_end, k))
                     } else {
                         None
                     };
                 }
-                if super::tries::STMT_ONLY_WORDS
-                    .contains(&std::str::from_utf8(&src[i..j]).unwrap_or(""))
-                {
+                if super::tries::STMT_ONLY_WORDS.contains(&word) {
                     return None;
                 }
                 // Skip a whole `match ( ... ) { ... }` shape so the bare-`{`
                 // abort below doesn't reject it (the recursive parse of the
                 // expression decides whether it really is an rl match).
-                if &src[i..j] == b"match" {
-                    let k = skip_ws_comments(src, j, end);
-                    if at(src, k, end) == Some(b'(')
-                        && let Some(close_paren) = find_matching(src, k, end)
-                    {
-                        let b = skip_ws_comments(src, close_paren + 1, end);
-                        if at(src, b, end) == Some(b'{')
-                            && let Some(close_brace) = find_matching(src, b, end)
-                        {
-                            prev_sig = b'}';
-                            i = close_brace + 1;
-                            expr_end = i;
-                            continue;
-                        }
-                    }
+                if word == "match"
+                    && let Some(past) = skip_match_shape(cur.tokens, k)
+                {
+                    expr_end = cur.tokens[past - 1].span.end;
+                    k = past;
+                    continue;
                 }
             }
-            prev_sig = src[j - 1];
-            i = j;
-            expr_end = i;
+            expr_end = t.span.end;
+            k += 1;
             continue;
         }
         if depth == 0 {
-            match c {
-                b';' | b'{' | b'}' | b')' | b']' | b',' | b'=' => return None,
-                b'?' => {
-                    // `?.` and `??` are not ternary openers
-                    if matches!(at(src, i + 1, end), Some(b'.') | Some(b'?')) {
-                        i += 2;
-                        prev_sig = src[i - 1];
-                        expr_end = i;
-                        continue;
-                    }
-                    ternaries += 1;
-                }
-                b':' => {
+            match t.kind {
+                TokenKind::Punct(b';' | b'{' | b'}' | b')' | b']' | b',' | b'=') => return None,
+                TokenKind::Punct(b'?') => ternaries += 1,
+                TokenKind::Punct(b':') => {
                     if ternaries == 0 {
                         return None;
                     }
@@ -192,16 +150,13 @@ fn scan_expr_until_else(src: &[u8], mut i: usize, end: usize) -> Option<(usize, 
                 _ => {}
             }
         }
-        match c {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+        match t.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
             _ => {}
         }
-        if !is_ws(c) {
-            prev_sig = c;
-            expr_end = i + 1;
-        }
-        i += 1;
+        expr_end = t.span.end;
+        k += 1;
     }
     None
 }
@@ -211,57 +166,31 @@ fn scan_expr_until_else(src: &[u8], mut i: usize, end: usize) -> Option<(usize, 
 /// "the else block must diverge" rule (rlc does no type analysis, so e.g.
 /// an `if`/`else` where both branches return is *not* recognized; end the
 /// block with one of the four keywords instead).
-fn block_diverges(src: &[u8], start: usize, end: usize) -> bool {
-    let mut last = skip_ws_comments(src, start, end);
+fn block_diverges(parser: &super::Parser, tokens: &[crate::lexer::Token]) -> bool {
+    let mut last = 0usize;
     let mut depth = 0usize;
-    let mut i = last;
-    while i < end {
-        let c = src[i];
-        if c == b'/' && at(src, i + 1, end) == Some(b'/') {
-            i = line_end(src, i, end);
-            continue;
-        }
-        if c == b'/' && at(src, i + 1, end) == Some(b'*') {
-            i = match find_subslice(src, b"*/", i + 2, end) {
-                Some(e) => e + 2,
-                None => end,
-            };
-            continue;
-        }
-        if c == b'"' || c == b'\'' {
-            i = scan_string(src, i, end);
-            continue;
-        }
-        if c == b'`' {
-            i = skip_template(src, i, end);
-            continue;
-        }
-        match c {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' => depth = depth.saturating_sub(1),
-            b'}' => {
+    for (k, t) in tokens.iter().enumerate() {
+        match t.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']') => depth = depth.saturating_sub(1),
+            TokenKind::Punct(b'}') => {
                 depth = depth.saturating_sub(1);
-                if depth == 0 {
+                if depth == 0 && k + 1 < tokens.len() {
                     // end of a block statement (if/for/function body, ...)
-                    let n = skip_ws_comments(src, i + 1, end);
-                    if n < end {
-                        last = n;
-                    }
+                    last = k + 1;
                 }
             }
-            b';' if depth == 0 => {
-                let n = skip_ws_comments(src, i + 1, end);
-                if n < end {
-                    last = n;
-                }
+            TokenKind::Punct(b';') if depth == 0 && k + 1 < tokens.len() => {
+                last = k + 1;
             }
             _ => {}
         }
-        i += 1;
     }
-    if last >= end || !is_ident_start(src[last]) {
-        return false;
+    match tokens.get(last) {
+        Some(t) if matches!(t.kind, TokenKind::Ident) => matches!(
+            &parser.src[t.span.start..t.span.end],
+            "return" | "throw" | "break" | "continue"
+        ),
+        _ => false,
     }
-    let w = ident_end(src, last, end);
-    matches!(&src[last..w], b"return" | b"throw" | b"break" | b"continue")
 }

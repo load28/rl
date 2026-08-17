@@ -713,3 +713,238 @@ const f = (e: AppEvent) => match (e) {
     );
     assert!(ok, "{out}");
 }
+
+/* ------------------------------------------------------------------ */
+/* import specifier rewriting                                          */
+/* ------------------------------------------------------------------ */
+
+const ERROR_RL: &str = "export enum CalcError { DivByZero, Overflow(limit: number) }\n";
+const MAIN_RL: &str = r#"import { CalcError } from "./error.rl";
+const e = CalcError.Overflow(9);
+const msg = match (e) {
+  Overflow(limit) => `over ${limit}`,
+  _ => "other",
+};
+console.log(msg);
+export {};
+"#;
+
+#[test]
+fn cross_file_rl_import_typechecks_and_runs() {
+    require_toolchain!();
+    let dir = tmpdir();
+    let error_ts = compile(ERROR_RL, &Options::default()).expect("rl compile failed");
+    let main_ts = compile(MAIN_RL, &Options::default()).expect("rl compile failed");
+    assert!(main_ts.contains("\"./error.js\""), "{main_ts}");
+    fs::write(dir.join("error.ts"), &error_ts).unwrap();
+    fs::write(dir.join("main.ts"), &main_ts).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args(TSC_FLAGS)
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---main.ts---\n{main_ts}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "over 9");
+}
+
+#[test]
+fn cross_file_rl_import_bare_mode_typechecks() {
+    require_toolchain!();
+    let dir = tmpdir();
+    let opts = Options {
+        rewrite_imports: rlc::ImportRewrite::Bare,
+        ..Options::default()
+    };
+    let error_ts = compile(ERROR_RL, &opts).expect("rl compile failed");
+    let main_ts = compile(MAIN_RL, &opts).expect("rl compile failed");
+    assert!(main_ts.contains("\"./error\""), "{main_ts}");
+    fs::write(dir.join("error.ts"), &error_ts).unwrap();
+    fs::write(dir.join("main.ts"), &main_ts).unwrap();
+    // extensionless specifiers need `moduleResolution: bundler` (already in
+    // TSC_FLAGS); type-check only — Node ESM cannot resolve them at runtime.
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg("--noEmit")
+        .args(TSC_FLAGS)
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---main.ts---\n{main_ts}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/* ------------------------------------------------------------------ */
+/* project-wide exhaustiveness through the CLI                         */
+/* ------------------------------------------------------------------ */
+
+const TOKEN_RL: &str =
+    "export enum Token {\n  Num(value: number),\n  Ident(name: string),\n  Eof,\n}\n";
+
+/// Runs the rlc binary itself — declaration collection across files lives
+/// in the CLI, not in `compile`. No tsc/node needed.
+fn run_rlc(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("failed to run rlc");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn cli_checks_exhaustiveness_across_rl_imports() {
+    let dir = tmpdir();
+    fs::write(dir.join("token.rl"), TOKEN_RL).unwrap();
+    fs::write(
+        dir.join("parser.rl"),
+        "import { Token } from \"./token.rl\";\nconst show = (t: Token) =>\n  match (t) {\n    Num(value) => value,\n    Ident(name) => 0,\n  };\n",
+    )
+    .unwrap();
+    let (ok, err) = run_rlc(&dir, &["--check", "parser.rl"]);
+    assert!(!ok, "expected failure:\n{err}");
+    assert!(
+        err.contains("parser.rl:3:3: match on enum Token (imported from \"./token.rl\") is not exhaustive: missing \"Eof\""),
+        "{err}"
+    );
+
+    fs::write(
+        dir.join("parser.rl"),
+        "import { Token } from \"./token.rl\";\nconst show = (t: Token) =>\n  match (t) {\n    Num(value) => value,\n    Ident(name) => 0,\n    Eof => -1,\n  };\n",
+    )
+    .unwrap();
+    let (ok, err) = run_rlc(&dir, &["--check", "parser.rl"]);
+    assert!(ok, "expected success:\n{err}");
+}
+
+#[test]
+fn cli_skips_unresolvable_imports_silently() {
+    // A missing module is tsc's problem (TS2307); the match simply stays
+    // unchecked, as before phase 2.
+    let dir = tmpdir();
+    fs::write(
+        dir.join("main.rl"),
+        "import { Gone } from \"./missing.rl\";\nconst x = match (g) { A(v) => v, B => 0 };\n",
+    )
+    .unwrap();
+    let (ok, err) = run_rlc(&dir, &["--check", "main.rl"]);
+    assert!(ok, "expected success:\n{err}");
+}
+
+#[test]
+fn cli_cross_file_match_runs_end_to_end() {
+    require_toolchain!();
+    let dir = tmpdir();
+    fs::write(dir.join("token.rl"), TOKEN_RL).unwrap();
+    fs::write(
+        dir.join("main.rl"),
+        "import { Token } from \"./token.rl\";\nconst t = Token.Ident(\"x\");\nconsole.log(match (t) {\n  Num(value) => `n${value}`,\n  Ident(name) => `i${name}`,\n  Eof => \"eof\",\n});\nexport {};\n",
+    )
+    .unwrap();
+    let (ok, err) = run_rlc(&dir, &["token.rl", "main.rl"]);
+    assert!(ok, "rlc failed:\n{err}");
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args(TSC_FLAGS)
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ix");
+}
+
+/* ------------------------------------------------------------------ */
+/* symbol interface (--symbols)                                        */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn symbols_reports_imports_and_positions_as_valid_json() {
+    let dir = tmpdir();
+    fs::write(dir.join("token.rl"), TOKEN_RL).unwrap();
+    fs::write(
+        dir.join("parser.rl"),
+        "import { Token as Tok } from \"./token.rl\";\nimport { Gone } from \"./missing.rl\";\nenum Local { A(x: number) }\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .current_dir(&dir)
+        .args(["--symbols", "parser.rl"])
+        .output()
+        .expect("failed to run rlc");
+    assert!(out.status.success());
+    let json = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    // Shape: the local enum with its position, the resolved import with the
+    // referenced file's exported declarations, and the unresolvable import
+    // marked null.
+    assert!(json.contains("\"file\":\"parser.rl\""), "{json}");
+    assert!(json.contains("\"name\":\"Local\""), "{json}");
+    assert!(
+        json.contains("\"entries\":[{\"name\":\"Token\",\"alias\":\"Tok\"}]"),
+        "{json}"
+    );
+    assert!(
+        json.contains(
+            "\"name\":\"Token\",\"exported\":true,\"generics\":\"\",\"line\":1,\"col\":13"
+        ),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"tag\":\"Eof\",\"line\":4,\"col\":3,\"fields\":null"),
+        "{json}"
+    );
+    assert!(json.contains("\"specifier\":\"./missing.rl\""), "{json}");
+    assert!(json.contains("\"resolved\":null,\"enums\":[]"), "{json}");
+
+    // And it must be JSON a real parser accepts.
+    if have("node") {
+        let mut child = Command::new("node")
+            .args([
+                "-e",
+                "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>JSON.parse(d))",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("failed to run node");
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(json.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "not valid JSON:\n{json}");
+    }
+}

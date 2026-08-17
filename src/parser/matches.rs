@@ -6,102 +6,100 @@
 //! misplaced wildcard, non-exhaustiveness — are the semantic phase's job.
 //! The scrutinee and every arm body are recursively parsed sub-programs.
 
-use super::{Parser, is_reserved};
+use super::cursor::Cursor;
+use super::is_reserved;
 use crate::ast::{Arm, Binding, GuardExpr, MatchExpr, Pattern, Span, TagPattern};
-use crate::scanner::*;
+use crate::lexer::TokenKind;
 
-/// `j` is just past the `match` keyword. On success returns the index just
-/// past the closing brace and the parsed expression.
-pub(super) fn parse_match(p: &Parser, j: usize, end: usize) -> Option<(usize, MatchExpr)> {
-    let src = p.bytes;
-    let k = skip_ws_comments(src, j, end);
-    if at(src, k, end) != Some(b'(') {
+/// `cur` is positioned just past the `match` keyword (`kw_span`). On
+/// success returns the advanced cursor, the byte just past the closing
+/// brace, and the parsed expression.
+pub(super) fn parse_match<'t>(
+    mut cur: Cursor<'t>,
+    kw_span: Span,
+) -> Option<(Cursor<'t>, usize, MatchExpr)> {
+    if !cur.at_punct(b'(') {
         return None;
     }
-    let close_paren = find_matching(src, k, end)?;
+    let open = cur.idx;
+    let close = cur.find_close()?;
     let scrutinee_span = Span {
-        start: k + 1,
-        end: close_paren,
+        start: cur.tokens[open].span.start + 1,
+        end: cur.tokens[close].span.start,
     };
-    if p.src[scrutinee_span.start..scrutinee_span.end]
+    if cur.parser.src[scrutinee_span.start..scrutinee_span.end]
         .trim()
         .is_empty()
     {
         return None;
     }
+    cur.idx = close + 1;
 
-    let b = skip_ws_comments(src, close_paren + 1, end);
-    if at(src, b, end) != Some(b'{') {
+    if !cur.at_punct(b'{') {
         return None;
     }
-    let close_brace = find_matching(src, b, end)?;
+    let body_open = cur.idx;
+    let body_close = cur.find_close()?;
+    let arms =
+        match parse_arms(cur.sub(body_open + 1, body_close, cur.tokens[body_close].span.start)) {
+            Some(arms) if !arms.is_empty() => arms,
+            _ => return None,
+        };
 
-    let arms = match parse_arms(p, b + 1, close_brace) {
-        Some(arms) if !arms.is_empty() => arms,
-        _ => return None,
-    };
-
+    let byte_end = cur.tokens[body_close].span.end;
+    let scrutinee = cur.parser.parse_tokens(
+        &cur.tokens[open + 1..close],
+        scrutinee_span.start,
+        scrutinee_span.end,
+    );
+    cur.idx = body_close + 1;
     Some((
-        close_brace + 1,
+        cur,
+        byte_end,
         MatchExpr {
-            keyword_off: j.saturating_sub("match".len()),
+            keyword_off: kw_span.start,
             scrutinee_span,
-            scrutinee: p.parse_range(scrutinee_span.start, scrutinee_span.end),
+            scrutinee,
             arms,
         },
     ))
 }
 
-fn parse_arms(p: &Parser, start: usize, end: usize) -> Option<Vec<Arm>> {
-    let src = p.bytes;
+fn parse_arms(mut cur: Cursor) -> Option<Vec<Arm>> {
     let mut arms = Vec::new();
-    let mut i = start;
-    loop {
-        i = skip_ws_comments(src, i, end);
-        if i >= end {
-            break;
-        }
+    while let Some(first) = cur.peek() {
+        let pattern_off = first.span.start;
 
         // pattern
-        let pattern_off = i;
-        let pattern;
-        if src[i] == b'_' && !matches!(at(src, i + 1, end), Some(b) if is_ident_char(b)) {
-            pattern = Pattern::Wildcard;
-            i += 1;
-        } else if is_ident_start(src[i]) {
-            let (j, first) = parse_tag_pattern(p, i, end)?;
-            let mut alts = vec![first];
-            i = skip_ws_comments(src, j, end);
-            // `|`-separated alternatives; `||` is never an alternative
-            // separator, so it fails the parse and passes through.
-            while at(src, i, end) == Some(b'|') && at(src, i + 1, end) != Some(b'|') {
-                let k = skip_ws_comments(src, i + 1, end);
-                if k >= end || !is_ident_start(src[k]) {
-                    return None;
-                }
-                let (m, alt) = parse_tag_pattern(p, k, end)?;
-                alts.push(alt);
-                i = skip_ws_comments(src, m, end);
+        let pattern = match first.kind {
+            TokenKind::Ident if cur.text(first) == "_" => {
+                cur.bump();
+                Pattern::Wildcard
             }
-            pattern = Pattern::Tags(alts);
-        } else {
-            return None;
-        }
-
-        i = skip_ws_comments(src, i, end);
+            TokenKind::Ident => {
+                let mut alts = vec![parse_tag_pattern(&mut cur)?];
+                // `|`-separated alternatives; `||` lexes as a single OrOr
+                // token, so it can never be an alternative separator — the
+                // candidate then fails the parse and passes through.
+                while cur.at_punct(b'|') {
+                    cur.bump();
+                    alts.push(parse_tag_pattern(&mut cur)?);
+                }
+                Pattern::Tags(alts)
+            }
+            _ => return None,
+        };
 
         // optional guard: `if <cond>` between the pattern and `=>`. Only tag
         // patterns take a guard — `_ if` never parses, so it passes through.
         let mut guard = None;
         if matches!(pattern, Pattern::Tags(_))
-            && i < end
-            && is_ident_start(src[i])
-            && ident_end(src, i, end) == i + 2
-            && &src[i..i + 2] == b"if"
+            && matches!(cur.peek(), Some(t) if matches!(t.kind, TokenKind::Ident) && cur.text(t) == "if")
         {
-            let g_start = skip_ws_comments(src, i + 2, end);
-            let g_end = scan_guard_end(src, g_start, end)?;
-            if p.src[g_start..g_end].trim().is_empty() {
+            cur.bump();
+            let g_start = cur.stop_byte_at(cur.idx);
+            let (arrow_idx, g_end) = guard_end(&cur)?;
+            if cur.parser.src[g_start..g_end].trim().is_empty() {
                 return None;
             }
             guard = Some(GuardExpr {
@@ -109,37 +107,47 @@ fn parse_arms(p: &Parser, start: usize, end: usize) -> Option<Vec<Arm>> {
                     start: g_start,
                     end: g_end,
                 },
-                expr: p.parse_range(g_start, g_end),
+                expr: cur
+                    .parser
+                    .parse_tokens(&cur.tokens[cur.idx..arrow_idx], g_start, g_end),
             });
-            i = g_end;
+            cur.idx = arrow_idx;
         }
 
-        if !(at(src, i, end) == Some(b'=') && at(src, i + 1, end) == Some(b'>')) {
+        if !matches!(cur.peek().map(|t| &t.kind), Some(TokenKind::Arrow)) {
             return None;
         }
-        i = skip_ws_comments(src, i + 2, end);
+        cur.bump();
 
         // body: `{ ... }` block or a single expression
         let body_span;
+        let body_tokens;
         let mut block = false;
-        if at(src, i, end) == Some(b'{') {
-            let close = find_matching(src, i, end)?;
+        if cur.at_punct(b'{') {
+            let open = cur.idx;
+            let close = cur.find_close()?;
             body_span = Span {
-                start: i + 1,
-                end: close,
+                start: cur.tokens[open].span.start + 1,
+                end: cur.tokens[close].span.start,
             };
+            body_tokens = &cur.tokens[open + 1..close];
             block = true;
-            i = close + 1;
+            cur.idx = close + 1;
         } else {
-            let body_start = i;
-            i = scan_expr_end(src, i, end);
+            let body_start = cur.stop_byte_at(cur.idx);
+            let (stop_idx, stop_byte) = expr_body_end(&cur);
             body_span = Span {
                 start: body_start,
-                end: i,
+                end: stop_byte,
             };
-            if p.src[body_span.start..body_span.end].trim().is_empty() {
+            if cur.parser.src[body_span.start..body_span.end]
+                .trim()
+                .is_empty()
+            {
                 return None;
             }
+            body_tokens = &cur.tokens[cur.idx..stop_idx];
+            cur.idx = stop_idx;
         }
 
         arms.push(Arm {
@@ -147,187 +155,125 @@ fn parse_arms(p: &Parser, start: usize, end: usize) -> Option<Vec<Arm>> {
             pattern_off,
             guard,
             body_span,
-            body: p.parse_range(body_span.start, body_span.end),
+            body: cur
+                .parser
+                .parse_tokens(body_tokens, body_span.start, body_span.end),
             block,
         });
 
-        i = skip_ws_comments(src, i, end);
-        if i >= end {
+        if cur.peek().is_none() {
             break;
         }
-        if src[i] == b',' {
-            i += 1;
-            continue;
-        }
-        return None;
+        cur.eat_punct(b',')?;
     }
     Some(arms)
 }
 
 /// Parses one `Tag` / `Tag(bindings...)` alternative starting at the
-/// identifier at `i`. Returns the index just past the alternative.
-fn parse_tag_pattern(p: &Parser, i: usize, end: usize) -> Option<(usize, TagPattern)> {
-    let src = p.bytes;
-    let tag_off = i;
-    let j = ident_end(src, i, end);
-    let tag = &p.src[i..j];
+/// identifier under the cursor.
+fn parse_tag_pattern(cur: &mut Cursor) -> Option<TagPattern> {
+    let (tag, tag_span) = cur.eat_ident()?;
     if is_reserved(tag) {
         return None;
     }
-    let mut k = skip_ws_comments(src, j, end);
     let mut bindings = None;
-    if at(src, k, end) == Some(b'(') {
-        let close = find_matching(src, k, end)?;
-        bindings = Some(parse_bindings(p, k + 1, close)?);
-        k = close + 1;
+    if cur.at_punct(b'(') {
+        let open = cur.idx;
+        let close = cur.find_close()?;
+        bindings = Some(parse_bindings(cur.sub(
+            open + 1,
+            close,
+            cur.tokens[close].span.start,
+        ))?);
+        cur.idx = close + 1;
     }
-    Some((
-        k,
-        TagPattern {
-            tag: tag.to_string(),
-            tag_off,
-            bindings,
-        },
-    ))
+    Some(TagPattern {
+        tag: tag.to_string(),
+        tag_off: tag_span.start,
+        bindings,
+    })
 }
 
 /// Parses `a, b: alias, ...` between the parens of a pattern (shared with
 /// the let-else pattern). None on failure.
-pub(super) fn parse_bindings(p: &Parser, start: usize, end: usize) -> Option<Vec<Binding>> {
-    let src = p.bytes;
+pub(super) fn parse_bindings(mut cur: Cursor) -> Option<Vec<Binding>> {
     let mut bindings = Vec::new();
-    let mut i = start;
     loop {
-        i = skip_ws_comments(src, i, end);
-        if i >= end {
+        if cur.peek().is_none() {
             break;
         }
-        if !is_ident_start(src[i]) {
-            return None;
-        }
-        let j = ident_end(src, i, end);
-        let name = &p.src[i..j];
+        let (name, _) = cur.eat_ident()?;
         if is_reserved(name) {
             return None;
         }
-        i = skip_ws_comments(src, j, end);
 
         let mut alias = None;
-        if at(src, i, end) == Some(b':') {
-            i = skip_ws_comments(src, i + 1, end);
-            if i >= end || !is_ident_start(src[i]) {
-                return None;
-            }
-            let m = ident_end(src, i, end);
-            let alias_name = &p.src[i..m];
+        if cur.eat_punct(b':').is_some() {
+            let (alias_name, _) = cur.eat_ident()?;
             if is_reserved(alias_name) {
                 return None;
             }
             alias = Some(alias_name.to_string());
-            i = skip_ws_comments(src, m, end);
         }
         bindings.push(Binding {
             name: name.to_string(),
             alias,
         });
 
-        if i >= end {
+        if cur.peek().is_none() {
             break;
         }
-        if src[i] == b',' {
-            i += 1;
-            continue;
-        }
-        return None;
+        cur.eat_punct(b',')?;
     }
     Some(bindings)
 }
 
-/// Scans a guard condition until the arm's top-level `=>`, returning the
-/// index of its `=`. None on anything a guard cannot contain at its top
-/// level (`,`, `;`, a closer) — the candidate then passes through.
-fn scan_guard_end(src: &[u8], mut i: usize, end: usize) -> Option<usize> {
+/// Scans a guard condition from `cur.idx` until the arm's top-level `=>`,
+/// returning the arrow's token index and byte offset. None on anything a
+/// guard cannot contain at its top level (`,`, `;`, a closer) — the
+/// candidate then passes through.
+fn guard_end(cur: &Cursor) -> Option<(usize, usize)> {
     let mut depth = 0usize;
-    while i < end {
-        let c = src[i];
-        if c == b'/' && at(src, i + 1, end) == Some(b'/') {
-            i = line_end(src, i, end);
-            continue;
-        }
-        if c == b'/' && at(src, i + 1, end) == Some(b'*') {
-            i = match find_subslice(src, b"*/", i + 2, end) {
-                Some(e) => e + 2,
-                None => end,
-            };
-            continue;
-        }
-        if c == b'"' || c == b'\'' {
-            i = scan_string(src, i, end);
-            continue;
-        }
-        if c == b'`' {
-            i = skip_template(src, i, end);
-            continue;
-        }
-        if c == b'=' && at(src, i + 1, end) == Some(b'>') {
-            if depth == 0 {
-                return Some(i);
-            }
-            i += 2;
-            continue;
-        }
-        match c {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => {
+    let mut k = cur.idx;
+    while k < cur.tokens.len() {
+        let t = &cur.tokens[k];
+        match t.kind {
+            TokenKind::Arrow if depth == 0 => return Some((k, t.span.start)),
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => {
                 if depth == 0 {
                     return None;
                 }
                 depth -= 1;
             }
-            b',' | b';' if depth == 0 => return None,
+            TokenKind::Punct(b',' | b';') if depth == 0 => return None,
             _ => {}
         }
-        i += 1;
+        k += 1;
     }
     None
 }
 
-/// Scans an arm's expression body until a top-level `,` or closing bracket.
-fn scan_expr_end(src: &[u8], mut i: usize, end: usize) -> usize {
+/// Scans an arm's expression body from `cur.idx` until a top-level `,` or
+/// closing bracket, returning the stopping token index and byte offset
+/// (the region end when the tokens run out).
+fn expr_body_end(cur: &Cursor) -> (usize, usize) {
     let mut depth = 0usize;
-    while i < end {
-        let c = src[i];
-        if c == b'/' && at(src, i + 1, end) == Some(b'/') {
-            i = line_end(src, i, end);
-            continue;
-        }
-        if c == b'/' && at(src, i + 1, end) == Some(b'*') {
-            i = match find_subslice(src, b"*/", i + 2, end) {
-                Some(e) => e + 2,
-                None => end,
-            };
-            continue;
-        }
-        if c == b'"' || c == b'\'' {
-            i = scan_string(src, i, end);
-            continue;
-        }
-        if c == b'`' {
-            i = skip_template(src, i, end);
-            continue;
-        }
-        match c {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => {
+    let mut k = cur.idx;
+    while k < cur.tokens.len() {
+        let t = &cur.tokens[k];
+        match t.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => {
                 if depth == 0 {
-                    return i;
+                    return (k, t.span.start);
                 }
                 depth -= 1;
             }
-            b',' if depth == 0 => return i,
+            TokenKind::Punct(b',') if depth == 0 => return (k, t.span.start),
             _ => {}
         }
-        i += 1;
+        k += 1;
     }
-    i
+    (k, cur.range_end)
 }

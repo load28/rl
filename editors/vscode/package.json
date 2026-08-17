@@ -73,7 +73,7 @@
     "compile": "tsc -b",
     "watch": "tsc -b -w",
     "postinstall": "cd client && npm install && cd ../server && npm install",
-    "test": "npm run compile && node --test server/out/test/"
+    "test": "npm run compile && node --test \"server/out/test/*.test.js\""
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

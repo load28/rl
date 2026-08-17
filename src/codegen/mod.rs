@@ -18,12 +18,14 @@ mod matches;
 
 use std::cell::Cell;
 
+use crate::ImportRewrite;
 use crate::ast::*;
 
 /// Emits a whole program back to TypeScript text.
-pub(crate) fn emit(program: &Program, src: &str) -> String {
+pub(crate) fn emit(program: &Program, src: &str, rewrite_imports: ImportRewrite) -> String {
     let emitter = Emitter {
         bytes: src.as_bytes(),
+        rewrite_imports,
         try_seq: Cell::new(0),
     };
     emitter.emit_program(program)
@@ -31,6 +33,7 @@ pub(crate) fn emit(program: &Program, src: &str) -> String {
 
 pub(super) struct Emitter<'a> {
     pub(super) bytes: &'a [u8],
+    rewrite_imports: ImportRewrite,
     /// File-wide counter for `try` and let-else temporaries — unlike the
     /// match IIFE's `$rl_m`, these statements emit into the enclosing
     /// scope, so every temporary needs a unique name (`$rl_t0`, `$rl_t1`, ...).
@@ -53,6 +56,7 @@ impl Emitter<'_> {
                 Segment::LetElse(stmt) => {
                     out.extend_from_slice(self.emit_let_else(stmt).as_bytes());
                 }
+                Segment::RlImport(decl) => self.emit_rl_import(decl.spec, &mut out),
                 Segment::Template(template) => self.emit_template(template, &mut out),
             }
         }
@@ -113,6 +117,26 @@ impl Emitter<'_> {
             code.push_str(&format!(" {} {{ {} }} = {tmp};", stmt.kw, parts));
         }
         code
+    }
+
+    /// Emits a lifted `.rl` module specifier (quotes included), swapping
+    /// the extension per [`ImportRewrite`]. The parser guarantees the span
+    /// is a quoted string whose content ends in `.rl`, so the last four
+    /// bytes are `.rl` plus the closing quote.
+    fn emit_rl_import(&self, span: Span, out: &mut Vec<u8>) {
+        let spec = &self.bytes[span.start..span.end];
+        match self.rewrite_imports {
+            ImportRewrite::Off => out.extend_from_slice(spec),
+            ImportRewrite::Js => {
+                out.extend_from_slice(&spec[..spec.len() - 4]);
+                out.extend_from_slice(b".js");
+                out.push(spec[spec.len() - 1]);
+            }
+            ImportRewrite::Bare => {
+                out.extend_from_slice(&spec[..spec.len() - 4]);
+                out.push(spec[spec.len() - 1]);
+            }
+        }
     }
 
     fn emit_template(&self, template: &Template, out: &mut Vec<u8>) {

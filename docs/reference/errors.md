@@ -78,18 +78,23 @@ enum E { A(x: number]) }
 
 ### `match on enum <이름> is not exhaustive: missing "<케이스>", ... (add the missing arms or a final `_` arm)`
 
-- **원인**: `_` 없는 match가 같은 파일에 선언된 rl enum `<이름>`의 케이스를
-  전부 커버하지 않음. 내장 enum(`Option`/`Result`)에 걸린 경우
-  `match on built-in enum <이름> is not exhaustive: ...`로 보고됩니다.
+- **원인**: `_` 없는 match가 알려진 enum `<이름>`의 케이스를 전부 커버하지
+  않음. 알려진 enum은 세 출처가 있고 메시지가 출처를 표시합니다
+  (같은 이름이면 로컬 > 임포트 > 내장 순으로 섀도잉):
+  - 같은 파일에 선언된 rl enum — `match on enum <이름> is not exhaustive: ...`
+  - 상대 경로 `.rl` import로 가져온 exported rl enum(CLI가 자동 수집,
+    [language.md §7.3](./language.md#73-선언-수집과-프로젝트-단위-소진성)) —
+    `match on enum <이름> (imported from "<지정자>") is not exhaustive: ...`
+  - 내장 enum(`Option`/`Result`) —
+    `match on built-in enum <이름> is not exhaustive: ...`
+
   **가드 암은 케이스를 커버하지 못합니다** — 조건이 거짓일 수 있으므로, 그
   태그를 커버하려면 무가드 암이 따로 필요합니다.
-- **위치**: `match` 키워드.
+- **위치**: `match` 키워드 (import된 enum이어도 컴파일 중인 파일 기준).
 - **해결**: 빠진 케이스의 암을 추가하거나 마지막에 `_` 암을 둡니다.
-- **참고**: 다른 파일에서 import한 enum이나 손으로 쓴 유니언에 대한 match는
-  이 검사를 받지 않습니다 — 런타임 가드만 남습니다
-  ([language.md §3.6](./language.md#36-소진성-검사)). 단, 암 태그가 내장
-  `Option`(Some/None)·`Result`(Ok/Err)의 케이스에 속하면 선언 없이도 검사
-  대상입니다 ([language.md §4.2](./language.md#42-내장-enum과-소진성-검사)).
+- **참고**: 손으로 쓴 유니언, 해석되지 않는 import(존재하지 않는 파일,
+  re-export 체인 등)에 대한 match는 이 검사를 받지 않습니다 — 런타임 가드만
+  남습니다 ([language.md §3.6](./language.md#36-소진성-검사)).
 
 ```
 $ rlc shapes.rl

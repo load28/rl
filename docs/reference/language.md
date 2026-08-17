@@ -15,8 +15,9 @@ rl 언어의 문법과 동작을 정의하는 문서입니다. 빠르게 감을 
 4. [표준 라이브러리와 내장 enum](#4-표준-라이브러리와-내장-enum)
 5. [에러 전파: `try` 문](#5-에러-전파-try-문)
 6. [값 추출: `let-else` 문](#6-값-추출-let-else-문)
-7. [예약어](#7-예약어)
-8. [제한사항](#8-제한사항)
+7. [모듈: `.rl` import 지정자 재작성](#7-모듈-rl-import-지정자-재작성)
+8. [예약어](#8-예약어)
+9. [제한사항](#9-제한사항)
 
 ---
 
@@ -29,7 +30,11 @@ rl 언어의 문법과 동작을 정의하는 문서입니다. 빠르게 감을 
 > 컴파일됩니다.**
 
 컴파일러는 rl 구문으로 **완전하게 파싱되는** 부분만 변환하고, 나머지는 전부
-원문 그대로 통과시킵니다. 그래서 기존 TypeScript 코드는 안전합니다:
+원문 그대로 통과시킵니다. 단 하나의 예외는 **상대 경로 `.rl` import
+지정자**로, 방출 시 소비 측이 해석할 수 있는 형태로 재작성됩니다([§7](#7-모듈-rl-import-지정자-재작성)
+— 그런 지정자는 tsc가 어차피 해석하지 못하므로(`TS2307`) 동작하던
+TypeScript가 달라지는 일은 없고, `--rewrite-imports off`로 끌 수 있습니다).
+그래서 기존 TypeScript 코드는 안전합니다:
 
 - 문자열·주석·정규식·템플릿 리터럴 텍스트 안의 `enum`/`match`는 건드리지
   않습니다.
@@ -59,7 +64,7 @@ rl-enum      ::= "export"? "enum" 식별자 제네릭? "{" 케이스-목록 "}"
 필드         ::= 이름 "?"? ":" 타입
 ```
 
-- **태그·이름**은 예약어([§7](#7-예약어))가 아닌 ASCII 식별자입니다.
+- **태그·이름**은 예약어([§8](#8-예약어))가 아닌 ASCII 식별자입니다.
 - **제네릭**은 제약·기본값(`<T extends string, U = number>`)과
   `const`/`in`/`out` 한정자를 포함해 그대로 지원됩니다.
 - **타입** 자리에는 함수 타입, 제네릭 타입, 객체 타입 등 임의의 TypeScript
@@ -289,7 +294,7 @@ const data = match (source) {
 ```
 
 주의: 감지는 토큰 단위이므로 중첩된 함수 안에만 `await`가 있어도 async로
-방출됩니다 ([§8](#8-제한사항)).
+방출됩니다 ([§9](#9-제한사항)).
 
 ### 3.6 소진성 검사
 
@@ -309,10 +314,13 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
   `Some(v) if v > 0 => v` 하나만 있는 match는 `Some`·`None` 둘 다 빠진 것으로
   보고됩니다. 무가드 암이나 `_`를 추가하세요.
 - `_` 암이 있는 match는 정의상 소진적이므로 검사하지 않습니다.
-- 검사는 **파일 단위**입니다. 다른 파일에서 import한 enum이나 손으로 쓴
-  태그드 유니언에 대한 match는 검사 없이 컴파일되며, 런타임 가드([§3.4](#34-컴파일-결과))만
-  남습니다 — 단, 내장 `Option`/`Result`([§4.2](#42-내장-enum과-소진성-검사))는
-  예외입니다. 프로젝트 단위 검사는 로드맵입니다.
+- 검사 대상 enum은 세 출처입니다 (같은 이름이면 **로컬 > 임포트 > 내장**
+  순으로 섀도잉): 같은 파일에 선언된 rl enum, 상대 경로 `.rl` import로
+  가져온 exported rl enum([§7.3](#73-선언-수집과-프로젝트-단위-소진성) —
+  `rlc` CLI가 자동 수집), 내장
+  `Option`/`Result`([§4.2](#42-내장-enum과-소진성-검사)).
+- 어느 출처에도 속하지 않는 태그의 match(손으로 쓴 태그드 유니언 등)는 검사
+  없이 컴파일되며, 런타임 가드([§3.4](#34-컴파일-결과))만 남습니다.
 
 ---
 
@@ -499,7 +507,112 @@ tsc 타입 에러가 됩니다.
 
 ---
 
-## 7. 예약어
+## 7. 모듈: `.rl` import 지정자 재작성
+
+`.rl` 파일은 다른 `.rl` 파일을 **상대 경로 그대로** import할 수 있습니다.
+컴파일러가 방출 시 지정자를 소비 측(tsc/번들러/Node)이 해석할 수 있는
+형태로 바꿉니다:
+
+```rl
+// parser.rl
+import { CalcError } from "./error.rl";
+```
+
+```ts
+// parser.ts (기본값 --rewrite-imports js)
+import { CalcError } from "./error.js";
+```
+
+### 7.1 재작성 대상
+
+**정적 import 선언과 re-export**의 지정자 문자열 중, **`./` 또는 `../`로
+시작하고 `.rl`로 끝나는 것**만 재작성됩니다. 문장의 나머지 부분(절, 따옴표
+스타일, 공백, import attributes)은 바이트 그대로 유지됩니다.
+
+재작성되는 형태 (모두 동일 규칙):
+
+```rl
+import def from "./a.rl";
+import def, { named as alias } from "./b.rl";
+import * as ns from "./c.rl";
+import type { T } from "./d.rl";
+import "./side-effect.rl";
+export { x, y as z } from "./e.rl";
+export * from "./f.rl";
+export * as g from "./g.rl";
+export type { U } from "./h.rl";
+```
+
+재작성되지 **않는** 것 (원문 그대로 통과):
+
+- 상대 경로가 아닌 지정자: `"pkg.rl"`, `"@scope/p/x.rl"`, `"/abs/x.rl"`
+- `.rl`로 끝나지 않는 지정자: `"./x.js"`, `"./x"`, `"pkg"`
+- 동적 `import("./x.rl")`, `import.meta`
+- TypeScript import-assignment: `import x = require("./x.rl")`
+- 문자열·주석·템플릿 텍스트 안의 import처럼 보이는 텍스트
+
+정적 import 절로 완전하게 파싱되지 않는 후보는 다른 rl 구문과 마찬가지로
+원문 그대로 통과합니다 (에러가 아님).
+
+### 7.2 방출 형태 (`--rewrite-imports`)
+
+올바른 형태는 소비 측 `tsconfig.json`의 `moduleResolution`에 달려 있으므로
+CLI 플래그(라이브러리에서는 `Options { rewrite_imports }`)로 선택합니다:
+
+| 모드 | `"./error.rl"` → | 용도 |
+|------|------------------|------|
+| `js` (기본) | `"./error.js"` | `nodenext`(Node ESM — 확장자 필수)와 `bundler`(tsc가 `.js`를 `.ts`에 대응) 모두에서 동작 |
+| `bare` | `"./error"` | 확장자 없는 지정자를 선호하는 번들러 설정 |
+| `off` | `"./error.rl"` | 재작성 끔 — 바이트 그대로 통과 |
+
+`rlc`는 `x.rl`을 `x.ts`로 컴파일하고 tsc가 그것을 `x.js`로 방출하므로,
+기본값 `js`는 "컴파일된 이웃 파일"을 가리키는 정확한 지정자입니다.
+
+### 7.3 선언 수집과 프로젝트 단위 소진성
+
+`rlc` CLI로 컴파일하면, 파일의 **직접(1-홉) 상대 경로 `.rl` import**를
+따라가 참조된 파일에서 **exported rl enum 선언(이름 + 태그 집합)만** 뽑아
+소진성 검사([§3.6](#36-소진성-검사))에 포함합니다:
+
+```rl
+// parser.rl
+import { Token } from "./token.rl";
+const show = (t: Token) => match (t) {
+  Num(value) => `${value}`,
+  Ident(name) => name,
+};   // ← token.rl의 Token에 Eof가 있으면 여기서 컴파일 에러
+```
+
+```
+rlc: parser.rl:3:28: match on enum Token (imported from "./token.rl")
+     is not exhaustive: missing "Eof" (add the missing arms or a final `_` arm)
+```
+
+규칙:
+
+- **import 절의 이름만** 수집합니다 — `import { Token }`이면 `Token`만,
+  `import { Token as Tok }`이면 로컬 이름 `Tok`으로, `import * as ns`면
+  모든 exported enum이 `ns.<이름>`으로 등록됩니다. `import type`도
+  동일하게 취급합니다. side-effect import(`import "./x.rl"`)와
+  re-export(`export ... from`)는 로컬 스코프에 아무것도 들이지 않으므로
+  수집하지 않습니다.
+- 같은 이름은 **로컬 선언 > 임포트 > 내장** 순으로 섀도잉됩니다.
+- 수집은 **1-홉**입니다 — 참조된 파일의 re-export 체인은 따라가지
+  않습니다(그런 enum은 그냥 검사되지 않습니다). 순환 import는 1-홉 수집에선
+  재귀가 없으므로 문제가 되지 않습니다.
+- **파일 존재 여부는 검사하지 않습니다** — 읽을 수 없는 지정자는 조용히
+  건너뜁니다. 모듈 해석은 tsc의 책임이고(없는 모듈은 `TS2307`), 알 수 없는
+  enum은 이전처럼 검사 없이 컴파일될 뿐입니다.
+- 타입 검사는 여전히 tsc의 책임입니다 — rlc는 enum 태그 집합 이상을 알지
+  않습니다.
+
+라이브러리로 쓸 때는 수집을 직접 합니다: `rl_imports`(import 목록)와
+`exported_enums`(선언 추출)로 모아 `Options::extern_enums`로 넘기면
+`compile`이 동일하게 검사합니다.
+
+---
+
+## 8. 예약어
 
 다음 단어는 enum 이름, 케이스 태그, 필드명, match 패턴 태그, 바인딩 이름,
 별칭이 될 수 없습니다. 이 단어가 들어간 구문은 rl 구문으로 해석되지 않고 원문
@@ -514,15 +627,19 @@ typeof var void while with yield
 
 ---
 
-## 8. 제한사항
+## 9. 제한사항
 
 - **소스맵 미생성.** 생성된 `.ts`와 원본 `.rl`의 행이 대체로 대응하지만
   보장되지 않습니다.
 - **패턴은 태그 패턴(or-패턴·가드 포함)과 `_`뿐.** 리터럴 패턴, 중첩 패턴은
   의도적으로 지원하지 않습니다 (최소 기능 유지). 가드는 태그 패턴에만
   붙습니다 — `_ if ...`는 rl 구문이 아닙니다.
-- **소진성 검사는 같은 파일의 rl enum과 내장 `Option`/`Result`에 대해서만**
-  동작합니다 (§3.6, §4.2).
+- **소진성 검사의 임포트 수집은 직접(1-홉) 상대 경로 `.rl` import만**
+  대상입니다 — re-export 체인·패키지 경로의 enum과 손으로 쓴 유니언은
+  검사되지 않습니다 (§3.6, §7.3).
+- **import 재작성은 정적 상대 경로 `.rl` 지정자만** 대상입니다 — 동적
+  `import(...)`와 패키지/절대 경로 지정자는 재작성되지 않고, 참조 파일의
+  존재 여부도 검사하지 않습니다 (§7).
 - **`try`는 `;` 필수, 식은 `(`/`<`로 시작 불가**이며, match 내부·템플릿
   보간·모듈 최상위에서는 쓸 수 없습니다 (§5). `Option` 전파는 지원하지
   않습니다 — `Option`에서 값을 꺼내려면 `let-else`(§6)나 `Option.okOr`를
