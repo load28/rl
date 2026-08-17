@@ -27,16 +27,24 @@ pub struct Sidecar {
 /// Builds the sidecar for one module.
 ///
 /// `source` is the original `.rl` text, `declarations` is what tsc emitted
-/// for rlc's output of that module, and `rl_file_name` is the `.rl` file's
-/// name as it should appear in the map (`"notice.rl"`), which is also the
-/// stem of the written files (`notice.rl.d.ts`).
+/// for rlc's output of that module, and `rl_path` is the path to the `.rl`
+/// file **relative to where the sidecar will be written** — `"notice.rl"`
+/// when the two sit together, `"../src/notice.rl"` when declarations live
+/// in their own tree (which TypeScript merges back with `rootDirs`). It
+/// becomes the map's `sources`, and its file name becomes the stem of the
+/// written files (`notice.rl.d.ts`).
 ///
 /// Every exported declaration that can be located in the source gets two
 /// mapping segments: one at column 0 and one at the column where its name
 /// starts. The second is the one that matters — "go to definition" asks
 /// about the name's position, and without a segment there the editor stops
 /// at the `.d.ts`.
-pub fn build_sidecar(source: &str, declarations: &str, rl_file_name: &str) -> Sidecar {
+pub fn build_sidecar(source: &str, declarations: &str, rl_path: &str) -> Sidecar {
+    let rl_file_name = rl_path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(rl_path);
     let source_lines: Vec<&str> = source.lines().collect();
     let enums = enum_symbols(source);
 
@@ -72,7 +80,7 @@ pub fn build_sidecar(source: &str, declarations: &str, rl_file_name: &str) -> Si
     let map = format!(
         "{{\"version\":3,\"file\":{},\"sourceRoot\":\"\",\"sources\":[{}],\"names\":[],\"mappings\":\"{}\"}}\n",
         json_string(&format!("{rl_file_name}.d.ts")),
-        json_string(rl_file_name),
+        json_string(rl_path),
         mappings,
     );
 

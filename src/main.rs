@@ -175,10 +175,20 @@ fn sidecar_mode(jobs: &[Job], decl_dir: &Path) -> ExitCode {
             }
         };
 
-        let sidecar = rlc::build_sidecar(&source, &declarations, &file_name);
-        let dir = job.file.parent().unwrap_or(Path::new("."));
-        let dts_path = dir.join(format!("{file_name}.d.ts"));
-        let map_path = dir.join(format!("{file_name}.d.ts.map"));
+        // `-o` puts the declarations in their own tree (mirroring the input
+        // layout); without it they sit next to the source.
+        let dts_path = job.out_path.with_file_name(format!("{file_name}.d.ts"));
+        let map_path = job.out_path.with_file_name(format!("{file_name}.d.ts.map"));
+        let dir = dts_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        if let Err(e) = fs::create_dir_all(&dir) {
+            eprintln!("rlc: {}: {e}", dir.display());
+            failed = true;
+            continue;
+        }
+
+        // The map's `sources` is read relative to the map itself, so it has
+        // to point back across whatever distance `-o` introduced.
+        let sidecar = rlc::build_sidecar(&source, &declarations, &relative_path(&dir, &job.file));
         if let Err(e) = fs::write(&dts_path, &sidecar.declarations) {
             eprintln!("rlc: {}: {e}", dts_path.display());
             failed = true;
@@ -196,6 +206,38 @@ fn sidecar_mode(jobs: &[Job], decl_dir: &Path) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Path from `from_dir` to `to_file`, `/`-separated — the form a source map
+/// needs for its `sources`.
+fn relative_path(from_dir: &Path, to_file: &Path) -> String {
+    let from = from_dir
+        .canonicalize()
+        .unwrap_or_else(|_| from_dir.to_path_buf());
+    let to = to_file
+        .canonicalize()
+        .unwrap_or_else(|_| to_file.to_path_buf());
+
+    let from_parts: Vec<_> = from.components().collect();
+    let to_parts: Vec<_> = to.components().collect();
+    let shared = from_parts
+        .iter()
+        .zip(&to_parts)
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let mut parts: Vec<String> = vec!["..".to_string(); from_parts.len() - shared];
+    parts.extend(
+        to_parts[shared..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().to_string()),
+    );
+    if parts.is_empty() {
+        return to
+            .file_name()
+            .map_or_else(|| to.display().to_string(), |n| n.to_string_lossy().into());
+    }
+    parts.join("/")
 }
 
 fn enums_json(source: &str, symbols: &[EnumSymbol]) -> String {

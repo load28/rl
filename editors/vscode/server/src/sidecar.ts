@@ -51,11 +51,18 @@ export async function refreshSidecar(
   compiler: string,
   rlPath: string,
   mode: SidecarMode,
+  outDir?: string,
 ): Promise<SidecarResult> {
   if (mode === "off") return { kind: "skipped", reason: "disabled" };
   if (!rlPath.endsWith(".rl")) return { kind: "skipped", reason: "not an .rl file" };
 
-  const declarationTarget = `${rlPath}.d.ts`;
+  // Declarations either sit next to the source or in their own tree (which
+  // TypeScript merges back with `rootDirs`); the refresh has to look where
+  // they actually are.
+  const declarationTarget =
+    outDir === undefined
+      ? `${rlPath}.d.ts`
+      : path.join(outDir, `${path.basename(rlPath)}.d.ts`);
   if (mode === "refresh" && !exists(declarationTarget)) {
     return { kind: "skipped", reason: "no sidecar to refresh" };
   }
@@ -80,7 +87,7 @@ export async function refreshSidecar(
     return { kind: "failed", detail: String(e) };
   }
 
-  const written = await runSidecar(compiler, scratch, rlPath);
+  const written = await runSidecar(compiler, scratch, rlPath, outDir);
   try {
     fs.rmSync(scratch, { recursive: true, force: true });
   } catch {
@@ -157,21 +164,24 @@ function runSidecar(
   compiler: string,
   declarationDir: string,
   rlPath: string,
+  outDir?: string,
 ): Promise<SidecarResult> {
+  const args = ["--sidecar", declarationDir];
+  if (outDir !== undefined) args.push("-o", outDir);
+  args.push(rlPath);
+  const base = outDir === undefined ? rlPath : path.join(outDir, path.basename(rlPath));
+
   return new Promise((resolve) => {
     execFile(
       compiler,
-      ["--sidecar", declarationDir, rlPath],
+      args,
       { timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
       (err, _stdout, stderr) => {
         if (err) {
           resolve({ kind: "failed", detail: stderr.trim() || String(err) });
           return;
         }
-        resolve({
-          kind: "written",
-          files: [`${rlPath}.d.ts`, `${rlPath}.d.ts.map`],
-        });
+        resolve({ kind: "written", files: [`${base}.d.ts`, `${base}.d.ts.map`] });
       },
     );
   });

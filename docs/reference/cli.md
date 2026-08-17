@@ -28,7 +28,7 @@ cargo build --release        # → target/release/rlc
 | `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
 | `--no-verify` | 필드 타입 검사와 생성물 자가 검사를 생략합니다. 검증기가 아직 모르는 최신 TS 문법을 쓴 코드를 위한 탈출구입니다. |
 | `--rewrite-imports <js\|ts\|bare\|off>` | 상대 경로 `.rl` import 지정자의 방출 형태 ([`language.md` §7](./language.md#7-모듈-rl-import-지정자-재작성)): `js`(기본) = `./x.js`, `ts` = `./x.ts`(tsc의 `rewriteRelativeImportExtensions` 필요), `bare` = `./x`, `off` = 재작성 끔. 그 외 값은 에러입니다. |
-| `--sidecar <dir>` | 컴파일하지 않고 각 입력 `.rl` 옆에 `<이름>.rl.d.ts`와 `.map`을 씁니다. 선언 본문은 `<dir>/<이름>.d.ts`(tsc `--emitDeclarationOnly` 산출물)에서 가져옵니다 (아래 "에디터 사이드카"). |
+| `--sidecar <dir>` | 컴파일하지 않고 `<이름>.rl.d.ts`와 `.map`을 씁니다. 선언 본문은 `<dir>/<이름>.d.ts`(tsc `--emitDeclarationOnly` 산출물)에서 가져오고, 출력 위치는 `-o`가 없으면 입력 옆, 있으면 그 트리입니다 (아래 "에디터 사이드카"). |
 | `--symbols` | 컴파일하지 않고 각 입력 파일의 rl enum 선언(위치 포함)과 직접 `.rl` import를 JSON으로 stdout에 출력합니다 (아래 "심볼 출력"). 언어 도구용. |
 | `-h, --help` | 도움말을 출력하고 종료합니다 (종료 코드 0). |
 | `-v, --version` | 버전만 출력하고 종료합니다 (종료 코드 0). |
@@ -109,6 +109,23 @@ cargo build --release        # → target/release/rlc
 ```sh
 tsc -p tsconfig.types.json          # rlc 출력에서 선언만 뽑아 types/에
 rlc --sidecar types src/notice.rl   # src/notice.rl.d.ts + .map 생성
+```
+
+`-o`를 함께 주면 사이드카를 **별도 트리**에 씁니다 (입력 구조를 미러합니다).
+소스 트리에 생성물을 남기지 않는 쪽이 에디터와 무관하게 깔끔합니다.
+
+```sh
+rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
+```
+
+이때 소비 측 `tsconfig.json`에 **`rootDirs`**를 두어 두 디렉터리를 하나로
+합쳐야 `"./notice.rl"`이 해석됩니다. 맵의 `sources`는 rlc가 사이드카 위치
+기준 상대 경로(`../src/notice.rl`)로 적어 주므로 정의 이동은 그대로
+원본으로 갑니다.
+
+```jsonc
+// src/tsconfig.json
+"rootDirs": [".", "../.rl-types"]
 ```
 
 두 파일이 생깁니다.

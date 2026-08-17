@@ -31,6 +31,8 @@ import { URI } from "vscode-uri";
 
 import * as analysis from "./analysis";
 import * as rlc from "./rlc";
+import * as path from "node:path";
+
 import * as sidecar from "./sidecar";
 import * as tsproject from "./tsproject";
 
@@ -80,12 +82,14 @@ interface RlSettings {
   compilerPath: string;
   verify: boolean;
   sidecar: sidecar.SidecarMode;
+  sidecarDir: string;
 }
 
 const DEFAULT_SETTINGS: RlSettings = {
   compilerPath: "",
   verify: true,
   sidecar: "refresh",
+  sidecarDir: "",
 };
 
 async function getSettings(uri: string): Promise<RlSettings> {
@@ -98,6 +102,7 @@ async function getSettings(uri: string): Promise<RlSettings> {
     compilerPath: conf?.compilerPath ?? DEFAULT_SETTINGS.compilerPath,
     verify: conf?.verify ?? DEFAULT_SETTINGS.verify,
     sidecar: conf?.sidecar ?? DEFAULT_SETTINGS.sidecar,
+    sidecarDir: conf?.sidecarDir ?? DEFAULT_SETTINGS.sidecarDir,
   };
 }
 
@@ -413,6 +418,22 @@ documents.onDidSave((e) => {
 });
 
 /**
+ * Where this file's declarations belong: next to the source when
+ * `rl.sidecarDir` is empty, otherwise that directory under the workspace
+ * root the file lives in (TypeScript merges the two trees with `rootDirs`).
+ */
+function resolveSidecarDir(configured: string, filePath: string): string | undefined {
+  const dir = configured.trim();
+  if (dir === "") return undefined;
+  if (path.isAbsolute(dir)) return dir;
+
+  const root = workspaceRoots
+    .filter((candidate) => filePath.startsWith(`${candidate}${path.sep}`))
+    .sort((a, b) => b.length - a.length)[0];
+  return root === undefined ? undefined : path.join(root, dir);
+}
+
+/**
  * Keeps a saved `.rl` file's editor sidecar (`x.rl.d.ts` + map) current, so
  * `.ts` files importing it type-check and jump into the original on "go to
  * definition" without a build step.
@@ -429,6 +450,7 @@ async function rebuildSidecar(doc: TextDocument): Promise<void> {
     compiler,
     uri.fsPath,
     settings.sidecar,
+    resolveSidecarDir(settings.sidecarDir, uri.fsPath),
   );
   if (result.kind === "failed") {
     connection.console.warn(`rl: sidecar refresh failed — ${result.detail}`);

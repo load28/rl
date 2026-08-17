@@ -50,6 +50,7 @@ TS 파서의 오류 복구 덕분에 rl 구문이 섞여 있어도 통과 영역
 | `rl.compilerPath` | `""` | 진단에 사용할 rlc 경로 |
 | `rl.verify` | `true` | `false`면 `rlc --check`에 `--no-verify` 전달 |
 | `rl.sidecar` | `refresh` | 저장 시 에디터 사이드카 갱신 — `refresh`(이미 있는 것만) / `always`(없으면 생성) / `off` |
+| `rl.sidecarDir` | `""` | 사이드카를 쓸 디렉터리(워크스페이스 기준). 비우면 `.rl` 옆 |
 | `rl.trace.server` | `off` | LSP 통신 트레이스 |
 
 ## `.ts`에서 `.rl` 가져다 쓰기
@@ -73,9 +74,24 @@ TS 파서의 오류 복구 덕분에 rl 구문이 섞여 있어도 통과 영역
 
 ### 소스 트리를 어지럽히지 않게
 
-사이드카는 반드시 `.rl` **옆에** 그 이름으로 있어야 합니다. TypeScript는
-상대 경로 지정자를 `paths`로 우회시키지 않으므로(`TS2307`) 다른 디렉터리로
-옮길 수 없습니다. 대신 이 확장이 보이는 방식을 정리해 둡니다.
+**권장: 사이드카를 별도 트리에 두세요.** `rl.sidecarDir`을 `.rl-types` 같은
+값으로 두면 저장 시 그쪽에 쓰이고, 소스 트리에는 아무것도 생기지 않습니다.
+소비 측 `tsconfig.json`에 `rootDirs`를 함께 두면 `"./x.rl"`이 그대로
+해석되고 정의 이동도 원본으로 갑니다.
+
+```jsonc
+// .vscode/settings.json 또는 워크스페이스 설정
+"rl.sidecarDir": ".rl-types"
+
+// src/tsconfig.json
+"rootDirs": [".", "../.rl-types"]
+```
+
+이 방식은 에디터와 무관하게 동작합니다 — 생성물이 소스와 섞이지 않으니
+탐색기 설정이 필요 없습니다.
+
+사이드카를 소스 옆에 두는 경우(`rl.sidecarDir`이 비어 있을 때)를 위해
+이 확장이 보이는 방식을 정리해 둡니다.
 
 | 기본값 | 효과 |
 |--------|------|

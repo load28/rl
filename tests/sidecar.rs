@@ -155,6 +155,38 @@ fn map_names_the_rl_file_as_its_source() {
 }
 
 #[test]
+fn a_relative_source_path_records_the_distance_but_not_in_the_file_names() {
+    // With `-o` the declarations live in their own tree, which TypeScript
+    // merges back via `rootDirs`. Only `sources` carries the distance —
+    // the map and the banner still name the file itself.
+    let sidecar = build_sidecar(SOURCE, DECLARATIONS, "../src/notice.rl");
+    assert!(
+        sidecar.map.contains("\"sources\":[\"../src/notice.rl\"]"),
+        "{}",
+        sidecar.map
+    );
+    assert!(
+        sidecar.map.contains("\"file\":\"notice.rl.d.ts\""),
+        "{}",
+        sidecar.map
+    );
+    assert!(
+        sidecar
+            .declarations
+            .starts_with("// @generated from notice.rl by rlc --sidecar"),
+        "{}",
+        sidecar.declarations
+    );
+    assert!(
+        sidecar
+            .declarations
+            .contains("//# sourceMappingURL=notice.rl.d.ts.map"),
+        "{}",
+        sidecar.declarations
+    );
+}
+
+#[test]
 fn every_declaration_maps_to_its_position_in_the_rl_source() {
     let sidecar = build_sidecar(SOURCE, DECLARATIONS, "notice.rl");
     let segments = decode(&field(&sidecar.map, "\"mappings\":\""));

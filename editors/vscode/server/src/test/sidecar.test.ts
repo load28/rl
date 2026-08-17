@@ -72,6 +72,41 @@ test("always mode writes both sidecar files", { skip }, async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("declarations can live in their own tree", { skip }, async () => {
+  const dir = workspace();
+  const rl = path.join(dir, "notice.rl");
+  const types = path.join(dir, ".rl-types");
+
+  const result = await refreshSidecar(COMPILER, rl, "always", types);
+  assert.equal(result.kind, "written", JSON.stringify(result));
+
+  // The source tree stays clean; the declarations sit next to each other.
+  assert.equal(fs.existsSync(`${rl}.d.ts`), false);
+  assert.equal(fs.existsSync(path.join(types, "notice.rl.d.ts")), true);
+
+  // `sources` has to cross the distance, or the map cannot find the source.
+  const map = JSON.parse(
+    fs.readFileSync(path.join(types, "notice.rl.d.ts.map"), "utf8"),
+  ) as { sources: string[] };
+  assert.deepEqual(map.sources, ["../notice.rl"]);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("refresh mode looks for the sidecar where it is written", { skip }, async () => {
+  const dir = workspace();
+  const rl = path.join(dir, "notice.rl");
+  const types = path.join(dir, ".rl-types");
+
+  // Nothing there yet — refresh must not create it.
+  assert.equal((await refreshSidecar(COMPILER, rl, "refresh", types)).kind, "skipped");
+
+  await refreshSidecar(COMPILER, rl, "always", types);
+  assert.equal((await refreshSidecar(COMPILER, rl, "refresh", types)).kind, "written");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("refresh mode leaves a workspace that never opted in alone", { skip }, async () => {
   const dir = workspace();
   const rl = path.join(dir, "notice.rl");
