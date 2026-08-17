@@ -41,6 +41,20 @@ export interface TsQuickInfo {
   length: number;
 }
 
+/** One completion entry. `kind` is TypeScript's ScriptElementKind string
+ * (e.g. "function", "const", "property") — mapped to an LSP kind by the
+ * server so this module stays the only place importing `typescript`. */
+export interface TsCompletion {
+  name: string;
+  kind: string;
+  sortText: string;
+}
+
+/** One reference or rename location. */
+export interface TsReference extends TsDefinition {
+  isDefinition: boolean;
+}
+
 const COMPILER_OPTIONS: ts.CompilerOptions = {
   // Internal but load-bearing (the standard trick of embedded-TS tooling —
   // VS Code itself, Volar, Svelte): without it the program silently drops
@@ -161,6 +175,88 @@ export class TsProject {
         start: d.textSpan.start,
         length: d.textSpan.length,
         fileText,
+      });
+    }
+    return out;
+  }
+
+  /** TypeScript's completions at a UTF-16 offset. */
+  completionsAt(fileName: string, offset: number): TsCompletion[] {
+    let completions: ts.CompletionInfo | undefined;
+    try {
+      completions = this.service.getCompletionsAtPosition(
+        fileName,
+        offset,
+        undefined,
+      );
+    } catch {
+      return [];
+    }
+    return (completions?.entries ?? []).map((e) => ({
+      name: e.name,
+      kind: e.kind,
+      sortText: e.sortText,
+    }));
+  }
+
+  /** TypeScript's references for the symbol at a UTF-16 offset.
+   * `isDefinition` is computed against the definition spans — the service's
+   * own flag is unreliable in current TypeScript. */
+  referencesAt(fileName: string, offset: number): TsReference[] {
+    let references: ts.ReferenceEntry[] | undefined;
+    try {
+      references = this.service.getReferencesAtPosition(fileName, offset);
+    } catch {
+      return [];
+    }
+    const definitions = this.definitionsAt(fileName, offset);
+    return this.toReferences(
+      (references ?? []).map((r) => ({
+        ...r,
+        isDefinition: definitions.some(
+          (d) => d.fileName === r.fileName && d.start === r.textSpan.start,
+        ),
+      })),
+    );
+  }
+
+  /** TypeScript's rename locations for the symbol at a UTF-16 offset, or
+   * null when the symbol cannot be renamed. The caller applies the new
+   * name at every location. */
+  renameAt(fileName: string, offset: number): TsReference[] | null {
+    try {
+      if (!this.service.getRenameInfo(fileName, offset, {}).canRename) {
+        return null;
+      }
+      const locations = this.service.findRenameLocations(
+        fileName,
+        offset,
+        false,
+        false,
+        {},
+      );
+      if (!locations) return null;
+      return this.toReferences(
+        locations.map((l) => ({ ...l, isDefinition: false })),
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  private toReferences(
+    entries: readonly (ts.DocumentSpan & { isDefinition?: boolean })[],
+  ): TsReference[] {
+    const out: TsReference[] = [];
+    for (const entry of entries) {
+      const fileText = this.fileText(entry.fileName);
+      if (fileText === null) continue;
+      out.push({
+        fileName: entry.fileName,
+        start: entry.textSpan.start,
+        length: entry.textSpan.length,
+        fileText,
+        isDefinition: entry.isDefinition ?? false,
       });
     }
     return out;

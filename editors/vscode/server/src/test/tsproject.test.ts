@@ -91,3 +91,42 @@ test("rl constructs in the file do not break nearby TS resolution", () => {
   assert.equal(defs.length, 1);
   assert.equal(positionAt(defs[0].fileText, defs[0].start).line, 0);
 });
+
+test("completions include an imported function and object members", () => {
+  const { main, ts } = project();
+  // General position at end of file.
+  const general = ts.completionsAt(main, MAIN_RL.length);
+  assert.ok(general.some((c) => c.name === "add"), "missing `add`");
+  assert.ok(general.some((c) => c.name === "local"), "missing `local`");
+
+  // Member position: after `console.` the members of console appear.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-tsproject-"));
+  const file = path.join(dir, "m.rl");
+  const src = "console.\n";
+  fs.writeFileSync(file, src);
+  const p = new TsProject(() => null, () => [file], dir);
+  const members = p.completionsAt(file, src.indexOf(".") + 1);
+  assert.ok(members.some((c) => c.name === "log"), "missing console.log");
+});
+
+test("references cross the .rl import in both directions", () => {
+  const { main, util, ts } = project();
+  const refs = ts.referencesAt(main, MAIN_RL.indexOf("add(1"));
+  const files = refs.map((r) => r.fileName).sort();
+  assert.ok(files.includes(util), "declaration reference missing");
+  assert.ok(files.includes(main), "usage reference missing");
+  assert.ok(refs.some((r) => r.isDefinition));
+});
+
+test("rename returns every location of a local symbol", () => {
+  const { main, ts } = project();
+  const locations = ts.renameAt(main, MAIN_RL.indexOf("local);"));
+  assert.ok(locations);
+  assert.equal(locations!.length, 2); // declaration + use
+  for (const l of locations!) {
+    assert.equal(
+      l.fileText.slice(l.start, l.start + l.length),
+      "local",
+    );
+  }
+});

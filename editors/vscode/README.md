@@ -11,7 +11,9 @@ rl(`.rl`) 파일을 위한 VSCode 언어 서비스입니다. VSCode 공식
 |------|------|
 | 문법 하이라이팅 | rl 전용 구문(match 키워드, 암 태그, enum 케이스)을 칠하고 나머지는 VSCode 내장 TypeScript 문법(`source.ts`)에 위임 — 통과 원칙과 같은 구조 |
 | 진단 | 편집할 때마다 **실제 컴파일러**(`rlc --check`)를 실행해 에러를 표시 — 에디터의 에러는 항상 컴파일러와 일치 |
-| 자동완성 | match 암 위치의 케이스 태그(이미 덮은 태그 제외), `Enum.` 뒤 생성자(필드 탭스톱 스니펫), `Tag(` 안의 필드 바인딩, `enum`/`match`/`try`/`let-else` 스니펫 |
+| 자동완성 | match 암 위치의 케이스 태그(이미 덮은 태그 제외), `Enum.` 뒤 생성자(필드 탭스톱 스니펫), `Tag(` 안의 필드 바인딩, `enum`/`match`/`try`/`let-else` 스니펫. 그 외 위치·`obj.` 멤버 접근은 TypeScript 언어 서비스의 완성 목록(rl 항목이 위) |
+| 참조 찾기 | TypeScript 언어 서비스 위임 — `.rl` import 너머 선언·사용처 포함 |
+| 이름 변경 | 일반 TS 심볼은 TypeScript 언어 서비스 위임. rl 심볼(enum·케이스 태그)은 방출물의 `kind` 문자열과 연동되므로 거부(안전) |
 | 호버 | enum·케이스 선언 시그니처와 컴파일 형태 설명 (내장 `Option`/`Result`·import한 enum 포함). 그 외 심볼은 TypeScript 언어 서비스의 quick info |
 | 정의로 이동 | rl 심볼(케이스 태그·enum 이름)은 선언 위치로 — **`.rl` import 너머까지**. **그 외 모든 심볼(변수·함수·타입·import된 값)은 TypeScript 언어 서비스에 위임** — `.ts` 파일에서처럼 동작하고, `./x.rl` import도 따라간다 |
 | 문서 심볼 | Outline에 enum과 케이스 트리 표시 |

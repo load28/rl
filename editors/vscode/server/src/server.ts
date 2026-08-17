@@ -55,6 +55,8 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       completionProvider: { triggerCharacters: [".", "(", "|"] },
       hoverProvider: true,
       definitionProvider: true,
+      referencesProvider: true,
+      renameProvider: true,
       documentSymbolProvider: true,
       codeActionProvider: { codeActionKinds: [CodeActionKind.QuickFix] },
     },
@@ -168,6 +170,44 @@ function tsDefinitions(doc: TextDocument, offset: number): Location[] | null {
       end: tsproject.positionAt(d.fileText, d.start + d.length),
     }),
   );
+}
+
+/** TypeScript ScriptElementKind strings → LSP completion kinds. */
+const TS_COMPLETION_KINDS: Record<string, CompletionItemKind> = {
+  var: CompletionItemKind.Variable,
+  let: CompletionItemKind.Variable,
+  const: CompletionItemKind.Variable,
+  "local var": CompletionItemKind.Variable,
+  parameter: CompletionItemKind.Variable,
+  alias: CompletionItemKind.Reference,
+  function: CompletionItemKind.Function,
+  "local function": CompletionItemKind.Function,
+  method: CompletionItemKind.Method,
+  property: CompletionItemKind.Property,
+  getter: CompletionItemKind.Property,
+  setter: CompletionItemKind.Property,
+  class: CompletionItemKind.Class,
+  interface: CompletionItemKind.Interface,
+  type: CompletionItemKind.TypeParameter,
+  enum: CompletionItemKind.Enum,
+  "enum member": CompletionItemKind.EnumMember,
+  module: CompletionItemKind.Module,
+  keyword: CompletionItemKind.Keyword,
+  string: CompletionItemKind.Constant,
+};
+
+/** TS completions, sorted after the rl-specific items (`2` prefix; rl
+ * items use `0`/`1`). */
+function tsCompletions(doc: TextDocument, offset: number): CompletionItem[] {
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return [];
+  return getTsProject()
+    .completionsAt(uri.fsPath, offset)
+    .map((entry) => ({
+      label: entry.name,
+      kind: TS_COMPLETION_KINDS[entry.kind] ?? CompletionItemKind.Text,
+      sortText: `2${entry.sortText}`,
+    }));
 }
 
 function tsHover(doc: TextDocument, offset: number) {
@@ -436,11 +476,12 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const offset = doc.offsetAt(params.position);
   const visible = analysis.visibleEnums(enums, await importedEnums(doc));
 
-  // `Enum.` member access → constructors of that enum.
+  // `Enum.` member access → constructors of that enum; any other member
+  // access (`obj.`) is TypeScript's to complete.
   const base = analysis.memberAccessAt(masked, offset);
   if (base !== null) {
     const e = visible.find((x) => x.name === base);
-    if (!e) return [];
+    if (!e) return tsCompletions(doc, offset);
     return e.cases.map((c) => constructorItem(e, c));
   }
 
@@ -500,7 +541,8 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
     return items;
   }
 
-  // General position → enum names + rl keyword snippets.
+  // General position → enum names + rl keyword snippets, then everything
+  // TypeScript would offer in a .ts file (sorted after the rl items).
   const items: CompletionItem[] = visible.map((e) => ({
     label: e.name,
     kind: CompletionItemKind.Enum,
@@ -511,7 +553,11 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
         : `enum ${e.name}${e.generics}`,
     sortText: `0${e.name}`,
   }));
-  return items.concat(KEYWORD_SNIPPETS);
+  const rlItems = items.concat(KEYWORD_SNIPPETS);
+  const seen = new Set(rlItems.map((i) => i.label));
+  return rlItems.concat(
+    tsCompletions(doc, offset).filter((i) => !seen.has(i.label)),
+  );
 });
 
 function constructorItem(
@@ -659,6 +705,67 @@ connection.onDefinition(async (params) => {
   // names the user may have imported from the std module — is the
   // TypeScript language service's answer.
   return tsDefinitions(doc, offset);
+});
+
+// -------------------------------------------------- references and rename
+
+connection.onReferences((params): Location[] | null => {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return null;
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return null;
+  const offset = doc.offsetAt(params.position);
+  // Delegated wholesale to TypeScript: it resolves the passthrough region
+  // exactly, and rl-specific spans degrade to an empty result.
+  const references = getTsProject()
+    .referencesAt(uri.fsPath, offset)
+    .filter((r) => params.context.includeDeclaration || !r.isDefinition);
+  if (references.length === 0) return null;
+  return references.map((r) =>
+    Location.create(URI.file(r.fileName).toString(), {
+      start: tsproject.positionAt(r.fileText, r.start),
+      end: tsproject.positionAt(r.fileText, r.start + r.length),
+    }),
+  );
+});
+
+connection.onRenameRequest(async (params) => {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return null;
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return null;
+  const offset = doc.offsetAt(params.position);
+
+  // rl symbols (enums, case tags) are compiled into the emitted `kind`
+  // strings — renaming them needs rl-aware rewriting, so refuse rather
+  // than let TypeScript do half the job.
+  const { text, masked, enums, matches } = analyze(doc);
+  const sym = analysis.symbolAt(
+    text,
+    masked,
+    offset,
+    enums,
+    matches,
+    await importedEnums(doc),
+  );
+  if (sym) return null;
+
+  const locations = getTsProject().renameAt(uri.fsPath, offset);
+  if (!locations || locations.length === 0) return null;
+  const changes: Record<string, TextEdit[]> = {};
+  for (const l of locations) {
+    const target = URI.file(l.fileName).toString();
+    (changes[target] ??= []).push(
+      TextEdit.replace(
+        {
+          start: tsproject.positionAt(l.fileText, l.start),
+          end: tsproject.positionAt(l.fileText, l.start + l.length),
+        },
+        params.newName,
+      ),
+    );
+  }
+  return { changes };
 });
 
 // ----------------------------------------------------------------- symbols
