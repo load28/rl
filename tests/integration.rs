@@ -1280,3 +1280,67 @@ await main();
 "#);
     assert_eq!(lines, ["OK!"]);
 }
+
+/* ------------------------------------------------------------------ */
+/* tuple match                                                         */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn runtime_tuple_match_dispatches_on_the_combination() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Conn { Online(latency: number), Offline }
+enum Mode { Auto(), Manual(level: number) }
+
+function decide(c: Conn, m: Mode): number {
+  return match (c, m) {
+    (Online(latency), Auto) if latency < 50 => 10,
+    (Online, Auto) => 5,
+    (Online, Manual(level)) => level,
+    (Offline, _) => 0,
+  };
+}
+
+console.log(decide(Conn.Online(10), Mode.Auto()));
+console.log(decide(Conn.Online(80), Mode.Auto()));
+console.log(decide(Conn.Online(10), Mode.Manual(7)));
+console.log(decide(Conn.Offline, Mode.Auto()));
+"#);
+    assert_eq!(lines, vec!["10", "5", "7", "0"]);
+}
+
+#[test]
+fn tuple_match_bindings_typecheck_per_position() {
+    require_toolchain!();
+    let (ok, out) = typecheck(
+        r#"
+enum Left { A(n: number), B }
+enum Right { C(s: string), D }
+function f(l: Left, r: Right): string {
+  return match (l, r) {
+    (A(n), C(s)) => s.repeat(n),
+    (A(n), D) => n.toFixed(0),
+    (B, C(s)) => s,
+    (B, D) => "",
+  };
+}
+"#,
+    );
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn tuple_match_scrutinees_evaluate_once_each_left_to_right() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Coin { Heads(), Tails }
+const order: string[] = [];
+function heads(name: string): Coin { order.push(name); return Coin.Heads(); }
+const r = match (heads("a"), heads("b")) {
+  (Heads, Heads) => 1,
+  _ => 0,
+};
+console.log(order.join(","), r);
+"#);
+    assert_eq!(lines, vec!["a,b 1"]);
+}

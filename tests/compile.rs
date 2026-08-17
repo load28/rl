@@ -1279,3 +1279,214 @@ fn try_inside_a_pipeline_step_is_an_error() {
     let e = err("const a = x |> (n => { const b = try f(n); return b; });\n");
     assert!(e.message.contains("`try` cannot be used"), "{}", e.message);
 }
+
+/* ------------------------------------------------------------------ */
+/* tuple match                                                         */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn tuple_match_emits_joint_if_chain() {
+    let out = ok(r#"
+enum Dir { North(), South }
+enum Speed { Fast(), Slow }
+const step = match (dir, speed) {
+  (North, Fast) => 2,
+  (North, Slow) => 1,
+  (South, _) => -1,
+};
+"#);
+    assert!(out.contains("const $rl_m0 = (dir);"), "{out}");
+    assert!(out.contains("const $rl_m1 = (speed);"), "{out}");
+    assert!(
+        out.contains("if ($rl_m0.kind === \"North\" && $rl_m1.kind === \"Fast\") { return (2); }"),
+        "{out}"
+    );
+    assert!(
+        out.contains("if ($rl_m0.kind === \"South\") { return (-1); }"),
+        "{out}"
+    );
+    assert!(out.contains("JSON.stringify([$rl_m0, $rl_m1])"), "{out}");
+}
+
+#[test]
+fn tuple_match_binds_fields_from_each_position() {
+    let out = ok(r#"
+const r = match (a, b) {
+  (Some(value: x), Some(value: y)) => x + y,
+  _ => 0,
+};
+"#);
+    assert!(
+        out.contains(
+            "{ const { value: x } = $rl_m0; const { value: y } = $rl_m1; return (x + y); }"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn comma_expression_scrutinee_is_still_a_single_match() {
+    // No tuple pattern in the arms → the comma is a comma expression,
+    // exactly as before tuple matches existed.
+    let out = ok(
+        "const r = match ((a, b)) { A => 1, _ => 0 };\nconst s = match (a, b) { A => 1, _ => 0 };\n",
+    );
+    assert!(out.contains("const $rl_m = ((a, b));"), "{out}");
+    assert!(out.contains("const $rl_m = (a, b);"), "{out}");
+    assert!(!out.contains("$rl_m0"), "{out}");
+}
+
+#[test]
+fn tuple_match_product_exhaustiveness_reports_missing_combination() {
+    let e = err(r#"
+enum Dir { North(), South }
+enum Speed { Fast(), Slow }
+const step = match (d, s) {
+  (North, Fast) => 2,
+  (North, Slow) => 1,
+  (South, Fast) => -1,
+};
+"#);
+    assert!(
+        e.message
+            .contains("match on (Dir, Speed) is not exhaustive: missing (South, Slow)"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (4, 14));
+}
+
+#[test]
+fn tuple_match_wildcard_element_and_or_pattern_cover_the_product() {
+    let out = ok(r#"
+enum Dir { North(), South, East, West }
+enum Speed { Fast(), Slow }
+const step = match (d, s) {
+  (North | South, _) => 1,
+  (East, Fast | Slow) => 2,
+  (West, _) => 3,
+};
+"#);
+    assert!(out.contains("$rl_m0"), "{out}");
+    assert!(
+        out.contains(
+            "if (($rl_m0.kind === \"North\" || $rl_m0.kind === \"South\")) { return (1); }"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn tuple_match_guarded_arm_covers_nothing() {
+    let e = err(r#"
+enum Coin { Heads(), Tails }
+const r = match (a, b) {
+  (Heads, Heads) if lucky() => 1,
+  (Heads, Heads) => 2,
+  (Heads, Tails) => 3,
+  (Tails, Heads) => 4,
+};
+"#);
+    assert!(
+        e.message.contains("missing (Tails, Tails)"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn tuple_match_bare_wildcard_arm_skips_the_check_and_must_be_last() {
+    let out = ok(r#"
+enum Coin { Heads(), Tails }
+const r = match (a, b) {
+  (Heads, Heads) => 1,
+  _ => 0,
+};
+"#);
+    assert!(out.contains("return (0);"), "{out}");
+
+    let e = err("const r = match (a, b) {\n  _ => 0,\n  (A, B) => 1,\n};\n");
+    assert!(e.message.contains("must be the last arm"), "{}", e.message);
+}
+
+#[test]
+fn tuple_match_arity_mismatch_is_an_error() {
+    let e = err("const r = match (a, b) {\n  (A, B, C) => 1,\n  _ => 0,\n};\n");
+    assert!(
+        e.message
+            .contains("tuple pattern has 3 elements but the match has 2 scrutinees"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 3));
+}
+
+#[test]
+fn tuple_match_duplicate_binding_across_elements_is_an_error() {
+    let e =
+        err("const r = match (a, b) {\n  (Some(value), Some(value)) => value,\n  _ => 0,\n};\n");
+    assert!(
+        e.message.contains("binding `value` is used more than once"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn tuple_match_or_alternatives_must_bind_the_same_fields_per_element() {
+    let e = err("const r = match (a, b) {\n  (Some(value) | None, _) => 1,\n  _ => 0,\n};\n");
+    assert!(
+        e.message
+            .contains("or-pattern alternatives must bind the same fields"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn tuple_match_over_builtin_enums() {
+    let e = err(
+        "const r = match (o, r2) {\n  (Some(value), Ok(value: v)) => value + v,\n  (None, _) => 0,\n};\n",
+    );
+    assert!(
+        e.message
+            .contains("match on (Option, Result) is not exhaustive: missing (Some, Err)"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn tuple_match_block_bodies_and_guards_use_the_label() {
+    let out = ok(r#"
+enum Coin { Heads(), Tails }
+const r = match (a, b) {
+  (Heads, Tails) if go() => { log(); return 1; },
+  _ => 0,
+};
+"#);
+    assert!(out.contains("$rl_b: {"), "{out}");
+    assert!(out.contains("if ((go()))"), "{out}");
+    assert!(out.contains("break $rl_b;"), "{out}");
+}
+
+#[test]
+fn tuple_match_await_in_scrutinee_makes_it_async() {
+    let out = ok(
+        "async function f() {\n  return match (await a, b) {\n    (X, Y) => 1,\n    _ => 0,\n  };\n}\n",
+    );
+    assert!(out.contains("(await (async () => {"), "{out}");
+}
+
+#[test]
+fn tuple_match_three_positions() {
+    let e = err(r#"
+enum B { T(), F }
+const r = match (x, y, z) {
+  (T, _, _) => 1,
+  (F, T, _) => 2,
+  (F, F, T) => 3,
+};
+"#);
+    assert!(e.message.contains("missing (F, F, F)"), "{}", e.message);
+}

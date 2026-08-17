@@ -138,6 +138,7 @@ fn segment_start(seg: &Segment) -> usize {
         Segment::Verbatim(span) => span.start,
         Segment::Enum(d) => d.name_off,
         Segment::Match(m) => m.keyword_off,
+        Segment::TupleMatch(m) => m.keyword_off,
         Segment::Try(t) => t.keyword_off,
         Segment::LetElse(l) => l.keyword_off,
         Segment::RlImport(d) => d.spec.start,
@@ -300,11 +301,14 @@ impl Parser<'_> {
 
             if !dotted
                 && word == "match"
-                && let Some((cur, byte_end, expr)) =
+                && let Some((cur, byte_end, parsed)) =
                     matches::parse_match(Cursor::new(self, tokens, i + 1, end), tok.span)
             {
                 flush_verbatim(&mut segments, seg_start, tok.span.start);
-                segments.push(Segment::Match(expr));
+                segments.push(match parsed {
+                    matches::ParsedMatch::Single(expr) => Segment::Match(expr),
+                    matches::ParsedMatch::Tuple(expr) => Segment::TupleMatch(expr),
+                });
                 seg_start = byte_end;
                 i = cur.idx;
                 continue;

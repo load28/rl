@@ -40,6 +40,8 @@ pub(crate) enum Segment {
     Enum(EnumDecl),
     /// An rl `match` expression.
     Match(MatchExpr),
+    /// An rl tuple match expression (`match (a, b) { (P, Q) => ... }`).
+    TupleMatch(TupleMatchExpr),
     /// An rl `try` statement (Rust-style error propagation).
     Try(TryStmt),
     /// An rl let-else statement (Rust-style refutable binding).
@@ -215,6 +217,50 @@ pub(crate) struct MatchExpr {
     /// The scrutinee, recursively parsed.
     pub scrutinee: Program,
     pub arms: Vec<Arm>,
+}
+
+/// A structurally parsed rl tuple match: two or more comma-separated
+/// scrutinees matched jointly against tuple patterns. Disambiguation from a
+/// comma-expression scrutinee is arm-driven: the arms decide — every arm
+/// must be a parenthesized tuple pattern (or a final bare `_`), otherwise
+/// the whole thing parses as a single match over a comma expression, so
+/// existing programs keep their meaning. Exhaustiveness is checked over the
+/// cartesian product of the per-position enums.
+#[derive(Debug)]
+pub(crate) struct TupleMatchExpr {
+    /// Byte offset of the `match` keyword, for error reporting.
+    pub keyword_off: usize,
+    /// The scrutinees, in source order (always two or more): raw span for
+    /// `await` detection plus the recursively parsed expression.
+    pub scrutinees: Vec<(Span, Program)>,
+    pub arms: Vec<TupleArm>,
+}
+
+/// One arm of a [`TupleMatchExpr`].
+#[derive(Debug)]
+pub(crate) struct TupleArm {
+    /// Byte offset of the pattern, for error reporting.
+    pub pattern_off: usize,
+    pub pattern: TuplePattern,
+    /// `Some` for a guarded arm; never attached to a bare `_` arm.
+    pub guard: Option<GuardExpr>,
+    /// Raw span of the body (used for `await` detection).
+    pub body_span: Span,
+    /// The body, recursively parsed (braces excluded for block bodies).
+    pub body: Program,
+    /// True for a `{ ... }` block body.
+    pub block: bool,
+}
+
+/// A tuple arm's pattern.
+#[derive(Debug)]
+pub(crate) enum TuplePattern {
+    /// The final bare `_` arm — covers every combination.
+    Wildcard,
+    /// `(elem, elem, ...)` — one [`Pattern`] per scrutinee position (the
+    /// arity match is a semantic check). Each element is a tag pattern
+    /// (or-patterns and bindings included) or `_`.
+    Elems(Vec<Pattern>),
 }
 
 /// One `pattern (if guard)? => body` arm of a match.

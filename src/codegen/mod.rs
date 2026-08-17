@@ -85,6 +85,9 @@ impl Emitter<'_> {
                 Segment::Match(expr) => {
                     out.extend_from_slice(matches::emit_match(self, expr).as_bytes());
                 }
+                Segment::TupleMatch(expr) => {
+                    out.extend_from_slice(matches::emit_tuple_match(self, expr).as_bytes());
+                }
                 Segment::Try(stmt) => out.extend_from_slice(self.emit_try(stmt).as_bytes()),
                 Segment::LetElse(stmt) => {
                     out.extend_from_slice(self.emit_let_else(stmt).as_bytes());

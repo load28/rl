@@ -236,6 +236,70 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 - 어느 출처에도 없는 태그의 match는 검사 없이 컴파일되고 런타임 가드만
   남습니다.
 
+### 3.7 튜플 match — 다중 스크루티니
+
+두 개 이상의 값을 콤마로 나열하고 **조합**으로 매치합니다.
+
+```
+튜플-match ::= "match" "(" 식 ("," 식)+ ")" "{" 튜플-암-목록 "}"
+튜플-암    ::= 튜플-패턴 가드? "=>" 본문
+             | "_" "=>" 본문                  // 전체 와일드카드, 반드시 마지막
+튜플-패턴  ::= "(" 원소 ("," 원소)+ ")"
+원소       ::= 태그-패턴 ("|" 태그-패턴)* | "_"
+```
+
+```rl
+enum Conn { Online(latency: number), Offline }
+enum Mode { Auto(), Manual(level: number) }
+
+const speed = match (conn, mode) {
+  (Online(latency), Auto) if latency < 50 => 10,
+  (Online, Auto)          => 5,
+  (Online, Manual(level)) => level,
+  (Offline, _)            => 0,
+};
+```
+
+**판별은 암 주도입니다**: 모든 암이 튜플-패턴(또는 마지막 bare `_`)이고
+스크루티니가 최상위 콤마로 나뉠 때만 튜플 match입니다. 암에 튜플-패턴이
+없으면 `match (a, b)`는 지금까지처럼 **콤마 식 스크루티니의 단일 match**라
+기존 프로그램의 의미가 바뀌지 않습니다.
+
+| 요소 | 규칙 |
+|------|------|
+| 원소 | 태그 패턴(or-패턴·바인딩 포함) 또는 `_`. 원소 수는 스크루티니 수와 일치해야 함 (불일치는 컴파일 에러) |
+| 바인딩 | 단일 match와 동일 (이름 기준, `field: alias`). 한 튜플 패턴 안에서 같은 이름을 두 번 바인딩하면 에러 — 별칭으로 바꿉니다 |
+| 가드 | 튜플-패턴 암에만. 가드 암은 소진성 커버 불인정 (단일 match와 동일) |
+| bare `_` 암 | 모든 조합 커버, 반드시 마지막 |
+
+**컴파일 결과**: 스크루티니를 각각 한 번씩 좌→우로 평가해 `$rl_m0`,
+`$rl_m1`, ...에 담고, 조합 조건의 if-체인으로 분기합니다 (가드 있는 단일
+match와 같은 형태 — 구조 분해는 각 임시에서, `await` 규칙은 §3.5와 동일).
+
+```ts
+const speed = ((() => {
+  const $rl_m0 = (conn);
+  const $rl_m1 = (mode);
+  if ($rl_m0.kind === "Online" && $rl_m1.kind === "Auto") { const { latency } = $rl_m0; if ((latency < 50)) return (10); }
+  ...
+  throw new Error("rl match: unexpected case " + JSON.stringify([$rl_m0, $rl_m1]));
+})());
+```
+
+**소진성은 곱집합입니다**: 각 위치의 enum을 §3.6의 규칙(로컬 > 임포트 >
+내장)으로 해석해 태그 조합 전체를 검사하고, 빠진 조합을 보고합니다 —
+TypeScript로는 어떤 방법으로도 얻을 수 없는 검사입니다.
+
+```
+rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Manual)
+     (add the missing arms or a final `_` arm)
+```
+
+원소 `_`와 or-패턴은 그 위치의 해당 태그들을 커버합니다. 모든 암이 `_`인
+위치는 검사에서 제외되고 메시지에 `_`로 표시됩니다. 어떤 위치든 알려진
+enum으로 해석되지 않으면 그 match는 검사 없이 컴파일됩니다 (단일 match의
+미지 유니언과 동일).
+
 ---
 
 ## 4. 표준 라이브러리와 내장 enum
@@ -538,6 +602,7 @@ rlc: parser.rl:3:28: match on enum Token (imported from "./token.rl")
 |------|------|
 | 소스맵 | 생성하지 않습니다. 생성된 `.ts`와 원본 행이 대체로 대응하지만 보장되지 않습니다 |
 | 패턴 | 태그 패턴(or-패턴·가드 포함)과 `_`뿐. 리터럴·중첩 패턴은 의도적으로 미지원. `_ if ...`는 rl 구문이 아닙니다 |
+| 튜플 match | 튜플-패턴 사이의 or(`(A, B) \| (C, D)`)는 미지원 — 원소 수준 or로 씁니다: `(A, B \| D)`. 스크루티니 분리는 구조적이라 최상위 비교 연산자(`a < b, c > d`)는 제네릭 인자로 오인될 수 있습니다 — 괄호로 감쌉니다 |
 | 소진성 수집 | 직접(1-홉) 상대 경로 `.rl` import만. re-export 체인·패키지 경로의 enum과 손으로 쓴 유니언은 검사되지 않습니다 ([§3.6](#36-소진성-검사), [§8.3](#83-선언-수집과-프로젝트-단위-소진성)) |
 | import 재작성 | 정적 상대 경로 `.rl` 지정자만. 참조 파일의 존재는 검사하지 않습니다 ([§8](#8-모듈-rl-import-지정자-재작성)) |
 | `try` | `;` 필수, 식은 `(`/`<`로 시작 불가, match 내부·템플릿 보간·모듈 최상위 불가. `Option` 전파 미지원 |

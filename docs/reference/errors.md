@@ -60,6 +60,21 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 않고 런타임 가드만 남습니다
 ([`language.md` §3.6](./language.md#36-소진성-검사)).
 
+튜플 match는 곱집합으로 검사하고 빠진 **조합**을 보고합니다 (5개 이상이면
+앞의 셋과 총 개수만):
+
+```
+rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Manual)
+     (add the missing arms or a final `_` arm)
+```
+
+### 튜플 match
+
+| 메시지 | 원인과 해결 |
+|--------|-------------|
+| `match: tuple pattern has <n> elements but the match has <m> scrutinees` | 튜플 패턴의 원소 수가 스크루티니 수와 다름. 위치는 패턴 시작 |
+| `` match: binding `<이름>` is used more than once in this tuple pattern (rename one with `field: alias`) `` | 한 튜플 패턴의 두 원소가 같은 이름을 바인딩 — 한 스코프에 두 번 선언됩니다. 별칭으로 바꿉니다: `(Some(value), Some(value: other))` |
+
 ## try / let-else
 
 | 메시지 | 원인과 해결 |

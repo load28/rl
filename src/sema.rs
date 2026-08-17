@@ -57,6 +57,21 @@ struct MatchCheck {
     covered: Vec<String>,
 }
 
+/// A deferred product-exhaustiveness check for one tuple match without a
+/// bare `_` arm. Each scrutinee position resolves to an enum independently
+/// (same shadowing order as single matches); the check then walks the
+/// cartesian product of the case sets.
+struct TupleMatchCheck {
+    /// Offset of the `match` keyword, for error reporting.
+    offset: usize,
+    /// Per position: every tag any arm (guarded or not) uses there — the
+    /// identification set. Empty when every arm has `_` at that position.
+    position_tags: Vec<Vec<String>>,
+    /// Per unguarded arm, per position: `None` for `_` (covers the whole
+    /// position), `Some(tags)` for the or-alternative tags it covers.
+    covered: Vec<Vec<Option<Vec<String>>>>,
+}
+
 /// Checks a whole program; `verify` enables swc validation of field types;
 /// `externs` are enum declarations collected from imported modules
 /// ([`crate::Options::extern_enums`]).
@@ -70,9 +85,11 @@ pub(crate) fn check(
         enums: BTreeMap::new(),
         externs,
         match_checks: Vec::new(),
+        tuple_checks: Vec::new(),
     };
     checker.visit_program(program, false)?;
-    checker.check_exhaustiveness()
+    checker.check_exhaustiveness()?;
+    checker.check_tuple_exhaustiveness()
 }
 
 struct Checker<'a> {
@@ -83,6 +100,8 @@ struct Checker<'a> {
     externs: &'a [ExternEnum],
     /// Wildcard-free matches to exhaustiveness-check after the walk.
     match_checks: Vec<MatchCheck>,
+    /// Tuple matches without a bare `_` arm, checked after the walk.
+    tuple_checks: Vec<TupleMatchCheck>,
 }
 
 /// The (field, bound name) pairs a tag alternative destructures, sorted so
@@ -119,6 +138,7 @@ impl Checker<'_> {
                 Segment::Verbatim(_) | Segment::RlImport(_) => {}
                 Segment::Enum(decl) => self.check_enum(decl)?,
                 Segment::Match(expr) => self.check_match(expr)?,
+                Segment::TupleMatch(expr) => self.check_tuple_match(expr)?,
                 Segment::Try(stmt) => self.check_try(stmt, nested)?,
                 Segment::LetElse(stmt) => self.check_let_else(stmt, nested)?,
                 Segment::Pipe(pipe) => {
@@ -292,6 +312,109 @@ impl Checker<'_> {
         Ok(())
     }
 
+    fn check_tuple_match(&mut self, expr: &TupleMatchExpr) -> Result<(), RlError> {
+        let arity = expr.scrutinees.len();
+        let mut has_bare_wildcard = false;
+        for (idx, arm) in expr.arms.iter().enumerate() {
+            match &arm.pattern {
+                TuplePattern::Wildcard => {
+                    if idx != expr.arms.len() - 1 {
+                        return Err(RlError::at(
+                            arm.pattern_off,
+                            "match: the wildcard arm `_` must be the last arm".to_string(),
+                        ));
+                    }
+                    has_bare_wildcard = true;
+                }
+                TuplePattern::Elems(elems) => {
+                    if elems.len() != arity {
+                        return Err(RlError::at(
+                            arm.pattern_off,
+                            format!(
+                                "match: tuple pattern has {} elements but the match has {} scrutinees",
+                                elems.len(),
+                                arity
+                            ),
+                        ));
+                    }
+                    // Every element's or-alternatives share one
+                    // destructuring; bound names must also be unique across
+                    // the whole tuple pattern (they land in one scope).
+                    let mut bound: Vec<&str> = Vec::new();
+                    for elem in elems {
+                        let Pattern::Tags(alts) = elem else { continue };
+                        let first_set = binding_set(&alts[0].bindings);
+                        for alt in alts {
+                            if binding_set(&alt.bindings) != first_set {
+                                return Err(RlError::at(
+                                    alt.tag_off,
+                                    "match: or-pattern alternatives must bind the same fields"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        for (_, name) in first_set {
+                            if bound.contains(&name) {
+                                return Err(RlError::at(
+                                    alts[0].tag_off,
+                                    format!(
+                                        "match: binding `{name}` is used more than once in this tuple pattern (rename one with `field: alias`)"
+                                    ),
+                                ));
+                            }
+                            bound.push(name);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !has_bare_wildcard {
+            let mut position_tags: Vec<Vec<String>> = vec![Vec::new(); arity];
+            let mut covered: Vec<Vec<Option<Vec<String>>>> = Vec::new();
+            for arm in &expr.arms {
+                let TuplePattern::Elems(elems) = &arm.pattern else {
+                    continue;
+                };
+                let mut row: Vec<Option<Vec<String>>> = Vec::with_capacity(arity);
+                for (p, elem) in elems.iter().enumerate() {
+                    match elem {
+                        Pattern::Wildcard => row.push(None),
+                        Pattern::Tags(alts) => {
+                            let tags: Vec<String> = alts.iter().map(|t| t.tag.clone()).collect();
+                            for tag in &tags {
+                                if !position_tags[p].contains(tag) {
+                                    position_tags[p].push(tag.clone());
+                                }
+                            }
+                            row.push(Some(tags));
+                        }
+                    }
+                }
+                if arm.guard.is_none() {
+                    covered.push(row);
+                }
+            }
+            self.tuple_checks.push(TupleMatchCheck {
+                offset: expr.keyword_off,
+                position_tags,
+                covered,
+            });
+        }
+
+        // children, in source order
+        for (_, scrutinee) in &expr.scrutinees {
+            self.visit_program(scrutinee, true)?;
+        }
+        for arm in &expr.arms {
+            if let Some(guard) = &arm.guard {
+                self.visit_program(&guard.expr, true)?;
+            }
+            self.visit_program(&arm.body, true)?;
+        }
+        Ok(())
+    }
+
     /// Resolves the deferred exhaustiveness checks against the collected
     /// enum registry, the imported declarations, and the built-in enums
     /// (`Option`, `Result`), in that order — so on a tie the nearer origin
@@ -357,6 +480,127 @@ impl Checker<'_> {
                     check.offset,
                     format!(
                         "match on {described} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolves a tuple-match position's tag set to an enum: local >
+    /// imported > built-in, the first whose cases contain every tag.
+    fn resolve_enum(&self, tags: &[String]) -> Option<(&str, Vec<&str>)> {
+        let contains_all = |cases: &[&str]| tags.iter().all(|t| cases.contains(&t.as_str()));
+        for (name, cases) in &self.enums {
+            let cases: Vec<&str> = cases.iter().map(String::as_str).collect();
+            if contains_all(&cases) {
+                return Some((name, cases));
+            }
+        }
+        for e in self.externs {
+            if self.enums.contains_key(&e.name) {
+                continue;
+            }
+            let cases: Vec<&str> = e.tags.iter().map(String::as_str).collect();
+            if contains_all(&cases) {
+                return Some((&e.name, cases));
+            }
+        }
+        for (name, cases) in crate::stdlib::BUILTIN_ENUMS {
+            if self.enums.contains_key(*name) || self.externs.iter().any(|e| e.name == *name) {
+                continue;
+            }
+            if contains_all(cases) {
+                return Some((name, cases.to_vec()));
+            }
+        }
+        None
+    }
+
+    /// Walks the cartesian product of each tuple match's per-position case
+    /// sets and reports uncovered combinations. A position where every arm
+    /// has `_` is universal — it constrains nothing and shows as `_` in the
+    /// message. A match with a tagged position that resolves to no known
+    /// enum is not checked (same as single matches over unknown unions).
+    fn check_tuple_exhaustiveness(&self) -> Result<(), RlError> {
+        'checks: for check in &self.tuple_checks {
+            let arity = check.position_tags.len();
+            let mut names: Vec<&str> = Vec::with_capacity(arity);
+            let mut cases: Vec<Vec<&str>> = Vec::with_capacity(arity);
+            for tags in &check.position_tags {
+                if tags.is_empty() {
+                    names.push("_");
+                    cases.push(Vec::new()); // universal position
+                    continue;
+                }
+                match self.resolve_enum(tags) {
+                    Some((name, cs)) => {
+                        names.push(name);
+                        cases.push(cs);
+                    }
+                    None => continue 'checks,
+                }
+            }
+
+            let tagged: Vec<usize> = (0..arity).filter(|&p| !cases[p].is_empty()).collect();
+            if tagged.is_empty() {
+                continue; // every position universal — nothing enumerable
+            }
+
+            let mut missing: Vec<String> = Vec::new();
+            let mut idx = vec![0usize; tagged.len()];
+            loop {
+                let covered = check.covered.iter().any(|row| {
+                    tagged.iter().enumerate().all(|(ti, &p)| match &row[p] {
+                        None => true,
+                        Some(tags) => tags.iter().any(|t| t == cases[p][idx[ti]]),
+                    })
+                });
+                if !covered {
+                    let mut parts = vec!["_"; arity];
+                    for (ti, &p) in tagged.iter().enumerate() {
+                        parts[p] = cases[p][idx[ti]];
+                    }
+                    missing.push(format!("({})", parts.join(", ")));
+                }
+                // odometer over the tagged positions
+                let mut ti = tagged.len();
+                loop {
+                    if ti == 0 {
+                        break;
+                    }
+                    ti -= 1;
+                    idx[ti] += 1;
+                    if idx[ti] < cases[tagged[ti]].len() {
+                        break;
+                    }
+                    idx[ti] = 0;
+                    if ti == 0 {
+                        ti = usize::MAX;
+                        break;
+                    }
+                }
+                if ti == usize::MAX {
+                    break;
+                }
+            }
+
+            if !missing.is_empty() {
+                let shown = if missing.len() > 4 {
+                    format!(
+                        "{}, … ({} combinations in total)",
+                        missing[..3].join(", "),
+                        missing.len()
+                    )
+                } else {
+                    missing.join(", ")
+                };
+                return Err(RlError::at(
+                    check.offset,
+                    format!(
+                        "match on ({}) is not exhaustive: missing {} (add the missing arms or a final `_` arm)",
+                        names.join(", "),
+                        shown
                     ),
                 ));
             }

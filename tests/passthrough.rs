@@ -289,3 +289,10 @@ fn pipe_bytes_in_strings_comments_regexes_and_templates_pass_through() {
         "const s = \"a |> b\";\n// c |> d\n/* e |> f */\nconst r = /\\|>/;\nconst t = `g |> h`;\n",
     );
 }
+
+#[test]
+fn match_shaped_calls_with_two_arguments_pass_through() {
+    // A real function named `match` called with a comma list — no braces
+    // follow, so it can never be claimed.
+    assert_passthrough("const x = match(a, b);\nobj.match(a, (b, c));\n");
+}
