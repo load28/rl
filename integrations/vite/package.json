@@ -1,0 +1,27 @@
+{
+  "name": "vite-plugin-rl",
+  "version": "0.1.0",
+  "description": "Compile .rl modules with rlc inside Vite and Rollup",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/load28/rl",
+    "directory": "integrations/vite"
+  },
+  "keywords": ["vite-plugin", "rollup-plugin", "rl", "typescript"],
+  "peerDependencies": {
+    "vite": ">=5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
