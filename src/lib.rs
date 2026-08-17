@@ -54,10 +54,12 @@ mod lexer;
 mod parser;
 mod scanner;
 mod sema;
+mod sidecar;
 mod stdlib;
 mod verify;
 
 pub use error::CompileError;
+pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::STD_SOURCE;
 
 use error::RlError;

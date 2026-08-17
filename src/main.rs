@@ -32,6 +32,9 @@ Options:
                         how relative .rl import specifiers are emitted:
                         js = ./x.js (default), ts = ./x.ts, bare = ./x,
                         off = untouched
+  --sidecar <dir>       write <name>.rl.d.ts and .map next to each input from
+                        <dir>/<name>.d.ts (tsc --emitDeclarationOnly output),
+                        so .ts files can import .rl; compiles nothing
   --symbols             print rl enum declarations (with positions) and the
                         direct .rl imports of each input as JSON; compiles
                         nothing (for language tooling)
@@ -123,6 +126,71 @@ fn symbols_mode(jobs: &[Job]) -> ExitCode {
         entries.push(entry);
     }
     println!("[{}]", entries.join(","));
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `--sidecar <dir>`: writes `<name>.rl.d.ts` and `<name>.rl.d.ts.map` next
+/// to each input `.rl`, from the declarations tsc emitted for that module
+/// (`<dir>/<name>.d.ts`, produced with `--emitDeclarationOnly` over rlc's
+/// output). The map's `sources` is the `.rl` file, so an editor's "go to
+/// definition" from a `.ts` importer lands in the original — not in the
+/// generated declarations. Compiles nothing.
+fn sidecar_mode(jobs: &[Job], decl_dir: &Path) -> ExitCode {
+    let mut failed = false;
+    for job in jobs {
+        let Some(stem) = job
+            .file
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+        else {
+            continue;
+        };
+        let Some(file_name) = job
+            .file
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+        else {
+            continue;
+        };
+
+        let source = match fs::read_to_string(&job.file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("rlc: {}: {e}", job.file.display());
+                failed = true;
+                continue;
+            }
+        };
+        let decl_path = decl_dir.join(format!("{stem}.d.ts"));
+        let declarations = match fs::read_to_string(&decl_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("rlc: {}: {e}", decl_path.display());
+                failed = true;
+                continue;
+            }
+        };
+
+        let sidecar = rlc::build_sidecar(&source, &declarations, &file_name);
+        let dir = job.file.parent().unwrap_or(Path::new("."));
+        let dts_path = dir.join(format!("{file_name}.d.ts"));
+        let map_path = dir.join(format!("{file_name}.d.ts.map"));
+        if let Err(e) = fs::write(&dts_path, &sidecar.declarations) {
+            eprintln!("rlc: {}: {e}", dts_path.display());
+            failed = true;
+            continue;
+        }
+        if let Err(e) = fs::write(&map_path, &sidecar.map) {
+            eprintln!("rlc: {}: {e}", map_path.display());
+            failed = true;
+            continue;
+        }
+        eprintln!("rlc: {} → {}", job.file.display(), dts_path.display());
+    }
     if failed {
         ExitCode::FAILURE
     } else {
@@ -268,6 +336,7 @@ fn main() -> ExitCode {
     let mut banner = true;
     let mut verify = true;
     let mut symbols = false;
+    let mut sidecar_dir: Option<PathBuf> = None;
     let mut rewrite_imports = ImportRewrite::default();
 
     let mut it = argv.iter();
@@ -286,6 +355,13 @@ fn main() -> ExitCode {
             "--symbols" => symbols = true,
             "--no-banner" => banner = false,
             "--no-verify" => verify = false,
+            "--sidecar" => match it.next() {
+                Some(dir) => sidecar_dir = Some(PathBuf::from(dir)),
+                None => {
+                    eprintln!("rlc: --sidecar requires a directory of tsc-emitted .d.ts files");
+                    return ExitCode::FAILURE;
+                }
+            },
             "-o" | "--out-dir" => match it.next() {
                 Some(dir) => out_dir = Some(PathBuf::from(dir)),
                 None => {
@@ -384,6 +460,10 @@ fn main() -> ExitCode {
 
     if symbols {
         return symbols_mode(&jobs);
+    }
+
+    if let Some(dir) = &sidecar_dir {
+        return sidecar_mode(&jobs, dir);
     }
 
     let mut failed = false;

@@ -28,6 +28,7 @@ cargo build --release        # → target/release/rlc
 | `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
 | `--no-verify` | 필드 타입 검사와 생성물 자가 검사를 생략합니다. 검증기가 아직 모르는 최신 TS 문법을 쓴 코드를 위한 탈출구입니다. |
 | `--rewrite-imports <js\|ts\|bare\|off>` | 상대 경로 `.rl` import 지정자의 방출 형태 ([`language.md` §7](./language.md#7-모듈-rl-import-지정자-재작성)): `js`(기본) = `./x.js`, `ts` = `./x.ts`(tsc의 `rewriteRelativeImportExtensions` 필요), `bare` = `./x`, `off` = 재작성 끔. 그 외 값은 에러입니다. |
+| `--sidecar <dir>` | 컴파일하지 않고 각 입력 `.rl` 옆에 `<이름>.rl.d.ts`와 `.map`을 씁니다. 선언 본문은 `<dir>/<이름>.d.ts`(tsc `--emitDeclarationOnly` 산출물)에서 가져옵니다 (아래 "에디터 사이드카"). |
 | `--symbols` | 컴파일하지 않고 각 입력 파일의 rl enum 선언(위치 포함)과 직접 `.rl` import를 JSON으로 stdout에 출력합니다 (아래 "심볼 출력"). 언어 도구용. |
 | `-h, --help` | 도움말을 출력하고 종료합니다 (종료 코드 0). |
 | `-v, --version` | 버전만 출력하고 종료합니다 (종료 코드 0). |
@@ -97,6 +98,32 @@ cargo build --release        # → target/release/rlc
 - `--symbols`는 컴파일 모드와 조합되지 않습니다 — 지정하면 심볼 출력만
   하고 종료합니다 (`-o`/`-p`/`--check` 무시). 입력 파일을 읽지 못하면
   종료 코드 1입니다.
+
+## 에디터 사이드카 (`--sidecar`)
+
+`.ts` 파일이 `"./notice.rl"`을 import하면 tsserver가 확장자를 몰라
+`TS2307`을 냅니다. TypeScript의 탈출구는 그 에러 메시지에 있습니다 —
+"or its corresponding type declarations". `.rl` 옆에 선언 파일을 두면
+해결됩니다.
+
+```sh
+tsc -p tsconfig.types.json          # rlc 출력에서 선언만 뽑아 types/에
+rlc --sidecar types src/notice.rl   # src/notice.rl.d.ts + .map 생성
+```
+
+두 파일이 생깁니다.
+
+| 파일 | 역할 |
+|------|------|
+| `<이름>.rl.d.ts` | tsserver가 `"./<이름>.rl"`을 해결하는 근거 — 에러가 사라지고 자동완성·타입이 살아납니다 |
+| `<이름>.rl.d.ts.map` | `sources`가 원본 `.rl` — **정의 이동이 `.d.ts`가 아니라 원본으로** 갑니다 |
+
+선언 본문에는 타입 추론이 필요하므로 tsc가 만들고(`--emitDeclarationOnly`),
+rlc는 그 선언들이 원본 `.rl`의 어디에서 왔는지만 채웁니다. rl `enum`의
+위치는 파싱 결과에서 정확히 가져오고, 통과 영역의 선언은 이름으로 찾습니다.
+
+에디터가 선언 맵을 따라가려면 그 `.ts` 파일을 포함하는 `tsconfig.json`이
+있어야 합니다 — 추론 프로젝트로 열리면 맵 추적이 동작하지 않습니다.
 
 ## 배너
 
