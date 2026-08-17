@@ -9,3 +9,6 @@ node_modules/
 # Added by cargo
 
 /target
+
+# 표준 라이브러리 자동 방출물 (examples 컴파일 시)
+examples/rl.ts

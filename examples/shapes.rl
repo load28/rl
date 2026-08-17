@@ -2,15 +2,15 @@
 // Everything here that isn't one of those two constructs is plain TypeScript
 // and passes through the compiler untouched.
 
+// `Option`/`Result` come from the standard library. The specifier is bare:
+// rlc materializes the module next to this file's output and rewrites the
+// import to point at it (see docs/reference/cli.md).
+import { Option } from "@rl/std";
+
 export enum Shape {
   Circle(radius: number),
   Rect(width: number, height: number),
   Point,
-}
-
-export enum Option<T> {
-  Some(value: T),
-  None,
 }
 
 export function area(s: Shape): number {
@@ -32,9 +32,11 @@ export function describe(s: Shape): string {
   };
 }
 
-export function unwrapOr<T>(o: Option<T>, fallback: T): T {
+// `Option` is a built-in enum: this match is checked for exhaustiveness even
+// though the declaration lives in the standard library.
+export function label<T>(o: Option<T>, fallback: string): string {
   return match (o) {
-    Some(value) => value,
+    Some(value) => `${value}`,
     None => fallback,
   };
 }
@@ -50,4 +52,4 @@ for (const s of shapes) {
   console.log(describe(s), area(s), digits, level);
 }
 
-console.log(unwrapOr(Option.Some(7), 0), unwrapOr<number>(Option.None, 42));
+console.log(label(Option.Some(7), "none"), Option.unwrapOr<number>(Option.None, 42));

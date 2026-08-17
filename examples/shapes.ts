@@ -3,6 +3,11 @@
 // Everything here that isn't one of those two constructs is plain TypeScript
 // and passes through the compiler untouched.
 
+// `Option`/`Result` come from the standard library. The specifier is bare:
+// rlc materializes the module next to this file's output and rewrites the
+// import to point at it (see docs/reference/cli.md).
+import { Option } from "./rl.js";
+
 export type Shape =
   | { kind: "Circle"; radius: number }
   | { kind: "Rect"; width: number; height: number }
@@ -11,14 +16,6 @@ export const Shape = {
   Circle: (radius: number): Shape => ({ kind: "Circle", radius }),
   Rect: (width: number, height: number): Shape => ({ kind: "Rect", width, height }),
   Point: { kind: "Point" } as const,
-};
-
-export type Option<T> =
-  | { kind: "Some"; value: T }
-  | { kind: "None" };
-export const Option = {
-  Some: <T>(value: T): Option<T> => ({ kind: "Some", value }),
-  None: { kind: "None" } as const,
 };
 
 export function area(s: Shape): number {
@@ -45,11 +42,13 @@ export function describe(s: Shape): string {
 })());
 }
 
-export function unwrapOr<T>(o: Option<T>, fallback: T): T {
+// `Option` is a built-in enum: this match is checked for exhaustiveness even
+// though the declaration lives in the standard library.
+export function label<T>(o: Option<T>, fallback: string): string {
   return ((() => {
   const $rl_m = (o);
   switch ($rl_m.kind) {
-    case "Some": { const { value } = $rl_m; return (value); }
+    case "Some": { const { value } = $rl_m; return (`${value}`); }
     case "None": { return (fallback); }
     default: { throw new Error("rl match: unexpected case " + JSON.stringify($rl_m)); }
   }
@@ -67,4 +66,4 @@ for (const s of shapes) {
   console.log(describe(s), area(s), digits, level);
 }
 
-console.log(unwrapOr(Option.Some(7), 0), unwrapOr<number>(Option.None, 42));
+console.log(label(Option.Some(7), "none"), Option.unwrapOr<number>(Option.None, 42));

@@ -20,7 +20,7 @@ rl에 **파이프 기반 함수형 체이닝**을 추가한다. 요구사항은 
 목표 사용감:
 
 ```rl
-import { Option } from "./rl.js";
+import { Option } from "@rl/std";
 
 const label = half(4)
   |> Option.mapP(x => x + 1)

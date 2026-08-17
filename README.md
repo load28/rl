@@ -110,7 +110,9 @@ import하고, 타입은 어느 쪽이든 `rlc --types`가 만듭니다:
 ```
 
 전체 동작 예시는 [`examples/shapes.rl`](./examples/shapes.rl) →
-[`examples/shapes.ts`](./examples/shapes.ts)를 참고하세요.
+[`examples/shapes.ts`](./examples/shapes.ts)를 참고하세요. 이 예제는 표준
+라이브러리를 `@rl/std`로 가져오므로, 컴파일하면 그 모듈(`rl.ts`)도 함께
+실체화되고 방출물의 지정자가 `./rl.js`로 바뀝니다.
 
 ### Rust 라이브러리로 사용
 
