@@ -55,6 +55,17 @@
           "default": true,
           "markdownDescription": "Run rlc's field-type validation and output self-check. When disabled, `--no-verify` is passed to `rlc --check`."
         },
+        "rl.sidecar": {
+          "scope": "resource",
+          "type": "string",
+          "enum": [
+            "refresh",
+            "always",
+            "off"
+          ],
+          "default": "refresh",
+          "markdownDescription": "Rebuild a file's editor sidecar (`x.rl.d.ts` and its declaration map) when it is saved, so `.ts` files importing it keep type-checking and \"go to definition\" lands in the `.rl` source. `refresh` only rewrites sidecars that already exist (a project opts in by running `rlc --sidecar` once); `always` creates them on first save; `off` disables it."
+        },
         "rl.trace.server": {
           "scope": "window",
           "type": "string",

@@ -49,7 +49,27 @@ TS 파서의 오류 복구 덕분에 rl 구문이 섞여 있어도 통과 영역
 |------|--------|------|
 | `rl.compilerPath` | `""` | 진단에 사용할 rlc 경로 |
 | `rl.verify` | `true` | `false`면 `rlc --check`에 `--no-verify` 전달 |
+| `rl.sidecar` | `refresh` | 저장 시 에디터 사이드카 갱신 — `refresh`(이미 있는 것만) / `always`(없으면 생성) / `off` |
 | `rl.trace.server` | `off` | LSP 통신 트레이스 |
+
+## `.ts`에서 `.rl` 가져다 쓰기
+
+`.ts` 파일은 tsserver가 담당하는데 tsserver는 `.rl` 확장자를 모르므로,
+`import { Notice } from "./notice.rl"`은 그대로 두면 `TS2307`이 됩니다.
+`.rl` 옆에 **사이드카**(`notice.rl.d.ts` + `notice.rl.d.ts.map`)를 두면
+해결됩니다 — 에러가 사라지고, 정의 이동이 `.d.ts`가 아니라 **원본 `.rl`의
+해당 줄**로 갑니다.
+
+사이드카는 `rlc --sidecar`가 만들고, 이 확장이 **저장할 때마다 갱신**합니다.
+기본값 `refresh`는 이미 있는 사이드카만 다시 씁니다 — 프로젝트가
+`rlc --sidecar`를 한 번 돌려 명시적으로 참여한 경우에만 파일이 생깁니다.
+처음부터 자동으로 만들려면 `rl.sidecar`를 `always`로 두세요.
+
+컴파일에 실패한 저장은 사이드카를 건드리지 않습니다. 편집 도중 선언이
+사라지는 대신 마지막으로 성공한 상태가 유지됩니다.
+
+사이드카를 읽으려면 그 `.ts` 파일을 포함하는 `tsconfig.json`이 있어야
+합니다 — 추론 프로젝트로 열리면 tsserver가 선언 맵을 따라가지 않습니다.
 
 ## 개발
 

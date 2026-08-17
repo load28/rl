@@ -31,6 +31,7 @@ import { URI } from "vscode-uri";
 
 import * as analysis from "./analysis";
 import * as rlc from "./rlc";
+import * as sidecar from "./sidecar";
 import * as tsproject from "./tsproject";
 
 const connection = createConnection(ProposedFeatures.all);
@@ -51,7 +52,13 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
 
   return {
     capabilities: {
-      textDocumentSync: TextDocumentSyncKind.Incremental,
+      textDocumentSync: {
+        openClose: true,
+        change: TextDocumentSyncKind.Incremental,
+        // Saving is when the sidecars are rebuilt; the text is already on
+        // disk by then, so the notification does not need to carry it.
+        save: { includeText: false },
+      },
       completionProvider: { triggerCharacters: [".", "(", "|"] },
       hoverProvider: true,
       definitionProvider: true,
@@ -72,9 +79,14 @@ connection.onInitialized(() => {
 interface RlSettings {
   compilerPath: string;
   verify: boolean;
+  sidecar: sidecar.SidecarMode;
 }
 
-const DEFAULT_SETTINGS: RlSettings = { compilerPath: "", verify: true };
+const DEFAULT_SETTINGS: RlSettings = {
+  compilerPath: "",
+  verify: true,
+  sidecar: "refresh",
+};
 
 async function getSettings(uri: string): Promise<RlSettings> {
   if (!hasConfigurationCapability) return DEFAULT_SETTINGS;
@@ -85,6 +97,7 @@ async function getSettings(uri: string): Promise<RlSettings> {
   return {
     compilerPath: conf?.compilerPath ?? DEFAULT_SETTINGS.compilerPath,
     verify: conf?.verify ?? DEFAULT_SETTINGS.verify,
+    sidecar: conf?.sidecar ?? DEFAULT_SETTINGS.sidecar,
   };
 }
 
@@ -395,6 +408,32 @@ function toDiagnostic(doc: TextDocument, d: rlc.RlcDiagnostic): Diagnostic {
 }
 
 documents.onDidOpen((e) => scheduleValidation(e.document));
+documents.onDidSave((e) => {
+  void rebuildSidecar(e.document);
+});
+
+/**
+ * Keeps a saved `.rl` file's editor sidecar (`x.rl.d.ts` + map) current, so
+ * `.ts` files importing it type-check and jump into the original on "go to
+ * definition" without a build step.
+ */
+async function rebuildSidecar(doc: TextDocument): Promise<void> {
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return;
+
+  const settings = await getSettings(doc.uri);
+  if (settings.sidecar === "off") return;
+
+  const compiler = rlc.findCompiler(settings.compilerPath, workspaceRoots);
+  const result = await sidecar.refreshSidecar(
+    compiler,
+    uri.fsPath,
+    settings.sidecar,
+  );
+  if (result.kind === "failed") {
+    connection.console.warn(`rl: sidecar refresh failed — ${result.detail}`);
+  }
+}
 documents.onDidChangeContent((e) => {
   // Editing one file can change what its siblings import — drop their
   // cached imported declarations (the edited doc's own entry refreshes by
