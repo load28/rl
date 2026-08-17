@@ -130,3 +130,70 @@ test("rename returns every location of a local symbol", () => {
     );
   }
 });
+
+test("typeAt reports the scrutinee's enum type across an .rl import", () => {
+  // Raw .rl serving (the pre-virtual fallback path): error recovery still
+  // lets TS infer the annotated/returned type name and its declaring file.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-tsproject-"));
+  const shape = path.join(dir, "shape.rl");
+  const file = path.join(dir, "use.rl");
+  fs.writeFileSync(
+    shape,
+    "export enum Shape { Circle(radius: number), Point }\n",
+  );
+  const src = [
+    'import { Shape } from "./shape.rl";',
+    "declare function getShape(): Shape;",
+    "const shape = getShape();",
+    "const r = match (shape) {",
+    "",
+    "};",
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, src);
+  const ts = new TsProject(() => null, () => [file], dir);
+
+  const at = src.indexOf("shape) {");
+  const info = ts.typeAt(file, at, { start: at, end: at + "shape".length });
+  assert.ok(info, "expected a type");
+  assert.equal(info!.name, "Shape");
+  assert.equal(info!.declFile, shape);
+});
+
+test("typeAt with a span reports the whole expression's type", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-tsproject-"));
+  const file = path.join(dir, "chain.rl");
+  const src = [
+    "type Wrapped = { kind: \"A\" } | { kind: \"B\" };",
+    "declare function get(): Wrapped;",
+    "const c = [get()].map((s) => s)[0];",
+    "console.log(c);",
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, src);
+  const ts = new TsProject(() => null, () => [file], dir);
+
+  const start = src.indexOf("c);");
+  const info = ts.typeAt(file, start, { start, end: start + 1 });
+  assert.ok(info, "expected a type");
+  assert.equal(info!.name, "Wrapped");
+});
+
+test("typeAt strips generic arguments from the type name", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-tsproject-"));
+  const file = path.join(dir, "opt.rl");
+  const src = [
+    "type Option<T> = { kind: \"Some\"; value: T } | { kind: \"None\" };",
+    "declare function find(): Option<string>;",
+    "const found = find();",
+    "console.log(found);",
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, src);
+  const ts = new TsProject(() => null, () => [file], dir);
+
+  const at = src.indexOf("found);");
+  const info = ts.typeAt(file, at, { start: at, end: at + "found".length });
+  assert.ok(info, "expected a type");
+  assert.equal(info!.name, "Option");
+});

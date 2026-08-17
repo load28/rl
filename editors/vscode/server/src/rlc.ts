@@ -186,6 +186,68 @@ export function runSymbols(
   });
 }
 
+/* ----------------------------------------------------------------------
+ * Emit map (`rlc --emit-map`, docs/reference/cli.md): the compiler emits
+ * the buffer's TypeScript (parse + emit only — no rl-level checks, `.rl`
+ * specifiers untouched) plus byte mappings for every chunk copied verbatim
+ * from the source. The server serves this as the buffer's virtual document
+ * to the TypeScript language service (TASK-048).
+ * -------------------------------------------------------------------- */
+
+export interface EmitMapResult {
+  code: string;
+  mappings: { src: number; out: number; len: number }[];
+}
+
+/**
+ * Run `rlc --emit-map` on the buffer contents. Returns null when the
+ * compiler is missing, predates `--emit-map`, or the output is
+ * unparseable — callers degrade to serving the raw text.
+ */
+export function runEmitMap(
+  compiler: string,
+  text: string,
+  docName: string,
+): Promise<EmitMapResult | null> {
+  const rawBase = path.basename(docName).replace(/[^\w.-]/g, "_") || "buffer";
+  const base = rawBase.endsWith(".rl") ? rawBase : `${rawBase}.rl`;
+  const hash = crypto.createHash("sha1").update(docName).digest("hex");
+  const file = path.join(tempDir(), `em-${hash.slice(0, 8)}-${base}`);
+
+  try {
+    fs.writeFileSync(file, text);
+  } catch {
+    return Promise.resolve(null);
+  }
+
+  return new Promise((resolve) => {
+    execFile(
+      compiler,
+      ["--emit-map", file],
+      { timeout: 15000, maxBuffer: 64 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) {
+          resolve(null);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(String(stdout)) as (EmitMapResult & {
+            file: string;
+          })[];
+          const entry = parsed[0];
+          resolve(
+            entry && typeof entry.code === "string"
+              ? { code: entry.code, mappings: entry.mappings ?? [] }
+              : null,
+          );
+        } catch {
+          resolve(null);
+        }
+      },
+    );
+  });
+}
+
 /** Parse `rlc: <file>:<line>:<col>: <msg>` / `rlc: <file>: <msg>` lines. */
 export function parseStderr(stderr: string, file: string): RlcDiagnostic[] {
   const diagnostics: RlcDiagnostic[] = [];

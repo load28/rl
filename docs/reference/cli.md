@@ -33,6 +33,7 @@ rlc [options] <file | dir> ...
 | `--rewrite-imports <js\|ts\|off>` | `.rl` 지정자의 방출 형태 ([`language.md` §8.2](./language.md#82-방출-형태---rewrite-imports)). 그 외 값은 에러 |
 | `--sidecar <dir>` | 선언을 받아 사이드카만 씁니다 ([아래](#에디터-사이드카---sidecar-저수준)) |
 | `--symbols` | rl enum 선언과 `.rl` import를 JSON으로 ([아래](#심볼-출력---symbols)) |
+| `--emit-map` | 방출 TypeScript와 원본↔출력 바이트 매핑을 JSON으로 ([아래](#방출-매핑---emit-map)) |
 
 옵션과 입력은 순서 무관하게 섞을 수 있습니다. `-`로 시작하는 알 수 없는 인자는
 에러이고, `--`(옵션 종료)와 짧은 옵션 병합(`-po`)은 지원하지 않습니다.
@@ -42,7 +43,7 @@ rlc [options] <file | dir> ...
 | 입력 | 동작 |
 |------|------|
 | 파일 | 확장자와 무관하게 대상에 추가 |
-| 디렉터리 | 재귀 순회 — `.rl`과, 컴파일 계열 모드(빌드/`--check`/`--types`)에서는 `.ts`/`.mts`/`.cts`까지. 도구 모드(`--symbols`/`--sidecar`)는 `.rl`만 |
+| 디렉터리 | 재귀 순회 — `.rl`과, 컴파일 계열 모드(빌드/`--check`/`--types`)에서는 `.ts`/`.mts`/`.cts`까지. 도구 모드(`--symbols`/`--emit-map`/`--sidecar`)는 `.rl`만 |
 | `.`으로 시작하는 디렉터리, `node_modules` | 순회하지 않음 |
 | 없는 경로 | 즉시 에러 |
 | 결과가 빈 경우 | `rlc: no sources found` |
@@ -174,6 +175,36 @@ rlc: 2 file(s) failed — watching
 import 수집은 소진성 검사와 같은 1-홉입니다. 컴파일 모드와 조합되지 않고
 (`-o`/`-p`/`--check` 무시), 입력을 읽지 못하면 종료 코드 1입니다.
 
+## 방출 매핑 (`--emit-map`)
+
+에디터가 방출 결과를 **가상 TypeScript 문서**로 TS 언어 서비스에 서빙할 수
+있도록, 입력 파일마다 방출 코드와 원본↔출력 바이트 매핑을 JSON 배열로 냅니다.
+
+```jsonc
+[{
+  "file": "demo.rl",
+  "code": "…방출된 TypeScript 전체…",
+  "mappings": [
+    { "src": 0, "out": 0, "len": 108 },   // 원본 src부터 len바이트가
+    { "src": 115, "out": 135, "len": 5 }  // 출력 out에 그대로 복사됨
+  ]
+}]
+```
+
+- **파싱 + 방출만** 수행합니다 — rl 수준 검사(소진성 등)와 생성물 검증을
+  생략하므로 편집 중인(오류가 있는) 버퍼도 항상 방출됩니다. 진단은 여전히
+  `--check`의 몫입니다.
+- 상대 `.rl` 지정자와 `"@rl/std"`는 **그대로** 둡니다(`--rewrite-imports off`
+  의미) — 소비자(에디터의 모듈 해석기)가 직접 해석합니다.
+- 매핑은 원본에서 바이트 그대로 복사된 조각만 담습니다: 통과 구간, match
+  스크루티니·암 본문·가드, `try`/let-else/`if let` 식, 파이프라인 스텝, 템플릿
+  조각. 컴파일러가 쓴 글루(IIFE 골격, 구조 분해, enum 방출)는 매핑이 없습니다.
+- 오프셋은 **바이트** 기준이고, 매핑된 조각은 원본과 출력에서 내용이
+  동일합니다(도구가 재파싱 없이 양방향 변환하는 근거). 조각은 어느 좌표계에서도
+  겹치지 않습니다.
+
+컴파일 모드와 조합되지 않으며, 입력을 읽지 못하면 종료 코드 1입니다.
+
 ## 에디터 사이드카 (`--sidecar`, 저수준)
 
 `--types`의 마지막 단계만 따로 실행합니다. 선언 방출을 자체적으로 수행하는
@@ -196,7 +227,7 @@ rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
 - 쓴 파일마다 stderr에 진행 로그(`rlc: src/a.rl → src/a.ts`). `-p`/`--check`는
   로그 없음.
 - 에러는 stderr에 `rlc: 파일:행:열: 메시지` ([`errors.md`](./errors.md)).
-- stdout은 `-p`·`--emit-std`·`--symbols`·`-h`·`-v` 전용이라 파이프로 안전합니다.
+- stdout은 `-p`·`--emit-std`·`--symbols`·`--emit-map`·`-h`·`-v` 전용이라 파이프로 안전합니다.
 - 기본적으로 출력 첫 줄에 `// @generated from <파일> by rlc — do not edit
   directly.`가 붙습니다 (`--no-banner`로 생략).
 

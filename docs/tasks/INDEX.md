@@ -55,7 +55,8 @@
 | TASK-045 | 중첩 패턴 — `Ok(value: Some(v))` | 완료 | 2026-08-17 | 2026-08-17 | [TASK-045](./TASK-045-nested-patterns.md) |
 | TASK-046 | `if let` 문 — 조건부 값 추출 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-046](./TASK-046-if-let.md) |
 | TASK-047 | 에디터 `.rl` 파일 아이콘 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-047](./TASK-047-file-icon.md) |
+| TASK-048 | 방출 매핑 기반 TS 위임 — 컴파일 출력을 가상 문서로 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-048](./TASK-048-emit-map-virtual-ts.md) |
 
 ## 다음 태스크 번호
 
-**TASK-048**
+**TASK-049**
