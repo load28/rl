@@ -275,3 +275,30 @@ fn export_declarations_are_not_reexports() {
     // module specifier, even if a `from` + string appears later.
     assert_passthrough("export const from = 1;\nexport function f() { return \"./x.rl\"; }\n");
 }
+
+#[test]
+fn bitwise_or_and_unions_are_not_pipelines() {
+    assert_passthrough("const a = x | y;\nconst b = x || y;\nconst c = x | y > z;\n");
+    assert_passthrough("type U = A | B;\nlet v: string | number = 1;\n");
+    assert_passthrough("function f<T extends A | B>(x: T): T | null { return x; }\n");
+}
+
+#[test]
+fn pipe_bytes_in_strings_comments_regexes_and_templates_pass_through() {
+    assert_passthrough(
+        "const s = \"a |> b\";\n// c |> d\n/* e |> f */\nconst r = /\\|>/;\nconst t = `g |> h`;\n",
+    );
+}
+
+#[test]
+fn match_shaped_calls_with_two_arguments_pass_through() {
+    // A real function named `match` called with a comma list — no braces
+    // follow, so it can never be claimed.
+    assert_passthrough("const x = match(a, b);\nobj.match(a, (b, c));\n");
+}
+
+#[test]
+fn if_statements_and_if_shaped_members_pass_through() {
+    assert_passthrough("if (c) { a(); } else if (d) { b(); } else { e(); }\n");
+    assert_passthrough("const o = { if: 1 };\ninterface I { if: number }\nobj.if(x);\n");
+}

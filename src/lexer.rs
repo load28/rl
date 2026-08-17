@@ -13,10 +13,13 @@
 //! hierarchically: a [`TokenKind::Template`] token carries its raw chunks
 //! and the pre-lexed token stream of every `${ }` interpolation.
 //!
-//! The only multi-byte operators fused into single tokens are the four the
+//! The only multi-byte operators fused into single tokens are the five the
 //! parser must treat as units: `=>` (never an `=` or a `< >` bracket),
-//! `||` (never an or-pattern separator), and `?.`/`??` (never ternary
-//! openers). Everything else significant is a one-byte [`TokenKind::Punct`].
+//! `||` (never an or-pattern separator), `?.`/`??` (never ternary
+//! openers), and `|>` (the pipeline operator — never a union `|` followed
+//! by a comparison, because that byte sequence cannot occur in valid
+//! TypeScript). Everything else significant is a one-byte
+//! [`TokenKind::Punct`].
 
 use crate::ast::Span;
 use crate::scanner::*;
@@ -49,6 +52,8 @@ pub(crate) enum TokenKind {
     OptChain,
     /// `??`
     Coalesce,
+    /// `|>`
+    PipeOp,
     /// Any other significant byte.
     Punct(u8),
 }
@@ -177,6 +182,7 @@ pub(crate) fn lex(src_str: &str, start: usize, end: usize) -> Vec<Token> {
         let (kind, len) = match (c, at(src, i + 1, end)) {
             (b'=', Some(b'>')) => (TokenKind::Arrow, 2),
             (b'|', Some(b'|')) => (TokenKind::OrOr, 2),
+            (b'|', Some(b'>')) => (TokenKind::PipeOp, 2),
             (b'?', Some(b'.')) => (TokenKind::OptChain, 2),
             (b'?', Some(b'?')) => (TokenKind::Coalesce, 2),
             _ => (TokenKind::Punct(c), 1),

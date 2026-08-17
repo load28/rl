@@ -21,6 +21,16 @@ use std::cell::Cell;
 use crate::ImportRewrite;
 use crate::ast::*;
 
+/// A trailing line comment would swallow whatever codegen appends on the
+/// same line — rescue it with a newline (same rule as match arm bodies).
+fn guard_line_comment(text: &str) -> String {
+    if text.rsplit('\n').next().unwrap_or("").contains("//") {
+        format!("{text}\n")
+    } else {
+        text.to_string()
+    }
+}
+
 /// Emits a whole program back to TypeScript text.
 pub(crate) fn emit(
     program: &Program,
@@ -33,8 +43,19 @@ pub(crate) fn emit(
         rewrite_imports,
         std_import,
         try_seq: Cell::new(0),
+        used_pipe: Cell::new(false),
     };
-    emitter.emit_program(program)
+    let mut code = emitter.emit_program(program);
+    // The pipeline apply helper, once per file. A function declaration
+    // hoists, so appending at the end keeps every original line in place
+    // while top-level pipelines still evaluate correctly at module init.
+    if emitter.used_pipe.get() {
+        if !code.ends_with('\n') {
+            code.push('\n');
+        }
+        code.push_str("function $rl_ap<A, B>(v: A, f: (v: A) => B): B { return f(v); }\n");
+    }
+    code
 }
 
 pub(super) struct Emitter<'a> {
@@ -47,6 +68,9 @@ pub(super) struct Emitter<'a> {
     /// match IIFE's `$rl_m`, these statements emit into the enclosing
     /// scope, so every temporary needs a unique name (`$rl_t0`, `$rl_t1`, ...).
     try_seq: Cell<usize>,
+    /// Set when a pipeline was emitted — the file then gets the `$rl_ap`
+    /// apply helper appended once.
+    used_pipe: Cell<bool>,
 }
 
 impl Emitter<'_> {
@@ -61,10 +85,17 @@ impl Emitter<'_> {
                 Segment::Match(expr) => {
                     out.extend_from_slice(matches::emit_match(self, expr).as_bytes());
                 }
+                Segment::TupleMatch(expr) => {
+                    out.extend_from_slice(matches::emit_tuple_match(self, expr).as_bytes());
+                }
                 Segment::Try(stmt) => out.extend_from_slice(self.emit_try(stmt).as_bytes()),
                 Segment::LetElse(stmt) => {
                     out.extend_from_slice(self.emit_let_else(stmt).as_bytes());
                 }
+                Segment::IfLet(stmt) => {
+                    out.extend_from_slice(self.emit_if_let(stmt).as_bytes());
+                }
+                Segment::Pipe(pipe) => out.extend_from_slice(self.emit_pipe(pipe).as_bytes()),
                 Segment::RlImport(decl) => self.emit_rl_import(decl.spec, decl.kind, &mut out),
                 Segment::Template(template) => self.emit_template(template, &mut out),
             }
@@ -126,6 +157,61 @@ impl Emitter<'_> {
             code.push_str(&format!(" {} {{ {} }} = {tmp};", stmt.kw, parts));
         }
         code
+    }
+
+    /// Emits an `if let` statement as a self-contained block: evaluate
+    /// once into a fresh temporary, test the pattern's path conditions,
+    /// and destructure the bindings inside the then-branch — tsc narrows
+    /// the temporary through the condition, so no type tricks. The whole
+    /// thing is a block statement (no IIFE, no `return` of its own), which
+    /// is why it is valid in any statement position.
+    fn emit_if_let(&self, stmt: &IfLetStmt) -> String {
+        let n = self.try_seq.get();
+        self.try_seq.set(n + 1);
+        let tmp = format!("$rl_t{n}");
+        let expr = self.emit_program(&stmt.expr);
+        let expr = expr.trim();
+        let (cond, binds) = matches::pattern_conds_binds(&stmt.pattern, &tmp);
+        let body = self.emit_program(&stmt.body);
+        let body = guard_line_comment(body.trim());
+        let mut code = format!("{{ const {tmp} = ({expr}); if ({cond}) {{ {binds}{body} }}");
+        match &stmt.else_part {
+            Some(IfLetElse::Block(block)) => {
+                let block = self.emit_program(block);
+                let block = guard_line_comment(block.trim());
+                code.push_str(&format!(" else {{ {block} }}"));
+            }
+            Some(IfLetElse::IfLet(inner)) => {
+                // the chained statement is itself a block — `else { ... }`
+                code.push_str(&format!(" else {}", self.emit_if_let(inner)));
+            }
+            None => {}
+        }
+        code.push_str(" }");
+        code
+    }
+
+    /// Emits a pipeline as nested `$rl_ap` calls (apply steps) and postfix
+    /// chains (method steps). Argument evaluation order makes the chain run
+    /// left to right, and the absence of an IIFE means `await` inside the
+    /// head or a step works in the surrounding async context untouched.
+    /// Putting each step in argument position is what gives it a contextual
+    /// type, so curried combinator steps infer fully (the fp-ts `pipe`
+    /// mechanism — see docs/design/pipeline-operator.md §4.1).
+    fn emit_pipe(&self, pipe: &PipeExpr) -> String {
+        self.used_pipe.set(true);
+        let head = self.emit_program(&pipe.head);
+        let mut acc = format!("({})", guard_line_comment(head.trim()));
+        for step in &pipe.steps {
+            let body = self.emit_program(&step.body);
+            let body = guard_line_comment(body.trim());
+            if step.postfix {
+                acc = format!("({}){}", acc, body);
+            } else {
+                acc = format!("$rl_ap({}, ({}))", acc, body);
+            }
+        }
+        acc
     }
 
     /// Emits a lifted `.rl` module specifier (quotes included), swapping

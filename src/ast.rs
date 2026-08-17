@@ -24,6 +24,15 @@ pub(crate) struct Span {
 #[derive(Debug)]
 pub(crate) struct Program {
     pub segments: Vec<Segment>,
+    /// Byte offsets of `|>` tokens that could not be claimed as a pipeline.
+    /// `|>` cannot occur in valid TypeScript, so leaving one in the output
+    /// would fail the self-check without a position — the semantic phase
+    /// reports these as rl errors instead (the parser stays infallible).
+    pub stray_pipes: Vec<usize>,
+    /// Byte offsets of `if let` sequences that could not be claimed as an
+    /// `if let` statement — same reporting story as [`Self::stray_pipes`]
+    /// (an undotted `if` followed by `let` is never valid TypeScript).
+    pub stray_if_lets: Vec<usize>,
 }
 
 /// One top-level piece of a [`Program`], in source order.
@@ -35,10 +44,14 @@ pub(crate) enum Segment {
     Enum(EnumDecl),
     /// An rl `match` expression.
     Match(MatchExpr),
+    /// An rl tuple match expression (`match (a, b) { (P, Q) => ... }`).
+    TupleMatch(TupleMatchExpr),
     /// An rl `try` statement (Rust-style error propagation).
     Try(TryStmt),
     /// An rl let-else statement (Rust-style refutable binding).
     LetElse(LetElseStmt),
+    /// An rl `if let` statement (conditional refutable binding).
+    IfLet(IfLetStmt),
     /// A static import declaration or `export ... from` re-export whose
     /// specifier is a relative path ending in `.rl`. Only the specifier
     /// string is lifted out of the byte stream — the rest of the statement
@@ -48,6 +61,39 @@ pub(crate) enum Segment {
     RlImport(RlImportDecl),
     /// A template literal; its interpolations are recursively parsed.
     Template(Template),
+    /// An rl pipeline expression (`head |> step |> ...`).
+    Pipe(PipeExpr),
+}
+
+/// A structurally parsed rl pipeline expression: `head ("|>" step)+`.
+/// `|>` cannot occur anywhere in valid TypeScript (after a `|` an
+/// expression or type must follow, and `>` starts neither), so claiming it
+/// never affects the passthrough contract. Compiles to nested calls of a
+/// per-file two-argument apply helper (`$rl_ap`) — argument position gives
+/// each step contextual typing, which is what keeps curried combinator
+/// steps fully inferred by tsc; method steps chain as plain postfix text.
+#[derive(Debug)]
+pub(crate) struct PipeExpr {
+    /// Raw span of the head expression, for error reporting.
+    pub head_span: Span,
+    /// The head expression, recursively parsed.
+    pub head: Program,
+    /// The pipeline's steps, in source order. Never empty.
+    pub steps: Vec<PipeStep>,
+}
+
+/// One `|> step` of a [`PipeExpr`].
+#[derive(Debug)]
+pub(crate) struct PipeStep {
+    /// Raw span of the step text (for a method step, including the leading
+    /// `.`).
+    pub span: Span,
+    /// True for a method step (`|> .m(...)`) — the step text is appended
+    /// to the piped value as a postfix chain instead of applied via the
+    /// helper.
+    pub postfix: bool,
+    /// The step text, recursively parsed.
+    pub body: Program,
 }
 
 /// See [`Segment::RlImport`].
@@ -112,6 +158,39 @@ pub(crate) struct LetElseStmt {
     /// for Rust's "the else block must diverge" rule. Computed by the
     /// parser (which stays infallible), enforced by sema.
     pub diverges: bool,
+}
+
+/// A structurally parsed rl `if let` statement:
+/// `if let Tag(bindings...) = <expr> { ... } else ...`. let-else's
+/// non-diverging sibling: evaluate once, run the body with the bindings
+/// when the pattern matches, the `else` part (a block or another `if let`)
+/// otherwise. Contract safety: in valid TypeScript `if` is always followed
+/// by `(`, never by `let`. Compiles to a self-contained block statement —
+/// no IIFE and no `return` of its own — so it is valid in any statement
+/// position; the bindings materialize as `const`s, which keeps their
+/// narrowed types inside closures.
+#[derive(Debug)]
+pub(crate) struct IfLetStmt {
+    /// Byte offset of the `if` keyword, for error reporting.
+    pub keyword_off: usize,
+    /// The pattern (parens mandatory; nested patterns allowed, or-patterns
+    /// not — same binding grammar as a match arm's single alternative).
+    pub pattern: TagPattern,
+    /// The expression after `=`, recursively parsed.
+    pub expr: Program,
+    /// The then-block body, recursively parsed (braces excluded).
+    pub body: Program,
+    /// The `else` continuation, if any.
+    pub else_part: Option<IfLetElse>,
+}
+
+/// The `else` continuation of an [`IfLetStmt`].
+#[derive(Debug)]
+pub(crate) enum IfLetElse {
+    /// `else { ... }` (braces excluded).
+    Block(Program),
+    /// `else if let ...` — chained.
+    IfLet(Box<IfLetStmt>),
 }
 
 /// A structurally parsed rl `try` statement: `try <expr>;` or
@@ -179,6 +258,50 @@ pub(crate) struct MatchExpr {
     pub arms: Vec<Arm>,
 }
 
+/// A structurally parsed rl tuple match: two or more comma-separated
+/// scrutinees matched jointly against tuple patterns. Disambiguation from a
+/// comma-expression scrutinee is arm-driven: the arms decide — every arm
+/// must be a parenthesized tuple pattern (or a final bare `_`), otherwise
+/// the whole thing parses as a single match over a comma expression, so
+/// existing programs keep their meaning. Exhaustiveness is checked over the
+/// cartesian product of the per-position enums.
+#[derive(Debug)]
+pub(crate) struct TupleMatchExpr {
+    /// Byte offset of the `match` keyword, for error reporting.
+    pub keyword_off: usize,
+    /// The scrutinees, in source order (always two or more): raw span for
+    /// `await` detection plus the recursively parsed expression.
+    pub scrutinees: Vec<(Span, Program)>,
+    pub arms: Vec<TupleArm>,
+}
+
+/// One arm of a [`TupleMatchExpr`].
+#[derive(Debug)]
+pub(crate) struct TupleArm {
+    /// Byte offset of the pattern, for error reporting.
+    pub pattern_off: usize,
+    pub pattern: TuplePattern,
+    /// `Some` for a guarded arm; never attached to a bare `_` arm.
+    pub guard: Option<GuardExpr>,
+    /// Raw span of the body (used for `await` detection).
+    pub body_span: Span,
+    /// The body, recursively parsed (braces excluded for block bodies).
+    pub body: Program,
+    /// True for a `{ ... }` block body.
+    pub block: bool,
+}
+
+/// A tuple arm's pattern.
+#[derive(Debug)]
+pub(crate) enum TuplePattern {
+    /// The final bare `_` arm — covers every combination.
+    Wildcard,
+    /// `(elem, elem, ...)` — one [`Pattern`] per scrutinee position (the
+    /// arity match is a semantic check). Each element is a tag pattern
+    /// (or-patterns and bindings included) or `_`.
+    Elems(Vec<Pattern>),
+}
+
 /// One `pattern (if guard)? => body` arm of a match.
 #[derive(Debug)]
 pub(crate) struct Arm {
@@ -229,11 +352,20 @@ pub(crate) struct TagPattern {
     pub bindings: Option<Vec<Binding>>,
 }
 
-/// One binding inside a pattern's parens: `name` or `name: alias`.
+/// One binding inside a pattern's parens: `name`, `name: alias`, or —
+/// in match patterns only — a nested tag pattern `name: Tag(...)`. The
+/// nested form always carries parens (`name: None()` for a unit case), so
+/// a plain `name: alias` never changes meaning. `alias` and `nested` are
+/// mutually exclusive.
 #[derive(Debug)]
 pub(crate) struct Binding {
     pub name: String,
     pub alias: Option<String>,
+    /// `name: Tag(...)` — match the field's value against a nested tag
+    /// pattern instead of binding the field. Mismatch falls through to the
+    /// next arm, like a failing guard. (Recursion bottoms out through the
+    /// `Vec` inside [`TagPattern`].)
+    pub nested: Option<TagPattern>,
 }
 
 /// A template literal split into raw text and recursively parsed

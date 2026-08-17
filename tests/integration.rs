@@ -789,11 +789,22 @@ fn run_rlc(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
 /// legitimately do.
 fn global_typescript_resolvable() -> bool {
     let dir = tmpdir();
-    Command::new("node")
+    let via_require = Command::new("node")
         .current_dir(&dir)
         .args(["-e", "require(\"typescript\")"])
         .output()
         .map(|out| out.status.success())
+        .unwrap_or(false);
+    if via_require {
+        return true;
+    }
+    // types_host.mjs also resolves the package that owns a `tsc` on PATH, so
+    // a setup where only the binary is reachable succeeds too and must skip.
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .any(|dir| dir.join("tsc").exists() || dir.join("tsc.cmd").exists())
+        })
         .unwrap_or(false)
 }
 
@@ -1186,4 +1197,250 @@ fn cli_types_sidecars_typecheck_the_source_tree() {
         "consumer typecheck failed:\n{}\n---sidecar---\n{sidecar}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+/* ------------------------------------------------------------------ */
+/* pipeline                                                            */
+/* ------------------------------------------------------------------ */
+
+// Inline the curried std combinators so the snippets need no module
+// resolution (the std source itself is covered by tests/stdlib.rs).
+const PIPE_PRELUDE: &str = r#"
+type Option<T> = { kind: "Some"; value: T } | { kind: "None" };
+const Option = {
+  Some: <T>(value: T): Option<T> => ({ kind: "Some", value }),
+  None: { kind: "None" } as const,
+  mapP:
+    <T, U>(f: (value: T) => U) =>
+    (o: Option<T>): Option<U> =>
+      o.kind === "Some" ? { kind: "Some", value: f(o.value) } : { kind: "None" },
+  unwrapOrP:
+    <T>(fallback: T) =>
+    (o: Option<T>): T =>
+      o.kind === "Some" ? o.value : fallback,
+};
+const half = (n: number): Option<number> =>
+  n % 2 === 0 ? Option.Some(n / 2) : Option.None;
+"#;
+
+#[test]
+fn pipeline_curried_combinator_steps_infer_without_annotations() {
+    require_toolchain!();
+    // The whole point of the $rl_ap emission: `x` in the curried step must
+    // infer as number (a direct-application emission collapses it to
+    // `unknown` — TS18046).
+    let (ok, out) = typecheck(&format!(
+        "{PIPE_PRELUDE}\nconst label: string = half(4) |> Option.mapP(x => x + 1) |> Option.unwrapOrP(0) |> .toFixed(1);\n"
+    ));
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn pipeline_generic_user_functions_instantiate() {
+    require_toolchain!();
+    // Composing generic functions is where pipe() libraries lose inference;
+    // step-by-step application must keep it.
+    let (ok, out) = typecheck(
+        "const wrap = <T,>(v: T): T[] => [v];\nconst arr: number[][] = 3 |> wrap |> wrap;\n",
+    );
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn pipeline_type_error_in_a_step_is_reported_on_user_text() {
+    require_toolchain!();
+    // A step that is not a unary function is the user's type error — tsc
+    // must reject it (rlc emits it untouched).
+    let (ok, out) = typecheck("const n: number = 1 |> ((a: string) => a.length);\n");
+    assert!(!ok, "{out}");
+}
+
+#[test]
+fn pipeline_runs_left_to_right() {
+    require_toolchain!();
+    let lines = run(r#"
+const order: string[] = [];
+const tap = <T,>(name: string) => (v: T): T => { order.push(name); return v; };
+const out = (order.push("head"), 10) |> tap("s1") |> .toFixed(0) |> tap("s2");
+console.log(order.join(","), out);
+"#);
+    assert_eq!(lines, ["head,s1,s2 10"]);
+}
+
+#[test]
+fn pipeline_await_in_head_runs_in_the_surrounding_async_context() {
+    require_toolchain!();
+    let lines = run(r#"
+const upper = (s: string) => s.toUpperCase();
+async function main() {
+  const v = await Promise.resolve("ok") |> upper |> .concat("!");
+  console.log(v);
+}
+await main();
+"#);
+    assert_eq!(lines, ["OK!"]);
+}
+
+/* ------------------------------------------------------------------ */
+/* tuple match                                                         */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn runtime_tuple_match_dispatches_on_the_combination() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Conn { Online(latency: number), Offline }
+enum Mode { Auto(), Manual(level: number) }
+
+function decide(c: Conn, m: Mode): number {
+  return match (c, m) {
+    (Online(latency), Auto) if latency < 50 => 10,
+    (Online, Auto) => 5,
+    (Online, Manual(level)) => level,
+    (Offline, _) => 0,
+  };
+}
+
+console.log(decide(Conn.Online(10), Mode.Auto()));
+console.log(decide(Conn.Online(80), Mode.Auto()));
+console.log(decide(Conn.Online(10), Mode.Manual(7)));
+console.log(decide(Conn.Offline, Mode.Auto()));
+"#);
+    assert_eq!(lines, vec!["10", "5", "7", "0"]);
+}
+
+#[test]
+fn tuple_match_bindings_typecheck_per_position() {
+    require_toolchain!();
+    let (ok, out) = typecheck(
+        r#"
+enum Left { A(n: number), B }
+enum Right { C(s: string), D }
+function f(l: Left, r: Right): string {
+  return match (l, r) {
+    (A(n), C(s)) => s.repeat(n),
+    (A(n), D) => n.toFixed(0),
+    (B, C(s)) => s,
+    (B, D) => "",
+  };
+}
+"#,
+    );
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn tuple_match_scrutinees_evaluate_once_each_left_to_right() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Coin { Heads(), Tails }
+const order: string[] = [];
+function heads(name: string): Coin { order.push(name); return Coin.Heads(); }
+const r = match (heads("a"), heads("b")) {
+  (Heads, Heads) => 1,
+  _ => 0,
+};
+console.log(order.join(","), r);
+"#);
+    assert_eq!(lines, vec!["a,b 1"]);
+}
+
+/* ------------------------------------------------------------------ */
+/* nested patterns                                                     */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn runtime_nested_pattern_falls_through_on_inner_mismatch() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Opt { Some(value: number), None }
+enum Res { Ok(value: Opt), Err(error: string) }
+
+function grade(r: Res): string {
+  return match (r) {
+    Ok(value: Some(value: v)) if v > 9000 => "over",
+    Ok(value: Some(value: v)) => "num:" + v,
+    Ok(value: None()) => "empty",
+    Err(error) => "err:" + error,
+    // v1 exhaustiveness: nested arms cover nothing, so `Ok` counts as
+    // uncovered without a final wildcard (documented, like guards).
+    _ => "unreachable",
+  };
+}
+
+console.log(grade(Res.Ok(Opt.Some(9001))));
+console.log(grade(Res.Ok(Opt.Some(3))));
+console.log(grade(Res.Ok(Opt.None)));
+console.log(grade(Res.Err("boom")));
+"#);
+    assert_eq!(lines, vec!["over", "num:3", "empty", "err:boom"]);
+}
+
+#[test]
+fn nested_pattern_bindings_typecheck_through_the_paths() {
+    require_toolchain!();
+    // The emitted condition chain must narrow $rl_m.value for the
+    // destructuring — no type tricks, plain control-flow analysis.
+    let (ok, out) = typecheck(
+        r#"
+enum Opt { Some(value: number), None }
+enum Res { Ok(value: Opt), Err(error: string) }
+function f(r: Res): number {
+  return match (r) {
+    Ok(value: Some(value: v)) => v + 1,
+    _ => 0,
+  };
+}
+"#,
+    );
+    assert!(ok, "{out}");
+}
+
+/* ------------------------------------------------------------------ */
+/* if let                                                              */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn runtime_if_let_chains_and_falls_back() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Opt { Some(value: number), None }
+
+function pick(a: Opt, b: Opt): number {
+  let out = -1;
+  if let Some(value) = a {
+    out = value;
+  } else if let Some(value) = b {
+    out = value * 10;
+  } else {
+    out = 0;
+  }
+  return out;
+}
+
+console.log(pick(Opt.Some(1), Opt.Some(2)));
+console.log(pick(Opt.None, Opt.Some(2)));
+console.log(pick(Opt.None, Opt.None));
+"#);
+    assert_eq!(lines, vec!["1", "20", "0"]);
+}
+
+#[test]
+fn if_let_bindings_stay_narrowed_inside_closures() {
+    require_toolchain!();
+    // The binding materializes as a const, so the narrowed type survives
+    // closure boundaries — the gap that motivated the feature (TASK-042 G5).
+    let (ok, out) = typecheck(
+        r#"
+enum Opt { Some(value: string), None }
+function f(o: Opt, xs: number[]): string[] {
+  const collected: string[] = [];
+  if let Some(value) = o {
+    xs.forEach(() => collected.push(value.toUpperCase()));
+  }
+  return collected;
+}
+"#,
+    );
+    assert!(ok, "{out}");
 }

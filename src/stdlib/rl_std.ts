@@ -83,6 +83,52 @@ export const Option = {
     }
     return { kind: "Some", value: values };
   },
+
+  // Data-last curried variants (`P` suffix) for the `|>` pipeline operator:
+  // `o |> Option.mapP(f)` instead of `Option.map(o, f)`.
+
+  /** Curried `map` for pipelines. */
+  mapP:
+    <T, U>(f: (value: T) => U) =>
+    (o: Option<T>): Option<U> =>
+      o.kind === "Some" ? { kind: "Some", value: f(o.value) } : { kind: "None" },
+  /** Curried `andThen` for pipelines. */
+  andThenP:
+    <T, U>(f: (value: T) => Option<U>) =>
+    (o: Option<T>): Option<U> =>
+      o.kind === "Some" ? f(o.value) : { kind: "None" },
+  /** Curried `orElse` for pipelines. */
+  orElseP:
+    <T>(f: () => Option<T>) =>
+    (o: Option<T>): Option<T> =>
+      o.kind === "Some" ? o : f(),
+  /** Curried `filter` for pipelines. */
+  filterP:
+    <T>(pred: (value: T) => boolean) =>
+    (o: Option<T>): Option<T> =>
+      o.kind === "Some" && pred(o.value) ? o : { kind: "None" },
+  /** Curried `unwrapOr` for pipelines. */
+  unwrapOrP:
+    <T>(fallback: T) =>
+    (o: Option<T>): T =>
+      o.kind === "Some" ? o.value : fallback,
+  /** Curried `unwrapOrElse` for pipelines. */
+  unwrapOrElseP:
+    <T>(f: () => T) =>
+    (o: Option<T>): T =>
+      o.kind === "Some" ? o.value : f(),
+  /** Curried `expect` for pipelines. */
+  expectP:
+    <T>(message: string) =>
+    (o: Option<T>): T => {
+      if (o.kind === "Some") return o.value;
+      throw new Error(message);
+    },
+  /** Curried `okOr` for pipelines. */
+  okOrP:
+    <T, E>(error: E) =>
+    (o: Option<T>): Result<T, E> =>
+      o.kind === "Some" ? { kind: "Ok", value: o.value } : { kind: "Err", error },
 };
 
 /** Constructors and combinators for `Result`. */
@@ -165,4 +211,45 @@ export const Result = {
     }
     return { kind: "Ok", value: values };
   },
+
+  // Data-last curried variants (`P` suffix) for the `|>` pipeline operator:
+  // `r |> Result.mapP(f)` instead of `Result.map(r, f)`.
+
+  /** Curried `map` for pipelines. */
+  mapP:
+    <T, E, U>(f: (value: T) => U) =>
+    (r: Result<T, E>): Result<U, E> =>
+      r.kind === "Ok" ? { kind: "Ok", value: f(r.value) } : r,
+  /** Curried `mapErr` for pipelines. */
+  mapErrP:
+    <T, E, F>(f: (error: E) => F) =>
+    (r: Result<T, E>): Result<T, F> =>
+      r.kind === "Err" ? { kind: "Err", error: f(r.error) } : r,
+  /** Curried `andThen` for pipelines. */
+  andThenP:
+    <T, E, U>(f: (value: T) => Result<U, E>) =>
+    (r: Result<T, E>): Result<U, E> =>
+      r.kind === "Ok" ? f(r.value) : r,
+  /** Curried `orElse` for pipelines. */
+  orElseP:
+    <T, E, F>(f: (error: E) => Result<T, F>) =>
+    (r: Result<T, E>): Result<T, F> =>
+      r.kind === "Ok" ? r : f(r.error),
+  /** Curried `unwrapOr` for pipelines. */
+  unwrapOrP:
+    <T, E>(fallback: T) =>
+    (r: Result<T, E>): T =>
+      r.kind === "Ok" ? r.value : fallback,
+  /** Curried `unwrapOrElse` for pipelines. */
+  unwrapOrElseP:
+    <T, E>(f: (error: E) => T) =>
+    (r: Result<T, E>): T =>
+      r.kind === "Ok" ? r.value : f(r.error),
+  /** Curried `expect` for pipelines. */
+  expectP:
+    <T, E>(message: string) =>
+    (r: Result<T, E>): T => {
+      if (r.kind === "Ok") return r.value;
+      throw new Error(message);
+    },
 };

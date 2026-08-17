@@ -4,7 +4,7 @@
 (구현된 구조는 [`compiler-architecture.md`](./compiler-architecture.md)).
 TASK-019에서 작성했다. **세 단계 모두 구현되었다** — 1단계는 TASK-020,
 2단계는 TASK-022, 3단계는 TASK-023 (규범 서술:
-[`language.md` §7](../reference/language.md#7-모듈-rl-import-지정자-재작성),
+[`language.md` §8](../reference/language.md#8-모듈-rl-import-지정자-재작성),
 [`cli.md` "심볼 출력"](../reference/cli.md#심볼-출력---symbols)).
 
 rlc는 지금 **파일 하나를 파일 하나로** 바꾼다. `compile(source, &Options) ->

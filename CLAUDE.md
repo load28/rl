@@ -6,9 +6,10 @@
 ## 프로젝트 개요
 
 **rl**은 TypeScript로 컴파일되는 초경량 전처리 언어이고, **rlc**는 Rust로 작성된
-그 컴파일러입니다. rl은 TypeScript 위에 딱 네 가지만 추가합니다:
-Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드 포함),
-에러 전파 `try` 문, 값 추출 `let-else` 문.
+그 컴파일러입니다. rl은 TypeScript 위에 딱 여섯 가지만 추가합니다:
+Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드·튜플 match·
+중첩 패턴 포함), 에러 전파 `try` 문, 값 추출 `let-else`·`if let` 문,
+파이프라인 연산자 `|>`.
 
 ### 절대 불변 원칙 (설계 계약)
 
@@ -18,7 +19,7 @@ Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드 
    컴파일러는 rl `enum`/`match` 구문만 변환하고 나머지는 바이트 단위 그대로
    통과시킨다. 구문이 완전하게 파싱될 때만 변환하고, 조금이라도 어긋나면 원문
    그대로 통과시킨다. 유일한 예외는 상대 경로 `.rl` import 지정자의 재작성
-   (TASK-020, `language.md` §7)이다 — 그런 지정자는 tsc가 어차피 해석하지
+   (TASK-020, `language.md` §8)이다 — 그런 지정자는 tsc가 어차피 해석하지
    못하므로(`TS2307`) 동작하던 TS가 달라지는 일은 없고, `--rewrite-imports
    off`로 끌 수 있다. 이 밖의 예외를 추가로 만들지 않는다.
 2. **에러 계층이 분리되어 있다.** rl 수준 에러(중복 케이스, 소진되지 않은 match,
@@ -45,6 +46,8 @@ src/
     matches.rs   match 표현식 구조 파싱 (scrutinee/arm body 재귀 파싱)
     tries.rs     try 문 구조 파싱 (유효 TS의 try 형태 배제 규칙 포함)
     lets.rs      let-else 문 구조 파싱 (발산 판정 포함)
+    iflets.rs    if let 문 구조 파싱 (else 체이닝 포함)
+    pipes.rs     파이프라인 스텝 구조 파싱 (head는 mod.rs의 식-시작 추적)
   sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입, 소진성
                  (임포트 선언·내장 Option/Result 포함, 로컬 > 임포트 > 내장 섀도잉)
   stdlib.rs      표준 라이브러리 — STD_SOURCE(공개) / BUILTIN_ENUMS(내부)
@@ -52,7 +55,7 @@ src/
     rl_std.ts    std 모듈 본체 (Option/Result + 콤비네이터, --emit-std로 방출)
   codegen/
     mod.rs       Program → TypeScript 방출 (verbatim 구간은 바이트 그대로 복사,
-                 try/let-else 문 방출 포함)
+                 try/let-else 문·파이프라인($rl_ap 헬퍼) 방출 포함)
     enums.rs     enum 방출 (유니언 type + 생성자 const)
     matches.rs   match 방출 (switch IIFE)
   verify.rs      swc 기반 검증 — 타입 조각 검사 + 출력 자가 검사

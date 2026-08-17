@@ -36,6 +36,8 @@ enum E { A(x: number]) }
 | ``match: the wildcard arm `_` must be the last arm`` | `_` 뒤의 암은 도달 불가능. `_`를 마지막으로 옮깁니다 |
 | `match: duplicate arm "<태그>"` | **무가드 암이 이미 덮은 태그**가 다시 나옴 — `A \| A`, `A \| B => .., B => ..`, `A => .., A if c => ..`. 가드 암끼리의 반복은 에러가 아닙니다. 위치는 두 번째 태그 |
 | `match: or-pattern alternatives must bind the same fields` | 대안들이 하나의 구조 분해를 공유하므로 같은 (필드, 이름) 집합을 바인딩해야 합니다. `A(x) \| B(x)`·`A(x, y) \| B(y, x)`는 되고 `A(x) \| B(y)`·`A \| B(x)`는 안 됩니다 |
+| `match: nested patterns cannot be combined with or-patterns` | 중첩 패턴(`Tag(field: Inner(...))`)은 대안별 경로 조건이 필요해 공유 구조 분해와 양립하지 않습니다. 암을 나눕니다 |
+| `` match: binding `<이름>` is used more than once in this pattern (rename one with `field: alias`) `` | 한 패턴(중첩 포함)이 같은 이름을 두 번 바인딩 — 한 스코프에 두 번 선언됩니다. 별칭으로 바꿉니다 |
 
 ### 소진성
 
@@ -55,10 +57,25 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 | import한 exported enum | `match on enum <이름> (imported from "<지정자>") is not exhaustive: ...` |
 | 내장 `Option`/`Result` | `match on built-in enum <이름> is not exhaustive: ...` |
 
-**가드 암은 케이스를 커버하지 못합니다** — 그 태그를 덮으려면 무가드 암이 따로
-필요합니다. 손으로 쓴 유니언이나 해석되지 않는 import의 enum은 이 검사를 받지
-않고 런타임 가드만 남습니다
+**가드 암과 중첩 패턴 암은 케이스를 커버하지 못합니다** — 그 태그를 덮으려면
+무가드·무중첩 암이 따로 필요합니다. 손으로 쓴 유니언이나 해석되지 않는
+import의 enum은 이 검사를 받지 않고 런타임 가드만 남습니다
 ([`language.md` §3.6](./language.md#36-소진성-검사)).
+
+튜플 match는 곱집합으로 검사하고 빠진 **조합**을 보고합니다 (5개 이상이면
+앞의 셋과 총 개수만):
+
+```
+rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Manual)
+     (add the missing arms or a final `_` arm)
+```
+
+### 튜플 match
+
+| 메시지 | 원인과 해결 |
+|--------|-------------|
+| `match: tuple pattern has <n> elements but the match has <m> scrutinees` | 튜플 패턴의 원소 수가 스크루티니 수와 다름. 위치는 패턴 시작 |
+| `` match: binding `<이름>` is used more than once in this tuple pattern (rename one with `field: alias`) `` | 한 튜플 패턴의 두 원소가 같은 이름을 바인딩 — 한 스코프에 두 번 선언됩니다. 별칭으로 바꿉니다: `(Some(value), Some(value: other))` |
 
 ## try / let-else
 
@@ -78,6 +95,29 @@ function f(): number {
 
 모듈 최상위의 `try`/let-else는 이 검사로 잡히지 않고, 최상위 `return`이 유효한
 TS가 아니어서 아래 출력 검증 에러로 드러납니다.
+
+## if let
+
+| 메시지 | 원인과 해결 |
+|--------|-------------|
+| `` `if let` could not be parsed here (pattern parens are mandatory, and the `else` must be a block or another `if let`) `` | `if let`으로 시작했지만 문으로 완전히 파싱되지 않았습니다. `if` 뒤의 `let`은 유효한 TS에 없어 통과시킬 수 없으므로 위치와 함께 에러입니다. 흔한 원인: 패턴 괄호 누락(`if let Some = ...`), `else if (조건)` 이어 붙이기(else 블록 안으로 옮깁니다), `= 식` 최상위의 괄호 없는 블록 화살표. 위치는 `if` |
+| `` `if let` cannot be used in expression position (...) — it compiles to a block statement `` | 템플릿 보간·스크루티니·가드·표현식 암 본문·`try` 식·파이프라인 안에서는 쓸 수 없습니다. 문장 위치(match 암의 블록 본문 포함)로 옮깁니다 |
+| `` match: binding `<이름>` is used more than once in this pattern ... `` | match와 같은 패턴 규칙 — 별칭으로 해소합니다 |
+
+## 파이프라인
+
+| 메시지 | 원인과 해결 |
+|--------|-------------|
+| `` pipeline: `|>` could not be parsed here (steps must be expressions; parenthesize ternaries and arrow functions) `` | `\|>`가 파이프라인으로 완전히 파싱되지 않았습니다. `\|>`는 유효한 TS에 존재할 수 없어 통과시킬 수 없으므로 위치와 함께 에러입니다. 흔한 원인: head/step 최상위의 삼항이나 괄호 없는 화살표(괄호로 감쌉니다 — `(c ? a : b) \|> f`, `x \|> (n => n + 1)`), 빈 스텝(`x \|>;`), `?.` 시작 스텝. 위치는 `\|>` |
+
+head/step 내부의 `try` 문은 위의 try 위치 제약 에러로 보고됩니다
+([`language.md` §7.4](./language.md#74-구조-규칙)).
+
+```rl
+const a = c ? x : y |> f;
+// rlc: file.rl:1:21: pipeline: `|>` could not be parsed here (steps must be
+//      expressions; parenthesize ternaries and arrow functions)
+```
 
 ## 출력 검증
 

@@ -1,7 +1,10 @@
 # 설계 제안: 파이프라인 연산자 `|>`
 
-- **상태**: 제안 (구현 전 — 승인 시 구현 태스크를 별도 등록)
-- **태스크**: [TASK-013](../tasks/TASK-013-pipeline-operator-proposal.md)
+- **상태**: 구현됨 (TASK-043) — 규범은
+  [`language.md` §7](../reference/language.md#7-파이프라인-연산자-),
+  [`std.md`](../reference/std.md#파이프라인-변형-p)
+- **태스크**: [TASK-013](../tasks/TASK-013-pipeline-operator-proposal.md) (제안),
+  [TASK-043](../tasks/TASK-043-pipeline-operator-impl.md) (구현)
 
 ## 1. 목표
 

@@ -30,7 +30,7 @@ rlc [options] <file | dir> ...
 | `--emit-std` | 표준 라이브러리 모듈([`std.md`](./std.md))을 stdout으로 출력하고 종료. 입력과 조합되지 않습니다 |
 | `--no-banner` | `@generated` 배너 주석 생략 |
 | `--no-verify` | 필드 타입 검사와 생성물 자가 검사 생략 |
-| `--rewrite-imports <js\|ts\|off>` | `.rl` 지정자의 방출 형태 ([`language.md` §7.2](./language.md#72-방출-형태---rewrite-imports)). 그 외 값은 에러 |
+| `--rewrite-imports <js\|ts\|off>` | `.rl` 지정자의 방출 형태 ([`language.md` §8.2](./language.md#82-방출-형태---rewrite-imports)). 그 외 값은 에러 |
 | `--sidecar <dir>` | 선언을 받아 사이드카만 씁니다 ([아래](#에디터-사이드카---sidecar-저수준)) |
 | `--symbols` | rl enum 선언과 `.rl` import를 JSON으로 ([아래](#심볼-출력---symbols)) |
 
@@ -49,7 +49,7 @@ rlc [options] <file | dir> ...
 
 컴파일할 때 각 파일의 **직접 상대 경로 `.rl` import**를 추가로 읽어 enum 선언을
 수집합니다 (소진성 검사용,
-[`language.md` §7.3](./language.md#73-선언-수집과-프로젝트-단위-소진성)).
+[`language.md` §8.3](./language.md#83-선언-수집과-프로젝트-단위-소진성)).
 읽을 수 없는 지정자는 조용히 건너뜁니다 — 모듈 해석은 tsc의 책임입니다.
 
 ## 출력 경로

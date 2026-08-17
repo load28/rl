@@ -128,7 +128,11 @@ fn is_expr_start(t: &Token) -> bool {
         TokenKind::Punct(c) => {
             c.is_ascii_digit() || matches!(c, b'[' | b'!' | b'~' | b'+' | b'-' | b'/')
         }
-        TokenKind::Arrow | TokenKind::OrOr | TokenKind::OptChain | TokenKind::Coalesce => false,
+        TokenKind::Arrow
+        | TokenKind::OrOr
+        | TokenKind::OptChain
+        | TokenKind::Coalesce
+        | TokenKind::PipeOp => false,
     }
 }
 

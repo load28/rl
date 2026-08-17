@@ -39,8 +39,10 @@ pub(super) fn parse_let_else<'t>(
     }
     let open = cur.idx;
     let close = cur.find_close()?;
-    let bindings =
-        super::matches::parse_bindings(cur.sub(open + 1, close, cur.tokens[close].span.start))?;
+    let bindings = super::matches::parse_bindings(
+        cur.sub(open + 1, close, cur.tokens[close].span.start),
+        false, // let-else bindings stay alias-only (no nested patterns)
+    )?;
     cur.idx = close + 1;
 
     // `=` (but not `==` / `=>`; `=>` lexes as a fused Arrow token)

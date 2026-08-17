@@ -1147,3 +1147,630 @@ fn enum_symbols_carries_positions_and_field_shapes() {
     assert_eq!(syms[1].name, "Local");
     assert!(!syms[1].exported);
 }
+
+/* ------------------------------------------------------------------ */
+/* pipeline                                                            */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn pipeline_emits_nested_apply_helper_calls() {
+    let out = ok("const y = half(4) |> double |> label;\n");
+    assert!(
+        out.contains("const y = $rl_ap($rl_ap((half(4)), (double)), (label));"),
+        "{out}"
+    );
+    assert!(out.contains("function $rl_ap<A, B>(v: A, f: (v: A) => B): B { return f(v); }"));
+}
+
+#[test]
+fn pipeline_method_step_chains_postfix() {
+    let out = ok("const t = s |> .trim() |> .split(\",\") |> f;\n");
+    assert!(
+        out.contains("const t = $rl_ap((((s)).trim()).split(\",\"), (f));"),
+        "{out}"
+    );
+}
+
+#[test]
+fn pipeline_helper_is_emitted_once_per_file() {
+    let out = ok("const a = x |> f;\nconst b = y |> g;\n");
+    assert_eq!(out.matches("function $rl_ap").count(), 1, "{out}");
+    // and appended at the end so original lines keep their positions
+    assert!(out.trim_end().ends_with("{ return f(v); }"), "{out}");
+}
+
+#[test]
+fn file_without_pipeline_gets_no_helper() {
+    let out = ok("const a = f(x);\n");
+    assert!(!out.contains("$rl_ap"), "{out}");
+}
+
+#[test]
+fn pipeline_head_reclaims_a_lifted_template() {
+    // The template token is lifted as a segment before the `|>` is seen —
+    // the claim must rewind it into the head sub-program.
+    let out = ok("const a = `v=${n}` |> f;\n");
+    assert!(out.contains("const a = $rl_ap((`v=${n}`), (f));"), "{out}");
+}
+
+#[test]
+fn pipeline_head_reclaims_a_lifted_match() {
+    let out =
+        ok("enum E { A(v: number), B }\nconst a = match (e) { A(v) => v, B => 0, } |> double;\n");
+    assert!(out.contains("const a = $rl_ap((("), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+    assert!(out.contains(")())), (double));"), "{out}");
+}
+
+#[test]
+fn pipeline_head_is_the_whole_call_not_the_inner_argument() {
+    // Bracket tracking must restore the enclosing expression's start:
+    // the head of `a(b) |> g` is `a(b)`, not `b`.
+    let out = ok("const y = f(a(b) |> g);\n");
+    assert!(out.contains("const y = f($rl_ap((a(b)), (g)));"), "{out}");
+}
+
+#[test]
+fn pipeline_inside_match_scrutinee_arm_and_template() {
+    let out = ok(
+        "enum E { A(v: number), B }\nconst r = match (x |> norm) {\n  A(v) => v |> double,\n  B => 0,\n};\nconst t = `n=${x |> f}`;\n",
+    );
+    assert!(
+        out.contains("const $rl_m = ($rl_ap((x), (norm)));"),
+        "{out}"
+    );
+    assert!(out.contains("return ($rl_ap((v), (double)));"), "{out}");
+    assert!(out.contains("`n=${$rl_ap((x), (f))}`"), "{out}");
+}
+
+#[test]
+fn pipeline_composes_with_try() {
+    let out = ok(
+        "function f(): Result<number, string> {\n  const a = try readCfg() |> norm;\n  return Result.Ok(a);\n}\n",
+    );
+    assert!(
+        out.contains("const $rl_t0 = ($rl_ap((readCfg()), (norm)));"),
+        "{out}"
+    );
+}
+
+#[test]
+fn pipeline_await_in_head_needs_no_async_wrapper() {
+    let out = ok("async function f(p: Promise<string>) {\n  return await p |> norm;\n}\n");
+    assert!(out.contains("return $rl_ap((await p), (norm));"), "{out}");
+    assert!(!out.contains("async () =>"), "{out}");
+}
+
+#[test]
+fn unparenthesized_ternary_next_to_pipeline_is_an_error() {
+    let e = err("const a = c ? x : y |> f;\n");
+    assert!(e.message.contains("parenthesize"), "{}", e.message);
+    assert_eq!((e.line, e.col), (1, 21));
+}
+
+#[test]
+fn parenthesized_ternary_head_compiles() {
+    let out = ok("const a = (c ? x : y) |> f;\n");
+    assert!(out.contains("$rl_ap(((c ? x : y)), (f))"), "{out}");
+}
+
+#[test]
+fn unparenthesized_arrow_step_is_an_error() {
+    let e = err("const a = x |> n => n + 1;\n");
+    assert!(e.message.contains("parenthesize"), "{}", e.message);
+}
+
+#[test]
+fn empty_or_dangling_step_is_an_error() {
+    let e = err("const a = x |>;\n");
+    assert!(e.message.contains("could not be parsed"), "{}", e.message);
+    let e = err("const a = x |> |> f;\n");
+    assert!(e.message.contains("could not be parsed"), "{}", e.message);
+}
+
+#[test]
+fn optional_chain_step_is_an_error() {
+    let e = err("const a = x |> ?.trim();\n");
+    assert!(e.message.contains("could not be parsed"), "{}", e.message);
+}
+
+#[test]
+fn try_inside_a_pipeline_step_is_an_error() {
+    let e = err("const a = x |> (n => { const b = try f(n); return b; });\n");
+    assert!(e.message.contains("`try` cannot be used"), "{}", e.message);
+}
+
+/* ------------------------------------------------------------------ */
+/* tuple match                                                         */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn tuple_match_emits_joint_if_chain() {
+    let out = ok(r#"
+enum Dir { North(), South }
+enum Speed { Fast(), Slow }
+const step = match (dir, speed) {
+  (North, Fast) => 2,
+  (North, Slow) => 1,
+  (South, _) => -1,
+};
+"#);
+    assert!(out.contains("const $rl_m0 = (dir);"), "{out}");
+    assert!(out.contains("const $rl_m1 = (speed);"), "{out}");
+    assert!(
+        out.contains("if ($rl_m0.kind === \"North\" && $rl_m1.kind === \"Fast\") { return (2); }"),
+        "{out}"
+    );
+    assert!(
+        out.contains("if ($rl_m0.kind === \"South\") { return (-1); }"),
+        "{out}"
+    );
+    assert!(out.contains("JSON.stringify([$rl_m0, $rl_m1])"), "{out}");
+}
+
+#[test]
+fn tuple_match_binds_fields_from_each_position() {
+    let out = ok(r#"
+const r = match (a, b) {
+  (Some(value: x), Some(value: y)) => x + y,
+  _ => 0,
+};
+"#);
+    assert!(
+        out.contains(
+            "{ const { value: x } = $rl_m0; const { value: y } = $rl_m1; return (x + y); }"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn comma_expression_scrutinee_is_still_a_single_match() {
+    // No tuple pattern in the arms → the comma is a comma expression,
+    // exactly as before tuple matches existed.
+    let out = ok(
+        "const r = match ((a, b)) { A => 1, _ => 0 };\nconst s = match (a, b) { A => 1, _ => 0 };\n",
+    );
+    assert!(out.contains("const $rl_m = ((a, b));"), "{out}");
+    assert!(out.contains("const $rl_m = (a, b);"), "{out}");
+    assert!(!out.contains("$rl_m0"), "{out}");
+}
+
+#[test]
+fn tuple_match_product_exhaustiveness_reports_missing_combination() {
+    let e = err(r#"
+enum Dir { North(), South }
+enum Speed { Fast(), Slow }
+const step = match (d, s) {
+  (North, Fast) => 2,
+  (North, Slow) => 1,
+  (South, Fast) => -1,
+};
+"#);
+    assert!(
+        e.message
+            .contains("match on (Dir, Speed) is not exhaustive: missing (South, Slow)"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (4, 14));
+}
+
+#[test]
+fn tuple_match_wildcard_element_and_or_pattern_cover_the_product() {
+    let out = ok(r#"
+enum Dir { North(), South, East, West }
+enum Speed { Fast(), Slow }
+const step = match (d, s) {
+  (North | South, _) => 1,
+  (East, Fast | Slow) => 2,
+  (West, _) => 3,
+};
+"#);
+    assert!(out.contains("$rl_m0"), "{out}");
+    assert!(
+        out.contains(
+            "if (($rl_m0.kind === \"North\" || $rl_m0.kind === \"South\")) { return (1); }"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn tuple_match_guarded_arm_covers_nothing() {
+    let e = err(r#"
+enum Coin { Heads(), Tails }
+const r = match (a, b) {
+  (Heads, Heads) if lucky() => 1,
+  (Heads, Heads) => 2,
+  (Heads, Tails) => 3,
+  (Tails, Heads) => 4,
+};
+"#);
+    assert!(
+        e.message.contains("missing (Tails, Tails)"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn tuple_match_bare_wildcard_arm_skips_the_check_and_must_be_last() {
+    let out = ok(r#"
+enum Coin { Heads(), Tails }
+const r = match (a, b) {
+  (Heads, Heads) => 1,
+  _ => 0,
+};
+"#);
+    assert!(out.contains("return (0);"), "{out}");
+
+    let e = err("const r = match (a, b) {\n  _ => 0,\n  (A, B) => 1,\n};\n");
+    assert!(e.message.contains("must be the last arm"), "{}", e.message);
+}
+
+#[test]
+fn tuple_match_arity_mismatch_is_an_error() {
+    let e = err("const r = match (a, b) {\n  (A, B, C) => 1,\n  _ => 0,\n};\n");
+    assert!(
+        e.message
+            .contains("tuple pattern has 3 elements but the match has 2 scrutinees"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 3));
+}
+
+#[test]
+fn tuple_match_duplicate_binding_across_elements_is_an_error() {
+    let e =
+        err("const r = match (a, b) {\n  (Some(value), Some(value)) => value,\n  _ => 0,\n};\n");
+    assert!(
+        e.message.contains("binding `value` is used more than once"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn tuple_match_or_alternatives_must_bind_the_same_fields_per_element() {
+    let e = err("const r = match (a, b) {\n  (Some(value) | None, _) => 1,\n  _ => 0,\n};\n");
+    assert!(
+        e.message
+            .contains("or-pattern alternatives must bind the same fields"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn tuple_match_over_builtin_enums() {
+    let e = err(
+        "const r = match (o, r2) {\n  (Some(value), Ok(value: v)) => value + v,\n  (None, _) => 0,\n};\n",
+    );
+    assert!(
+        e.message
+            .contains("match on (Option, Result) is not exhaustive: missing (Some, Err)"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn tuple_match_block_bodies_and_guards_use_the_label() {
+    let out = ok(r#"
+enum Coin { Heads(), Tails }
+const r = match (a, b) {
+  (Heads, Tails) if go() => { log(); return 1; },
+  _ => 0,
+};
+"#);
+    assert!(out.contains("$rl_b: {"), "{out}");
+    assert!(out.contains("if ((go()))"), "{out}");
+    assert!(out.contains("break $rl_b;"), "{out}");
+}
+
+#[test]
+fn tuple_match_await_in_scrutinee_makes_it_async() {
+    let out = ok(
+        "async function f() {\n  return match (await a, b) {\n    (X, Y) => 1,\n    _ => 0,\n  };\n}\n",
+    );
+    assert!(out.contains("(await (async () => {"), "{out}");
+}
+
+#[test]
+fn tuple_match_three_positions() {
+    let e = err(r#"
+enum B { T(), F }
+const r = match (x, y, z) {
+  (T, _, _) => 1,
+  (F, T, _) => 2,
+  (F, F, T) => 3,
+};
+"#);
+    assert!(e.message.contains("missing (F, F, F)"), "{}", e.message);
+}
+
+/* ------------------------------------------------------------------ */
+/* nested patterns                                                     */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn nested_pattern_emits_path_conditions_and_binds() {
+    let out = ok(r#"
+const n = match (r) {
+  Ok(value: Some(value: v)) => v,
+  Ok(value: None()) => 0,
+  _ => -1,
+};
+"#);
+    assert!(
+        out.contains("if ($rl_m.kind === \"Ok\" && $rl_m.value.kind === \"Some\") { const { value: v } = $rl_m.value; return (v); }"),
+        "{out}"
+    );
+    assert!(
+        out.contains("if ($rl_m.kind === \"Ok\" && $rl_m.value.kind === \"None\") { return (0); }"),
+        "{out}"
+    );
+    // nested patterns force the if-chain form
+    assert!(!out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn nested_pattern_two_levels_deep() {
+    let out = ok(r#"
+const n = match (r) {
+  Ok(value: Some(value: Pair(a, b))) => a + b,
+  _ => 0,
+};
+"#);
+    assert!(
+        out.contains("$rl_m.kind === \"Ok\" && $rl_m.value.kind === \"Some\" && $rl_m.value.value.kind === \"Pair\""),
+        "{out}"
+    );
+    assert!(out.contains("const { a, b } = $rl_m.value.value;"), "{out}");
+}
+
+#[test]
+fn nested_pattern_mixes_plain_bindings_at_each_level() {
+    let out = ok(r#"
+const n = match (r) {
+  Both(left, right: Some(value)) => left + value,
+  _ => 0,
+};
+"#);
+    assert!(
+        out.contains(
+            "{ const { left } = $rl_m; const { value } = $rl_m.right; return (left + value); }"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn plain_alias_is_still_an_alias_not_a_nested_pattern() {
+    // `value: v` (no parens) binds; only `value: Tag(...)` nests. A match
+    // without nested patterns keeps the switch form.
+    let out = ok("const n = match (o) { Some(value: None) => None, _ => 0 };");
+    assert!(out.contains("const { value: None } = $rl_m;"), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn nested_pattern_arm_covers_nothing_for_exhaustiveness() {
+    // Like a guard: the inner tag may mismatch, so `Ok(value: Some(..))`
+    // does not cover Ok.
+    let e = err(r#"
+const n = match (r) {
+  Ok(value: Some(value: v)) => v,
+  Err(error) => 0,
+};
+"#);
+    assert!(
+        e.message
+            .contains("match on built-in enum Result is not exhaustive: missing \"Ok\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn nested_pattern_arm_may_repeat_a_tag() {
+    // Two Ok arms with different inner patterns are not duplicates —
+    // exactly like two guarded arms of one tag.
+    let out = ok(r#"
+const n = match (r) {
+  Ok(value: Some(value: v)) => v,
+  Ok(value) => 0,
+  Err(error) => -1,
+};
+"#);
+    assert!(out.contains("$rl_m.value.kind === \"Some\""), "{out}");
+}
+
+#[test]
+fn plain_arm_before_nested_arm_is_a_duplicate() {
+    let e = err("const n = match (r) { Ok(value) => 1, Ok(value: Some(value: v)) => v, _ => 0 };");
+    assert!(e.message.contains("duplicate arm \"Ok\""), "{}", e.message);
+}
+
+#[test]
+fn nested_pattern_inside_or_pattern_is_an_error() {
+    let e = err("const n = match (r) { Ok(value: Some(v)) | Err(error) => 1, _ => 0 };");
+    assert!(
+        e.message
+            .contains("nested patterns cannot be combined with or-patterns"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn duplicate_binding_within_one_pattern_is_an_error() {
+    let e = err("const n = match (r) { Ok(value: Some(value), error: value) => value, _ => 0 };");
+    assert!(
+        e.message.contains("binding `value` is used more than once"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn nested_pattern_in_tuple_match_elements() {
+    let out = ok(r#"
+const n = match (a, b) {
+  (Ok(value: Some(value: x)), Ok(value: Some(value: y))) => x + y,
+  _ => 0,
+};
+"#);
+    assert!(
+        out.contains("$rl_m0.kind === \"Ok\" && $rl_m0.value.kind === \"Some\" && $rl_m1.kind === \"Ok\" && $rl_m1.value.kind === \"Some\""),
+        "{out}"
+    );
+    assert!(
+        out.contains("const { value: x } = $rl_m0.value; const { value: y } = $rl_m1.value;"),
+        "{out}"
+    );
+}
+
+#[test]
+fn nested_pattern_with_guard() {
+    let out = ok(r#"
+const n = match (r) {
+  Ok(value: Some(value: v)) if v > 0 => v,
+  _ => 0,
+};
+"#);
+    assert!(out.contains("if ((v > 0)) return (v);"), "{out}");
+}
+
+#[test]
+fn let_else_does_not_take_nested_patterns() {
+    // `const Some(value: Ok(v)) = ...` is not rl let-else syntax; the
+    // candidate passes through and (being invalid TS) fails the output
+    // self-check — same as any malformed candidate.
+    let e = err("function f() {\n  const Some(value: Ok(v)) = g() else { return; };\n}\n");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
+
+/* ------------------------------------------------------------------ */
+/* if let                                                              */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn if_let_emits_a_self_contained_block() {
+    let out =
+        ok("function f() {\n  if let Some(value: user) = find() {\n    greet(user);\n  }\n}\n");
+    assert!(
+        out.contains("{ const $rl_t0 = (find()); if ($rl_t0.kind === \"Some\") { const { value: user } = $rl_t0; greet(user); } }"),
+        "{out}"
+    );
+}
+
+#[test]
+fn if_let_else_block_and_chaining() {
+    let out = ok(r#"
+function f() {
+  if let Some(value) = a() {
+    use1(value);
+  } else if let Ok(value: v) = b() {
+    use2(v);
+  } else {
+    fallback();
+  }
+}
+"#);
+    assert!(
+        out.contains("} else { const $rl_t1 = (b()); if ($rl_t1.kind === \"Ok\")"),
+        "{out}"
+    );
+    assert!(out.contains("else { fallback(); } } }"), "{out}");
+}
+
+#[test]
+fn if_let_takes_nested_patterns() {
+    let out = ok("function f(r: Res) {\n  if let Ok(value: Some(value: v)) = r { use(v); }\n}\n");
+    assert!(
+        out.contains("if ($rl_t0.kind === \"Ok\" && $rl_t0.value.kind === \"Some\") { const { value: v } = $rl_t0.value; use(v); }"),
+        "{out}"
+    );
+}
+
+#[test]
+fn if_let_shares_the_temp_counter_with_try() {
+    let out = ok(
+        "function f(): Result<number, string> {\n  const a = try g();\n  if let Some(value) = h(a) { use(value); }\n  return Result.Ok(a);\n}\n",
+    );
+    assert!(out.contains("$rl_t0"), "{out}");
+    assert!(out.contains("const $rl_t1 = (h(a));"), "{out}");
+}
+
+#[test]
+fn if_let_allowed_in_statement_contexts() {
+    // A match arm's block body and a let-else else block are statement
+    // positions — if let works there.
+    let out = ok(r#"
+function f(x: X, o: O) {
+  const r = match (x) {
+    A => {
+      if let Some(value) = o { return value; }
+      return 0;
+    },
+    _ => 1,
+  };
+  return r;
+}
+"#);
+    assert!(out.contains("if ($rl_t0.kind === \"Some\")"), "{out}");
+}
+
+#[test]
+fn if_let_in_expression_position_is_an_error() {
+    let e = err("const s = `${if let Some(value) = o { 1 }}`;\n");
+    assert!(
+        e.message
+            .contains("`if let` cannot be used in expression position"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn malformed_if_let_is_an_error_with_position() {
+    // `if let` cannot be passed through (never valid TS), so a candidate
+    // that fails to parse is reported instead of failing the self-check.
+    let e = err("function f() {\n  if let Some = o { g(); }\n}\n");
+    assert!(
+        e.message.contains("`if let` could not be parsed here"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 3));
+
+    let e = err("function f() {\n  if let Some(v) = o { g(); } else if (x) { h(); }\n}\n");
+    assert!(
+        e.message.contains("`if let` could not be parsed here"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn if_let_duplicate_binding_is_an_error() {
+    let e = err("function f() {\n  if let Both(a: v, b: v) = o { g(v); }\n}\n");
+    assert!(
+        e.message.contains("binding `v` is used more than once"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn plain_if_statements_pass_through() {
+    let src = "if (x) { a(); } else if (y) { b(); } else { c(); }\nconst z = cond ? 1 : 2;\n";
+    assert_eq!(ok(src), src);
+}
