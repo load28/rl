@@ -7,9 +7,12 @@
 //!   rlc --check src/               compiles without writing anything
 //!   rlc --emit-std src/rl.ts       writes the standard library module
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 use rlc::{EnumSymbol, ExternEnum, ImportRewrite, Options, RlImportNames, compile};
 
@@ -24,6 +27,8 @@ Usage: rlc [options] <file.rl | dir> ...
 Options:
   -o, --out-dir <dir>   write outputs under <dir> (mirrors input paths)
   -p, --print           print compiled output to stdout instead of writing
+  -w, --watch           keep running; recompile inputs (and their importers)
+                        as they change
   --check               compile only; write nothing (syntax check)
   --emit-std <file>     write the standard library module (Option/Result) to <file>
   --no-banner           omit the \"generated\" banner comment
@@ -66,6 +71,7 @@ fn collect_rl_files(entry: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()>
     Ok(())
 }
 
+#[derive(Clone)]
 struct Job {
     file: PathBuf,
     out_path: PathBuf,
@@ -374,6 +380,7 @@ fn main() -> ExitCode {
     let mut out_dir: Option<PathBuf> = None;
     let mut emit_std: Option<PathBuf> = None;
     let mut print = false;
+    let mut watch = false;
     let mut check = false;
     let mut banner = true;
     let mut verify = true;
@@ -393,6 +400,7 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "-p" | "--print" => print = true,
+            "-w" | "--watch" => watch = true,
             "--check" => check = true,
             "--symbols" => symbols = true,
             "--no-banner" => banner = false,
@@ -466,34 +474,10 @@ fn main() -> ExitCode {
         }
     }
 
-    let mut jobs: Vec<Job> = Vec::new();
-    for input in &inputs {
-        let input_path = Path::new(input);
-        if !input_path.exists() {
-            eprintln!("rlc: no such file or directory: {input}");
-            return ExitCode::FAILURE;
-        }
-        let is_dir = input_path.is_dir();
-        let mut files = Vec::new();
-        if let Err(e) = collect_rl_files(input_path, &mut files) {
-            eprintln!("rlc: {input}: {e}");
-            return ExitCode::FAILURE;
-        }
-        for file in files {
-            let out_path = match &out_dir {
-                Some(dir) => {
-                    let rel = if is_dir {
-                        file.strip_prefix(input_path).unwrap_or(&file).to_path_buf()
-                    } else {
-                        PathBuf::from(file.file_name().unwrap())
-                    };
-                    dir.join(rel).with_extension("ts")
-                }
-                None => file.with_extension("ts"),
-            };
-            jobs.push(Job { file, out_path });
-        }
-    }
+    let jobs = match build_jobs(&inputs, out_dir.as_deref()) {
+        Ok(jobs) => jobs,
+        Err(code) => return code,
+    };
 
     if jobs.is_empty() {
         eprintln!("rlc: no .rl files found");
@@ -508,8 +492,71 @@ fn main() -> ExitCode {
         return sidecar_mode(&jobs, dir);
     }
 
+    let build = BuildOptions {
+        banner,
+        print,
+        check,
+        verify,
+        rewrite_imports,
+    };
+
+    if watch {
+        return watch_mode(&inputs, out_dir.as_deref(), &build);
+    }
+
+    if compile_jobs(&jobs, &build) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Everything the compile step needs beyond the file list.
+struct BuildOptions {
+    banner: bool,
+    print: bool,
+    check: bool,
+    verify: bool,
+    rewrite_imports: ImportRewrite,
+}
+
+/// Expands the command line's inputs into one job per `.rl` file.
+fn build_jobs(inputs: &[String], out_dir: Option<&Path>) -> Result<Vec<Job>, ExitCode> {
+    let mut jobs: Vec<Job> = Vec::new();
+    for input in inputs {
+        let input_path = Path::new(input);
+        if !input_path.exists() {
+            eprintln!("rlc: no such file or directory: {input}");
+            return Err(ExitCode::FAILURE);
+        }
+        let is_dir = input_path.is_dir();
+        let mut files = Vec::new();
+        if let Err(e) = collect_rl_files(input_path, &mut files) {
+            eprintln!("rlc: {input}: {e}");
+            return Err(ExitCode::FAILURE);
+        }
+        for file in files {
+            let out_path = match out_dir {
+                Some(dir) => {
+                    let rel = if is_dir {
+                        file.strip_prefix(input_path).unwrap_or(&file).to_path_buf()
+                    } else {
+                        PathBuf::from(file.file_name().unwrap())
+                    };
+                    dir.join(rel).with_extension("ts")
+                }
+                None => file.with_extension("ts"),
+            };
+            jobs.push(Job { file, out_path });
+        }
+    }
+    Ok(jobs)
+}
+
+/// Compiles every job. Returns true if any of them failed.
+fn compile_jobs(jobs: &[Job], opts: &BuildOptions) -> bool {
     let mut failed = false;
-    for job in &jobs {
+    for job in jobs {
         let filename = job.file.display().to_string();
         let source = match fs::read_to_string(&job.file) {
             Ok(s) => s,
@@ -522,8 +569,8 @@ fn main() -> ExitCode {
         let extern_enums = collect_extern_enums(&job.file, &source);
         let options = Options {
             filename: Some(&filename),
-            verify,
-            rewrite_imports,
+            verify: opts.verify,
+            rewrite_imports: opts.rewrite_imports,
             extern_enums: &extern_enums,
         };
         let mut code = match compile(&source, &options) {
@@ -534,13 +581,13 @@ fn main() -> ExitCode {
                 continue;
             }
         };
-        if banner {
+        if opts.banner {
             let base = job.file.file_name().unwrap().to_string_lossy();
             code = format!("// @generated from {base} by rlc — do not edit directly.\n{code}");
         }
-        if print {
+        if opts.print {
             print!("{code}");
-        } else if !check {
+        } else if !opts.check {
             if let Some(parent) = job.out_path.parent()
                 && let Err(e) = fs::create_dir_all(parent)
             {
@@ -556,9 +603,104 @@ fn main() -> ExitCode {
             eprintln!("rlc: {} → {}", job.file.display(), job.out_path.display());
         }
     }
-    if failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
+    failed
+}
+
+/// How often `--watch` re-reads the inputs' timestamps.
+const WATCH_INTERVAL: Duration = Duration::from_millis(300);
+
+/// `--watch`: compile once, then keep compiling what changes.
+///
+/// Inputs are re-expanded every round, so files added to a watched directory
+/// are picked up. A changed file drags its **dependents** along: a `.rl` that
+/// imports it is checked against the new declarations, which is what makes
+/// project-wide exhaustiveness errors appear on the importing side.
+///
+/// Runs until interrupted; the exit code is only reached on a fatal input
+/// error.
+fn watch_mode(inputs: &[String], out_dir: Option<&Path>, opts: &BuildOptions) -> ExitCode {
+    let mut stamps: HashMap<PathBuf, SystemTime> = HashMap::new();
+    let mut first = true;
+
+    loop {
+        let jobs = match build_jobs(inputs, out_dir) {
+            Ok(jobs) => jobs,
+            // An input can disappear mid-edit; keep watching rather than
+            // tearing the session down.
+            Err(_) => {
+                thread::sleep(WATCH_INTERVAL);
+                continue;
+            }
+        };
+
+        let current: HashMap<PathBuf, SystemTime> = jobs
+            .iter()
+            .map(|job| {
+                let stamp = fs::metadata(&job.file)
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                (job.file.clone(), stamp)
+            })
+            .collect();
+
+        let changed: Vec<PathBuf> = if first {
+            jobs.iter().map(|job| job.file.clone()).collect()
+        } else {
+            current
+                .iter()
+                .filter(|(file, stamp)| stamps.get(*file) != Some(stamp))
+                .map(|(file, _)| file.clone())
+                .collect()
+        };
+
+        if !changed.is_empty() {
+            let targets = with_dependents(&jobs, &changed);
+            let selected: Vec<Job> = jobs
+                .iter()
+                .filter(|job| targets.contains(&job.file))
+                .cloned()
+                .collect();
+            let failed = compile_jobs(&selected, opts);
+            eprintln!(
+                "rlc: {} file(s) {} — watching",
+                selected.len(),
+                if failed { "failed" } else { "ok" }
+            );
+        }
+
+        if first {
+            eprintln!("rlc: watching {} file(s) — Ctrl-C to stop", jobs.len());
+            first = false;
+        }
+        stamps = current;
+        thread::sleep(WATCH_INTERVAL);
     }
+}
+
+/// The changed files plus every job that imports one of them.
+fn with_dependents(jobs: &[Job], changed: &[PathBuf]) -> HashSet<PathBuf> {
+    let mut targets: HashSet<PathBuf> = changed.iter().cloned().collect();
+    let changed_real: HashSet<PathBuf> = changed
+        .iter()
+        .filter_map(|file| file.canonicalize().ok())
+        .collect();
+
+    for job in jobs {
+        if targets.contains(&job.file) {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(&job.file) else {
+            continue;
+        };
+        let dir = job.file.parent().unwrap_or(Path::new("."));
+        let imports_changed = rlc::rl_imports(&source).iter().any(|import| {
+            dir.join(&import.specifier)
+                .canonicalize()
+                .is_ok_and(|target| changed_real.contains(&target))
+        });
+        if imports_changed {
+            targets.insert(job.file.clone());
+        }
+    }
+    targets
 }

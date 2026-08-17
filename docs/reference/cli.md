@@ -23,6 +23,7 @@ cargo build --release        # → target/release/rlc
 |------|------|
 | `-o, --out-dir <dir>` | 출력을 `<dir>` 아래에 씁니다 (경로 규칙은 아래). 필요한 중간 디렉터리는 자동 생성됩니다. |
 | `-p, --print` | 파일을 쓰는 대신 컴파일 결과를 stdout으로 출력합니다. |
+| `-w, --watch` | 한 번 컴파일한 뒤 계속 실행하며 바뀐 파일을 다시 컴파일합니다 (아래 "감시 모드"). |
 | `--check` | 컴파일만 하고 아무것도 쓰지 않습니다 (문법·소진성 검사 용도). |
 | `--emit-std <file>` | 표준 라이브러리 모듈(`Option`/`Result` + 콤비네이터, [`std.md`](./std.md))을 `<file>`에 씁니다. 입력 없이 단독으로 쓸 수도, 컴파일과 함께 쓸 수도 있습니다. 배너가 붙으며 `--no-banner`로 생략합니다. |
 | `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
@@ -98,6 +99,33 @@ cargo build --release        # → target/release/rlc
 - `--symbols`는 컴파일 모드와 조합되지 않습니다 — 지정하면 심볼 출력만
   하고 종료합니다 (`-o`/`-p`/`--check` 무시). 입력 파일을 읽지 못하면
   종료 코드 1입니다.
+
+## 감시 모드 (`-w`)
+
+한 번 컴파일한 뒤 종료하지 않고 입력을 계속 지켜봅니다. Ctrl-C로 멈춥니다.
+
+```sh
+rlc -w -o build src/          # 바뀔 때마다 다시 컴파일
+rlc -w --check src/           # 쓰지 않고 검사만 (tsc --noEmit --watch에 해당)
+```
+
+- 입력은 매 회차 다시 수집하므로, 감시 중인 디렉터리에 **새로 생긴 `.rl`도**
+  잡힙니다.
+- **바뀐 파일의 importer도 함께 다시 컴파일합니다.** 다른 파일의 enum에
+  케이스가 늘면 그것을 `match`하는 쪽에서 소진성 에러가 나야 하기 때문입니다
+  ([language.md §7.3](./language.md#73-선언-수집과-프로젝트-단위-소진성)).
+
+```
+rlc: watching 2 file(s) — Ctrl-C to stop
+rlc: ./a.rl → out/a.ts
+rlc: ./b.rl:4:3: match on enum E (imported from "./a.rl") is not exhaustive:
+     missing "C" (add the missing arms or a final `_` arm)
+rlc: 2 file(s) failed — watching
+```
+
+파일 시각을 300ms마다 확인하는 방식이라 외부 의존성이 없고, 네트워크
+파일 시스템에서도 동작합니다. `--symbols`·`--sidecar`처럼 컴파일하지 않는
+모드와는 조합되지 않습니다.
 
 ## 에디터 사이드카 (`--sidecar`)
 
