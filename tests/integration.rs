@@ -1344,3 +1344,54 @@ console.log(order.join(","), r);
 "#);
     assert_eq!(lines, vec!["a,b 1"]);
 }
+
+/* ------------------------------------------------------------------ */
+/* nested patterns                                                     */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn runtime_nested_pattern_falls_through_on_inner_mismatch() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Opt { Some(value: number), None }
+enum Res { Ok(value: Opt), Err(error: string) }
+
+function grade(r: Res): string {
+  return match (r) {
+    Ok(value: Some(value: v)) if v > 9000 => "over",
+    Ok(value: Some(value: v)) => "num:" + v,
+    Ok(value: None()) => "empty",
+    Err(error) => "err:" + error,
+    // v1 exhaustiveness: nested arms cover nothing, so `Ok` counts as
+    // uncovered without a final wildcard (documented, like guards).
+    _ => "unreachable",
+  };
+}
+
+console.log(grade(Res.Ok(Opt.Some(9001))));
+console.log(grade(Res.Ok(Opt.Some(3))));
+console.log(grade(Res.Ok(Opt.None)));
+console.log(grade(Res.Err("boom")));
+"#);
+    assert_eq!(lines, vec!["over", "num:3", "empty", "err:boom"]);
+}
+
+#[test]
+fn nested_pattern_bindings_typecheck_through_the_paths() {
+    require_toolchain!();
+    // The emitted condition chain must narrow $rl_m.value for the
+    // destructuring — no type tricks, plain control-flow analysis.
+    let (ok, out) = typecheck(
+        r#"
+enum Opt { Some(value: number), None }
+enum Res { Ok(value: Opt), Err(error: string) }
+function f(r: Res): number {
+  return match (r) {
+    Ok(value: Some(value: v)) => v + 1,
+    _ => 0,
+  };
+}
+"#,
+    );
+    assert!(ok, "{out}");
+}

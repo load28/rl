@@ -14,8 +14,22 @@
 //! keeps its value semantics.
 
 use super::Emitter;
-use crate::ast::{Arm, Binding, MatchExpr, Pattern, TupleMatchExpr, TuplePattern};
+use crate::ast::{Arm, Binding, MatchExpr, Pattern, TagPattern, TupleMatchExpr, TuplePattern};
 use crate::scanner::contains_await;
+
+/// True when the alternative carries a nested pattern — the arm then needs
+/// per-path conditions, which only the if-chain form can express.
+fn alt_has_nested(alt: &TagPattern) -> bool {
+    alt.bindings
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|b| b.nested.is_some())
+}
+
+fn arm_has_nested(arm: &Arm) -> bool {
+    matches!(&arm.pattern, Pattern::Tags(alts) if alts.iter().any(alt_has_nested))
+}
 
 pub(super) fn emit_match(e: &Emitter, expr: &MatchExpr) -> String {
     let scrutinee = e.emit_program(&expr.scrutinee);
@@ -27,7 +41,11 @@ pub(super) fn emit_match(e: &Emitter, expr: &MatchExpr) -> String {
                     .is_some_and(|g| contains_await(e.bytes, g.span.start, g.span.end))
         });
 
-    let inner = if expr.arms.iter().any(|a| a.guard.is_some()) {
+    let inner = if expr
+        .arms
+        .iter()
+        .any(|a| a.guard.is_some() || arm_has_nested(a))
+    {
         emit_if_chain(e, expr)
     } else {
         emit_switch(e, expr)
@@ -66,6 +84,55 @@ fn bind_str_from(bindings: &Option<Vec<Binding>>, var: &str) -> String {
             format!("const {{ {} }} = {var}; ", parts)
         }
         _ => String::new(),
+    }
+}
+
+/// The if-chain condition and destructuring statements of one alternative,
+/// nested patterns included: each nested level adds a `<path>.kind` test to
+/// the condition and destructures its plain bindings from that path. tsc
+/// narrows every path through the condition chain, so the destructurings
+/// need no type tricks. For an alternative without nested patterns this is
+/// exactly the old `kind === "Tag"` + [`bind_str`] pair.
+fn pattern_conds_binds(alt: &TagPattern, root: &str) -> (String, String) {
+    let mut conds = vec![format!("{root}.kind === \"{}\"", alt.tag)];
+    let mut binds = String::new();
+    collect_conds_binds(
+        alt.bindings.as_deref().unwrap_or_default(),
+        root,
+        &mut conds,
+        &mut binds,
+    );
+    (conds.join(" && "), binds)
+}
+
+fn collect_conds_binds(
+    bindings: &[Binding],
+    root: &str,
+    conds: &mut Vec<String>,
+    binds: &mut String,
+) {
+    let plain: Vec<String> = bindings
+        .iter()
+        .filter(|b| b.nested.is_none())
+        .map(|b| match &b.alias {
+            Some(alias) => format!("{}: {}", b.name, alias),
+            None => b.name.clone(),
+        })
+        .collect();
+    if !plain.is_empty() {
+        binds.push_str(&format!("const {{ {} }} = {root}; ", plain.join(", ")));
+    }
+    for b in bindings {
+        if let Some(inner) = &b.nested {
+            let path = format!("{root}.{}", b.name);
+            conds.push(format!("{path}.kind === \"{}\"", inner.tag));
+            collect_conds_binds(
+                inner.bindings.as_deref().unwrap_or_default(),
+                &path,
+                conds,
+                binds,
+            );
+        }
     }
 }
 
@@ -200,17 +267,21 @@ pub(super) fn emit_tuple_match(e: &Emitter, expr: &TupleMatchExpr) -> String {
                 for (i, elem) in elems.iter().enumerate() {
                     let var = format!("$rl_m{i}");
                     if let Pattern::Tags(alts) = elem {
-                        let cond = alts
-                            .iter()
-                            .map(|t| format!("{var}.kind === \"{}\"", t.tag))
-                            .collect::<Vec<_>>()
-                            .join(" || ");
-                        conds.push(if alts.len() > 1 {
-                            format!("({cond})")
+                        if alts.len() == 1 {
+                            let (cond, b) = pattern_conds_binds(&alts[0], &var);
+                            conds.push(cond);
+                            bind.push_str(&b);
                         } else {
-                            cond
-                        });
-                        bind.push_str(&bind_str_from(&alts[0].bindings, &var));
+                            // or-pattern element: shared bindings, never
+                            // nested (sema)
+                            let cond = alts
+                                .iter()
+                                .map(|t| format!("{var}.kind === \"{}\"", t.tag))
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            conds.push(format!("({cond})"));
+                            bind.push_str(&bind_str_from(&alts[0].bindings, &var));
+                        }
                     }
                 }
                 if conds.is_empty() {
@@ -297,12 +368,17 @@ fn emit_if_chain(e: &Emitter, expr: &MatchExpr) -> String {
 
         match &arm.pattern {
             Pattern::Tags(alts) => {
-                let cond = alts
-                    .iter()
-                    .map(|t| format!("$rl_m.kind === \"{}\"", t.tag))
-                    .collect::<Vec<_>>()
-                    .join(" || ");
-                let bind = bind_str(&alts[0].bindings);
+                let (cond, bind) = if alts.len() == 1 {
+                    pattern_conds_binds(&alts[0], "$rl_m")
+                } else {
+                    // or-pattern: shared bindings, never nested (sema)
+                    let cond = alts
+                        .iter()
+                        .map(|t| format!("$rl_m.kind === \"{}\"", t.tag))
+                        .collect::<Vec<_>>()
+                        .join(" || ");
+                    (cond, bind_str(&alts[0].bindings))
+                };
                 out.push_str(&format!("  if ({}) {{ {}{} }}\n", cond, bind, exit));
             }
             Pattern::Wildcard => {

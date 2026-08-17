@@ -348,11 +348,10 @@ fn parse_tag_pattern(cur: &mut Cursor) -> Option<TagPattern> {
     if cur.at_punct(b'(') {
         let open = cur.idx;
         let close = cur.find_close()?;
-        bindings = Some(parse_bindings(cur.sub(
-            open + 1,
-            close,
-            cur.tokens[close].span.start,
-        ))?);
+        bindings = Some(parse_bindings(
+            cur.sub(open + 1, close, cur.tokens[close].span.start),
+            true,
+        )?);
         cur.idx = close + 1;
     }
     Some(TagPattern {
@@ -363,8 +362,11 @@ fn parse_tag_pattern(cur: &mut Cursor) -> Option<TagPattern> {
 }
 
 /// Parses `a, b: alias, ...` between the parens of a pattern (shared with
-/// the let-else pattern). None on failure.
-pub(super) fn parse_bindings(mut cur: Cursor) -> Option<Vec<Binding>> {
+/// the let-else pattern). With `allow_nested`, `b: Tag(...)` — an
+/// identifier directly followed by parens — is a nested tag pattern
+/// instead of an alias (match patterns only; let-else keeps aliases only).
+/// None on failure.
+pub(super) fn parse_bindings(mut cur: Cursor, allow_nested: bool) -> Option<Vec<Binding>> {
     let mut bindings = Vec::new();
     loop {
         if cur.peek().is_none() {
@@ -376,16 +378,31 @@ pub(super) fn parse_bindings(mut cur: Cursor) -> Option<Vec<Binding>> {
         }
 
         let mut alias = None;
+        let mut nested = None;
         if cur.eat_punct(b':').is_some() {
-            let (alias_name, _) = cur.eat_ident()?;
-            if is_reserved(alias_name) {
+            let (rhs, rhs_span) = cur.eat_ident()?;
+            if is_reserved(rhs) {
                 return None;
             }
-            alias = Some(alias_name.to_string());
+            if allow_nested && cur.at_punct(b'(') {
+                let open = cur.idx;
+                let close = cur.find_close()?;
+                let inner =
+                    parse_bindings(cur.sub(open + 1, close, cur.tokens[close].span.start), true)?;
+                cur.idx = close + 1;
+                nested = Some(TagPattern {
+                    tag: rhs.to_string(),
+                    tag_off: rhs_span.start,
+                    bindings: Some(inner),
+                });
+            } else {
+                alias = Some(rhs.to_string());
+            }
         }
         bindings.push(Binding {
             name: name.to_string(),
             alias,
+            nested,
         });
 
         if cur.peek().is_none() {

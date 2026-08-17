@@ -313,11 +313,20 @@ pub(crate) struct TagPattern {
     pub bindings: Option<Vec<Binding>>,
 }
 
-/// One binding inside a pattern's parens: `name` or `name: alias`.
+/// One binding inside a pattern's parens: `name`, `name: alias`, or —
+/// in match patterns only — a nested tag pattern `name: Tag(...)`. The
+/// nested form always carries parens (`name: None()` for a unit case), so
+/// a plain `name: alias` never changes meaning. `alias` and `nested` are
+/// mutually exclusive.
 #[derive(Debug)]
 pub(crate) struct Binding {
     pub name: String,
     pub alias: Option<String>,
+    /// `name: Tag(...)` — match the field's value against a nested tag
+    /// pattern instead of binding the field. Mismatch falls through to the
+    /// next arm, like a failing guard. (Recursion bottoms out through the
+    /// `Vec` inside [`TagPattern`].)
+    pub nested: Option<TagPattern>,
 }
 
 /// A template literal split into raw text and recursively parsed

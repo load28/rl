@@ -36,6 +36,8 @@ enum E { A(x: number]) }
 | ``match: the wildcard arm `_` must be the last arm`` | `_` 뒤의 암은 도달 불가능. `_`를 마지막으로 옮깁니다 |
 | `match: duplicate arm "<태그>"` | **무가드 암이 이미 덮은 태그**가 다시 나옴 — `A \| A`, `A \| B => .., B => ..`, `A => .., A if c => ..`. 가드 암끼리의 반복은 에러가 아닙니다. 위치는 두 번째 태그 |
 | `match: or-pattern alternatives must bind the same fields` | 대안들이 하나의 구조 분해를 공유하므로 같은 (필드, 이름) 집합을 바인딩해야 합니다. `A(x) \| B(x)`·`A(x, y) \| B(y, x)`는 되고 `A(x) \| B(y)`·`A \| B(x)`는 안 됩니다 |
+| `match: nested patterns cannot be combined with or-patterns` | 중첩 패턴(`Tag(field: Inner(...))`)은 대안별 경로 조건이 필요해 공유 구조 분해와 양립하지 않습니다. 암을 나눕니다 |
+| `` match: binding `<이름>` is used more than once in this pattern (rename one with `field: alias`) `` | 한 패턴(중첩 포함)이 같은 이름을 두 번 바인딩 — 한 스코프에 두 번 선언됩니다. 별칭으로 바꿉니다 |
 
 ### 소진성
 
@@ -55,9 +57,9 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 | import한 exported enum | `match on enum <이름> (imported from "<지정자>") is not exhaustive: ...` |
 | 내장 `Option`/`Result` | `match on built-in enum <이름> is not exhaustive: ...` |
 
-**가드 암은 케이스를 커버하지 못합니다** — 그 태그를 덮으려면 무가드 암이 따로
-필요합니다. 손으로 쓴 유니언이나 해석되지 않는 import의 enum은 이 검사를 받지
-않고 런타임 가드만 남습니다
+**가드 암과 중첩 패턴 암은 케이스를 커버하지 못합니다** — 그 태그를 덮으려면
+무가드·무중첩 암이 따로 필요합니다. 손으로 쓴 유니언이나 해석되지 않는
+import의 enum은 이 검사를 받지 않고 런타임 가드만 남습니다
 ([`language.md` §3.6](./language.md#36-소진성-검사)).
 
 튜플 match는 곱집합으로 검사하고 빠진 **조합**을 보고합니다 (5개 이상이면

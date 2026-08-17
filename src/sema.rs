@@ -106,15 +106,38 @@ struct Checker<'a> {
 
 /// The (field, bound name) pairs a tag alternative destructures, sorted so
 /// alternatives compare as sets. No parens and empty parens both bind nothing.
+/// Nested patterns never reach this (they are rejected inside or-patterns).
 fn binding_set(bindings: &Option<Vec<Binding>>) -> Vec<(&str, &str)> {
     let mut set: Vec<(&str, &str)> = bindings
         .as_deref()
         .unwrap_or_default()
         .iter()
+        .filter(|b| b.nested.is_none())
         .map(|b| (b.name.as_str(), b.alias.as_deref().unwrap_or(&b.name)))
         .collect();
     set.sort_unstable();
     set
+}
+
+/// True when the alternative carries a nested pattern (any depth starts
+/// with one at the first binding level).
+fn has_nested(alt: &TagPattern) -> bool {
+    alt.bindings
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|b| b.nested.is_some())
+}
+
+/// Collects every variable name the alternative binds, nested patterns
+/// included, in source order.
+fn leaf_bindings<'a>(alt: &'a TagPattern, out: &mut Vec<&'a str>) {
+    for b in alt.bindings.as_deref().unwrap_or_default() {
+        match &b.nested {
+            Some(inner) => leaf_bindings(inner, out),
+            None => out.push(b.alias.as_deref().unwrap_or(&b.name)),
+        }
+    }
 }
 
 impl Checker<'_> {
@@ -231,6 +254,24 @@ impl Checker<'_> {
         Ok(())
     }
 
+    /// Bound names must be unique within one pattern — they all land in the
+    /// same scope, so a duplicate would emit two `const`s of one name.
+    fn check_leaf_bindings(&self, alt: &TagPattern) -> Result<(), RlError> {
+        let mut leaves = Vec::new();
+        leaf_bindings(alt, &mut leaves);
+        for (i, name) in leaves.iter().enumerate() {
+            if leaves[..i].contains(name) {
+                return Err(RlError::at(
+                    alt.tag_off,
+                    format!(
+                        "match: binding `{name}` is used more than once in this pattern (rename one with `field: alias`)"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn check_match(&mut self, expr: &MatchExpr) -> Result<(), RlError> {
         // Tags covered by an unguarded arm. Any later arm repeating one of
         // these is unreachable (duplicate); a guarded arm covers nothing, so
@@ -249,7 +290,17 @@ impl Checker<'_> {
                 Pattern::Tags(alts) => {
                     // Codegen emits one destructuring shared by every
                     // alternative (switch fallthrough), so all alternatives
-                    // must bind the exact same (field, name) set.
+                    // must bind the exact same (field, name) set — which is
+                    // also why a nested pattern (per-alternative conditions
+                    // and paths) cannot appear inside an or-pattern.
+                    if alts.len() > 1 && alts.iter().any(has_nested) {
+                        return Err(RlError::at(
+                            alts.iter().find(|a| has_nested(a)).unwrap().tag_off,
+                            "match: nested patterns cannot be combined with or-patterns"
+                                .to_string(),
+                        ));
+                    }
+                    self.check_leaf_bindings(&alts[0])?;
                     let first_set = binding_set(&alts[0].bindings);
                     let mut arm_tags: Vec<&str> = Vec::new();
                     for alt in alts {
@@ -270,7 +321,9 @@ impl Checker<'_> {
                             ));
                         }
                     }
-                    if arm.guard.is_none() {
+                    // A nested pattern may mismatch, so — like a guard —
+                    // the arm identifies the enum but covers nothing.
+                    if arm.guard.is_none() && !alts.iter().any(has_nested) {
                         covered.append(&mut arm_tags);
                     }
                 }
@@ -282,10 +335,14 @@ impl Checker<'_> {
             .iter()
             .any(|a| matches!(a.pattern, Pattern::Wildcard))
         {
-            let arm_tags = |guarded_too: bool| {
+            let arm_tags = |covering_only: bool| {
                 expr.arms
                     .iter()
-                    .filter(|a| guarded_too || a.guard.is_none())
+                    .filter(|a| {
+                        !covering_only
+                            || (a.guard.is_none()
+                                && !matches!(&a.pattern, Pattern::Tags(alts) if alts.iter().any(has_nested)))
+                    })
                     .flat_map(|a| match &a.pattern {
                         Pattern::Tags(alts) => {
                             alts.iter().map(|t| t.tag.clone()).collect::<Vec<_>>()
@@ -296,8 +353,8 @@ impl Checker<'_> {
             };
             self.match_checks.push(MatchCheck {
                 offset: expr.keyword_off,
-                tags: arm_tags(true),
-                covered: arm_tags(false),
+                tags: arm_tags(false),
+                covered: arm_tags(true),
             });
         }
 
@@ -338,11 +395,19 @@ impl Checker<'_> {
                         ));
                     }
                     // Every element's or-alternatives share one
-                    // destructuring; bound names must also be unique across
-                    // the whole tuple pattern (they land in one scope).
+                    // destructuring (hence no nested patterns in them);
+                    // bound names must also be unique across the whole
+                    // tuple pattern (they land in one scope).
                     let mut bound: Vec<&str> = Vec::new();
                     for elem in elems {
                         let Pattern::Tags(alts) = elem else { continue };
+                        if alts.len() > 1 && alts.iter().any(has_nested) {
+                            return Err(RlError::at(
+                                alts.iter().find(|a| has_nested(a)).unwrap().tag_off,
+                                "match: nested patterns cannot be combined with or-patterns"
+                                    .to_string(),
+                            ));
+                        }
                         let first_set = binding_set(&alts[0].bindings);
                         for alt in alts {
                             if binding_set(&alt.bindings) != first_set {
@@ -353,7 +418,9 @@ impl Checker<'_> {
                                 ));
                             }
                         }
-                        for (_, name) in first_set {
+                        let mut leaves = Vec::new();
+                        leaf_bindings(&alts[0], &mut leaves);
+                        for name in leaves {
                             if bound.contains(&name) {
                                 return Err(RlError::at(
                                     alts[0].tag_off,
@@ -391,7 +458,12 @@ impl Checker<'_> {
                         }
                     }
                 }
-                if arm.guard.is_none() {
+                // Like a guard, a nested pattern may mismatch — the arm
+                // then covers nothing.
+                let nested = elems
+                    .iter()
+                    .any(|e| matches!(e, Pattern::Tags(alts) if alts.iter().any(has_nested)));
+                if arm.guard.is_none() && !nested {
                     covered.push(row);
                 }
             }

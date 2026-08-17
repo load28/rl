@@ -1490,3 +1490,169 @@ const r = match (x, y, z) {
 "#);
     assert!(e.message.contains("missing (F, F, F)"), "{}", e.message);
 }
+
+/* ------------------------------------------------------------------ */
+/* nested patterns                                                     */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn nested_pattern_emits_path_conditions_and_binds() {
+    let out = ok(r#"
+const n = match (r) {
+  Ok(value: Some(value: v)) => v,
+  Ok(value: None()) => 0,
+  _ => -1,
+};
+"#);
+    assert!(
+        out.contains("if ($rl_m.kind === \"Ok\" && $rl_m.value.kind === \"Some\") { const { value: v } = $rl_m.value; return (v); }"),
+        "{out}"
+    );
+    assert!(
+        out.contains("if ($rl_m.kind === \"Ok\" && $rl_m.value.kind === \"None\") { return (0); }"),
+        "{out}"
+    );
+    // nested patterns force the if-chain form
+    assert!(!out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn nested_pattern_two_levels_deep() {
+    let out = ok(r#"
+const n = match (r) {
+  Ok(value: Some(value: Pair(a, b))) => a + b,
+  _ => 0,
+};
+"#);
+    assert!(
+        out.contains("$rl_m.kind === \"Ok\" && $rl_m.value.kind === \"Some\" && $rl_m.value.value.kind === \"Pair\""),
+        "{out}"
+    );
+    assert!(out.contains("const { a, b } = $rl_m.value.value;"), "{out}");
+}
+
+#[test]
+fn nested_pattern_mixes_plain_bindings_at_each_level() {
+    let out = ok(r#"
+const n = match (r) {
+  Both(left, right: Some(value)) => left + value,
+  _ => 0,
+};
+"#);
+    assert!(
+        out.contains(
+            "{ const { left } = $rl_m; const { value } = $rl_m.right; return (left + value); }"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn plain_alias_is_still_an_alias_not_a_nested_pattern() {
+    // `value: v` (no parens) binds; only `value: Tag(...)` nests. A match
+    // without nested patterns keeps the switch form.
+    let out = ok("const n = match (o) { Some(value: None) => None, _ => 0 };");
+    assert!(out.contains("const { value: None } = $rl_m;"), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn nested_pattern_arm_covers_nothing_for_exhaustiveness() {
+    // Like a guard: the inner tag may mismatch, so `Ok(value: Some(..))`
+    // does not cover Ok.
+    let e = err(r#"
+const n = match (r) {
+  Ok(value: Some(value: v)) => v,
+  Err(error) => 0,
+};
+"#);
+    assert!(
+        e.message
+            .contains("match on built-in enum Result is not exhaustive: missing \"Ok\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn nested_pattern_arm_may_repeat_a_tag() {
+    // Two Ok arms with different inner patterns are not duplicates —
+    // exactly like two guarded arms of one tag.
+    let out = ok(r#"
+const n = match (r) {
+  Ok(value: Some(value: v)) => v,
+  Ok(value) => 0,
+  Err(error) => -1,
+};
+"#);
+    assert!(out.contains("$rl_m.value.kind === \"Some\""), "{out}");
+}
+
+#[test]
+fn plain_arm_before_nested_arm_is_a_duplicate() {
+    let e = err("const n = match (r) { Ok(value) => 1, Ok(value: Some(value: v)) => v, _ => 0 };");
+    assert!(e.message.contains("duplicate arm \"Ok\""), "{}", e.message);
+}
+
+#[test]
+fn nested_pattern_inside_or_pattern_is_an_error() {
+    let e = err("const n = match (r) { Ok(value: Some(v)) | Err(error) => 1, _ => 0 };");
+    assert!(
+        e.message
+            .contains("nested patterns cannot be combined with or-patterns"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn duplicate_binding_within_one_pattern_is_an_error() {
+    let e = err("const n = match (r) { Ok(value: Some(value), error: value) => value, _ => 0 };");
+    assert!(
+        e.message.contains("binding `value` is used more than once"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn nested_pattern_in_tuple_match_elements() {
+    let out = ok(r#"
+const n = match (a, b) {
+  (Ok(value: Some(value: x)), Ok(value: Some(value: y))) => x + y,
+  _ => 0,
+};
+"#);
+    assert!(
+        out.contains("$rl_m0.kind === \"Ok\" && $rl_m0.value.kind === \"Some\" && $rl_m1.kind === \"Ok\" && $rl_m1.value.kind === \"Some\""),
+        "{out}"
+    );
+    assert!(
+        out.contains("const { value: x } = $rl_m0.value; const { value: y } = $rl_m1.value;"),
+        "{out}"
+    );
+}
+
+#[test]
+fn nested_pattern_with_guard() {
+    let out = ok(r#"
+const n = match (r) {
+  Ok(value: Some(value: v)) if v > 0 => v,
+  _ => 0,
+};
+"#);
+    assert!(out.contains("if ((v > 0)) return (v);"), "{out}");
+}
+
+#[test]
+fn let_else_does_not_take_nested_patterns() {
+    // `const Some(value: Ok(v)) = ...` is not rl let-else syntax; the
+    // candidate passes through and (being invalid TS) fails the output
+    // self-check — same as any malformed candidate.
+    let e = err("function f() {\n  const Some(value: Ok(v)) = g() else { return; };\n}\n");
+    assert!(
+        e.message.contains("generated TypeScript failed to parse"),
+        "{}",
+        e.message
+    );
+}
