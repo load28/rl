@@ -931,16 +931,6 @@ fn ts_mode_preserves_the_quote_style_and_path() {
 }
 
 #[test]
-fn bare_mode_strips_the_extension() {
-    let opts = Options {
-        rewrite_imports: rlc::ImportRewrite::Bare,
-        ..Options::default()
-    };
-    let out = compile("import { E } from \"./error.rl\";\n", &opts).unwrap();
-    assert_eq!(out, "import { E } from \"./error\";\n");
-}
-
-#[test]
 fn off_mode_leaves_the_specifier_untouched() {
     let opts = Options {
         rewrite_imports: rlc::ImportRewrite::Off,

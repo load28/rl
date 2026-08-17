@@ -330,17 +330,13 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 
 rl은 런타임을 주입하지 않습니다. 대신 `Option<T>`/`Result<T, E>`와 함수형
 콤비네이터(`map`, `andThen`, `unwrapOr`, ...)가 담긴 **순수 TypeScript 모듈
-하나**를 컴파일러가 제공합니다:
-
-```sh
-rlc --emit-std src/rl.ts     # 표준 라이브러리 모듈 생성
-```
-
-생성된 모듈은 일반 TypeScript 파일이므로 평범하게 import해서 씁니다
-(import 문은 통과 영역이라 컴파일러가 건드리지 않습니다):
+하나**를 컴파일러가 제공합니다. 소스에서는 bare 지정자 `@rl/std`로
+import하면, 컴파일할 때 모듈이 출력 트리에 자동으로 실체화되고 지정자가
+그것을 가리키도록 재작성됩니다 ([`cli.md`](./cli.md) "표준 라이브러리 자동
+방출"):
 
 ```rl
-import { Option, Result } from "./rl.js";
+import { Option, Result } from "@rl/std";
 
 const half = (n: number): Option<number> =>
   n % 2 === 0 ? Option.Some(n / 2) : Option.None;
@@ -563,8 +559,7 @@ CLI 플래그(라이브러리에서는 `Options { rewrite_imports }`)로 선택�
 |------|------------------|------|
 | `js` (기본) | `"./error.js"` | `nodenext`(Node ESM — 확장자 필수)와 `bundler`(tsc가 `.js`를 `.ts`에 대응) 모두에서 동작 |
 | `ts` | `"./error.ts"` | tsc가 `.ts` 지정자를 받아 방출 시 `.js`로 바꾸는 설정 (아래 조건) |
-| `bare` | `"./error"` | 확장자 없는 지정자를 선호하는 번들러 설정 |
-| `off` | `"./error.rl"` | 재작성 끔 — 바이트 그대로 통과 |
+| `off` | `"./error.rl"` | 재작성 끔 — 바이트 그대로 통과 (번들러 플러그인이 지정자를 직접 해석할 때) |
 
 `ts` 모드는 소비 측 `tsconfig.json`에 다음 두 옵션이 필요하고 TypeScript
 5.7 이상이어야 합니다. `allowImportingTsExtensions`만 켜면 emit이 막힙니다

@@ -4,10 +4,19 @@ rl 소스를 TypeScript로 컴파일하는 커맨드라인 도구 `rlc`의 사�
 언어 자체는 [`language.md`](./language.md), 진단 메시지는
 [`errors.md`](./errors.md) 참조.
 
+rlc의 정신 모델은 한 문장입니다: **소스 트리를 완결된 TypeScript 트리로
+만든다.** `.rl` 파일은 컴파일되고, 손으로 쓴 `.ts` 파일은 바이트 그대로
+통과하며(상대 경로 `.rl` import 지정자만 재작성), `@rl/std`를 import하면
+표준 라이브러리가 실체화됩니다. 소스는 단독(tsc) 파이프라인이든 번들러
+플러그인이든 **같은 모양**으로 쓰고 — `.ts`에서도 `"./x.rl"`을 그대로
+import합니다 — 타입은 어느 쪽이든 같은 명령 `--types`가 만듭니다. 두 모드의
+차이는 `.rl` 지정자를 런타임에 누가 해석하느냐(방출 시 재작성 vs 플러그인)
+하나뿐입니다.
+
 ## 시놉시스
 
 ```
-rlc [options] <file.rl | dir> ...
+rlc [options] <file | dir> ...
 ```
 
 ## 설치
@@ -19,20 +28,29 @@ cargo build --release        # → target/release/rlc
 
 ## 옵션
 
+사용자용:
+
 | 옵션 | 설명 |
 |------|------|
 | `-o, --out-dir <dir>` | 출력을 `<dir>` 아래에 씁니다 (경로 규칙은 아래). 필요한 중간 디렉터리는 자동 생성됩니다. |
-| `-p, --print` | 파일을 쓰는 대신 컴파일 결과를 stdout으로 출력합니다. |
-| `-w, --watch` | 한 번 컴파일한 뒤 계속 실행하며 바뀐 파일을 다시 컴파일합니다 (아래 "감시 모드"). |
+| `-w, --watch` | 한 번 실행한 뒤 계속 지켜보며 바뀐 파일을 다시 처리합니다 (아래 "감시 모드"). `--types`와도 조합됩니다. |
 | `--check` | 컴파일만 하고 아무것도 쓰지 않습니다 (문법·소진성 검사 용도). |
-| `--emit-std <file>` | 표준 라이브러리 모듈(`Option`/`Result` + 콤비네이터, [`std.md`](./std.md))을 `<file>`에 씁니다. `-`를 주면 stdout으로 출력합니다 (번들러 플러그인용). 입력 없이 단독으로 쓸 수도, 컴파일과 함께 쓸 수도 있습니다. 배너가 붙으며 `--no-banner`로 생략합니다. |
-| `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
-| `--no-verify` | 필드 타입 검사와 생성물 자가 검사를 생략합니다. 검증기가 아직 모르는 최신 TS 문법을 쓴 코드를 위한 탈출구입니다. |
-| `--rewrite-imports <js\|ts\|bare\|off>` | 상대 경로 `.rl` import 지정자의 방출 형태 ([`language.md` §7](./language.md#7-모듈-rl-import-지정자-재작성)): `js`(기본) = `./x.js`, `ts` = `./x.ts`(tsc의 `rewriteRelativeImportExtensions` 필요), `bare` = `./x`, `off` = 재작성 끔. 그 외 값은 에러입니다. |
-| `--sidecar <dir>` | 컴파일하지 않고 `<이름>.rl.d.ts`와 `.map`을 씁니다. 선언 본문은 `<dir>/<이름>.d.ts`(tsc `--emitDeclarationOnly` 산출물)에서 가져오고, 출력 위치는 `-o`가 없으면 입력 옆, 있으면 그 트리입니다 (아래 "에디터 사이드카"). |
-| `--symbols` | 컴파일하지 않고 각 입력 파일의 rl enum 선언(위치 포함)과 직접 `.rl` import를 JSON으로 stdout에 출력합니다 (아래 "심볼 출력"). 언어 도구용. |
+| `--types` | 빌드 대신 **타입 사이드카**를 만듭니다: 트리를 `.rl-build/`로 컴파일하고, tsc `--emitDeclarationOnly`를 실행하고, `<이름>.rl.d.ts`(+`.map`)를 `-o`(기본 `.rl-types/`) 아래에 씁니다 (아래 "타입 생성"). |
+| `--tsc <path>` | `--types`가 실행할 tsc 바이너리. 기본 탐색은 `node_modules/.bin/tsc` → PATH의 `tsc`. |
 | `-h, --help` | 도움말을 출력하고 종료합니다 (종료 코드 0). |
 | `-v, --version` | 버전만 출력하고 종료합니다 (종료 코드 0). |
+
+도구용 (번들러 플러그인·에디터가 호출합니다 — 직접 쓸 일은 드뭅니다):
+
+| 옵션 | 설명 |
+|------|------|
+| `-p, --print` | 파일을 쓰는 대신 컴파일 결과를 stdout으로 출력합니다. |
+| `--emit-std` | 표준 라이브러리 모듈([`std.md`](./std.md))을 stdout으로 출력하고 종료합니다. 번들러 플러그인이 `@rl/std`를 가상 모듈로 서빙할 때 씁니다 — 빌드는 자동 방출(아래)이 대신하므로 입력과 조합되지 않습니다. |
+| `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
+| `--no-verify` | 필드 타입 검사와 생성물 자가 검사를 생략합니다. 검증기가 아직 모르는 최신 TS 문법을 쓴 코드를 위한 탈출구입니다. |
+| `--rewrite-imports <js\|ts\|off>` | 상대 경로 `.rl` import 지정자의 방출 형태 ([`language.md` §7](./language.md#7-모듈-rl-import-지정자-재작성)): `js`(기본) = `./x.js`, `ts` = `./x.ts`(tsc의 `rewriteRelativeImportExtensions` 필요), `off` = 재작성 끔 (번들러 플러그인이 지정자를 직접 해석할 때). 그 외 값은 에러입니다. |
+| `--sidecar <dir>` | 컴파일하지 않고 `<이름>.rl.d.ts`와 `.map`을 씁니다. 선언 본문은 `<dir>/<이름>.d.ts`(tsc `--emitDeclarationOnly` 산출물)에서 가져옵니다. `--types`가 이 단계를 대신 실행해 주므로 저수준 훅입니다 (VSCode 확장이 씁니다). |
+| `--symbols` | 컴파일하지 않고 각 입력 파일의 rl enum 선언(위치 포함)과 직접 `.rl` import를 JSON으로 stdout에 출력합니다 (아래 "심볼 출력"). 언어 도구용. |
 
 - 옵션과 입력 인자는 순서 무관하게 섞어 쓸 수 있습니다.
 - `-`로 시작하는 알 수 없는 인자는 에러입니다 (`rlc: unknown option ...`).
@@ -44,10 +62,21 @@ cargo build --release        # → target/release/rlc
 
 - **파일**이면 확장자와 무관하게 컴파일 대상에 추가됩니다.
   (`.rl`이 아닌 파일도 명시적으로 지정하면 컴파일을 시도합니다.)
-- **디렉터리**면 재귀적으로 순회하며 **확장자가 `.rl`인 파일만** 수집합니다.
-  하위 디렉터리 포함, 항목은 경로 기준 정렬 순서로 처리됩니다.
+- **디렉터리**면 재귀적으로 순회하며 **`.rl` 파일과, 컴파일 계열
+  모드(빌드/`--check`/`--types`)에서는 손으로 쓴 TypeScript
+  (`.ts`/`.mts`/`.cts`)까지** 수집합니다 — 출력 트리가 그 자체로 완결되도록.
+  도구 모드(`--symbols`/`--sidecar`)는 `.rl`만 수집합니다. 항목은 경로 기준
+  정렬 순서로 처리됩니다.
+- 이름이 `.`으로 시작하는 디렉터리(`.git`, `.rl-build`, `.rl-types`, ...)와
+  `node_modules`는 순회하지 않습니다 — 생성물이나 벤더 코드는 소스가
+  아닙니다.
 - 존재하지 않는 경로는 즉시 에러이며 컴파일을 시작하지 않습니다.
-- 수집 결과가 비어 있으면 `rlc: no .rl files found` 에러입니다.
+- 수집 결과가 비어 있으면 `rlc: no sources found` 에러입니다.
+
+수집된 `.ts` 파일은 통과 계약 그대로 **바이트 단위로 통과**하며, 상대 경로
+`.rl` import 지정자(그리고 `@rl/std`)만 재작성됩니다 — 손으로 쓴 `.ts`도
+소스에서는 `"./x.rl"`을 import하고, 방출 트리에서는 그것이 컴파일된 이웃을
+가리키게 됩니다.
 
 컴파일할 때 각 파일의 **직접 상대 경로 `.rl` import**를 추가로 읽어 enum
 선언을 수집합니다 — import한 enum의 match 소진성 검사용입니다
@@ -59,12 +88,72 @@ cargo build --release        # → target/release/rlc
 
 | 상황 | 출력 위치 |
 |------|-----------|
-| 기본 (`-o` 없음) | 입력 파일 옆에 같은 이름의 `.ts` (`src/a.rl` → `src/a.ts`) |
-| `-o out/` + 파일 입력 | `out/<파일명>.ts` (`rlc -o out src/a.rl` → `out/a.ts`) |
+| 기본 (`-o` 없음) | 입력 파일 옆 (`src/a.rl` → `src/a.ts`) |
+| `-o out/` + 파일 입력 | `out/<파일명>` (`rlc -o out src/a.rl` → `out/a.ts`) |
 | `-o out/` + 디렉터리 입력 | 입력 디렉터리 기준 상대 경로를 `out/` 아래에 미러 (`rlc -o out src/`에서 `src/x/b.rl` → `out/x/b.ts`) |
 
-기존 파일은 덮어씁니다. `-p`가 있으면 파일을 쓰지 않고, `--check`면 아무
-출력도 만들지 않습니다.
+`.rl`은 같은 이름의 `.ts`가 되고, 통과하는 `.ts`는 이름을 그대로
+유지합니다. 기존 파일은 덮어쓰지만, **출력이 입력 파일 자신이 되는 경우**
+(예: `-o` 없이 `.ts`를 통과시키는 경우 — 지정자가 재작성된 채 소스를
+덮어쓰게 됩니다)는 파일 단위 에러로 거부합니다:
+
+```
+rlc: src/main.ts: output would overwrite the input — pass -o <dir>
+```
+
+`-p`가 있으면 파일을 쓰지 않고, `--check`면 아무 출력도 만들지 않습니다.
+
+## 타입 생성 (`--types`)
+
+`.ts` 파일이 `"./x.rl"`이나 `"@rl/std"`를 import하면 tsserver/tsc는 그
+지정자를 몰라 `TS2307`을 냅니다. `--types` 한 명령이 그 간극을 메우는
+선언들을 만듭니다 — 단독(tsc) 파이프라인이든 번들러 플러그인이든 타입은
+이 명령 하나로 동일하게 나옵니다.
+
+```sh
+rlc --types src/          # → .rl-types/<이름>.rl.d.ts (+ .map, rl.d.ts)
+rlc --types -w src/       # 감시하며 계속 갱신
+```
+
+내부적으로 세 단계를 실행합니다:
+
+1. 트리 전체(`.rl` + 통과 `.ts`)를 캐시 트리 `.rl-build/`로 컴파일합니다.
+   지정자는 **소스 그대로**(`off`) 둡니다 — 선언 방출은 지정자를 보존하므로,
+   그래야 사이드카가 소비 측에서 그대로 해석되는 지정자를 담습니다. 캐시
+   안에서의 해석은 rlc가 합성하는 `tsconfig.json`이 맡습니다
+   (`allowArbitraryExtensions` + 모듈별 `<이름>.d.rl.ts` 심,
+   `paths`의 `@rl/std` 매핑).
+2. tsc를 `--emitDeclarationOnly`로 실행합니다 (`--tsc` → 프로젝트의
+   `node_modules/.bin/tsc` → PATH 순으로 탐색; 없으면
+   `rlc: tsc not found ...` 에러). tsc가 타입 에러를 보고하면 그대로
+   중계하고 종료 코드 1이 되지만, 선언은 그래도 방출되므로 사이드카는
+   갱신됩니다.
+3. 각 `.rl` 입력의 선언을 에디터 사이드카(`<이름>.rl.d.ts` + `.map`)로
+   바꿔 `-o`(기본 `.rl-types/`) 아래에 입력 구조를 미러하며 씁니다.
+   `@rl/std`를 쓰면 그 선언도 `rl.d.ts`로 함께 나옵니다.
+
+소비 측 `tsconfig.json`은 두 가지만 선언하면 됩니다 — 사이드카 트리를
+소스와 합치는 `rootDirs`, 표준 라이브러리를 매핑하는 `paths`:
+
+```jsonc
+{
+  "compilerOptions": {
+    "rootDirs": ["./src", "./.rl-types"],
+    "paths": { "@rl/std": ["./.rl-types/rl.d.ts"] }
+  }
+}
+```
+
+이러면 소스 트리에서 `tsc --noEmit`이 그대로 동작하고, 에디터의 자동완성·
+타입·정의 이동(맵의 `sources`가 원본 `.rl`을 가리킵니다)이 살아납니다.
+`.rl-build/`와 `.rl-types/`는 생성물이므로 gitignore에 넣으세요.
+
+두 파일의 역할:
+
+| 파일 | 역할 |
+|------|------|
+| `<이름>.rl.d.ts` | tsserver/tsc가 `"./<이름>.rl"`을 해결하는 근거 — 에러가 사라지고 자동완성·타입이 살아납니다 |
+| `<이름>.rl.d.ts.map` | `sources`가 원본 `.rl` — **정의 이동이 `.d.ts`가 아니라 원본으로** 갑니다 |
 
 ## 심볼 출력 (`--symbols`)
 
@@ -115,9 +204,10 @@ rlc: src/deep/nested.rl → build/deep/nested.ts   # "../rl.js"
 
 - 위치는 `-o` 디렉터리(없으면 출력들의 공통 상위)이고 파일 이름은 `rl.ts`입니다.
 - 지정자의 형태는 `--rewrite-imports`를 따릅니다: `js`(기본) → `./rl.js`,
-  `ts` → `./rl.ts`, `bare` → `./rl`, `off` → `@rl/std` 그대로.
+  `ts` → `./rl.ts`, `off` → `@rl/std` 그대로.
 - `off`로 두는 것은 번들러 플러그인이 이 지정자를 직접 해석할 때입니다
-  ([`integrations/vite`](../../integrations/vite/README.md)).
+  ([`integrations/vite`](../../integrations/vite/README.md)) — 플러그인은
+  `--emit-std`(stdout)로 모듈 본문을 받아 가상 모듈로 서빙합니다.
 
 ## 감시 모드 (`-w`)
 
@@ -126,6 +216,7 @@ rlc: src/deep/nested.rl → build/deep/nested.ts   # "../rl.js"
 ```sh
 rlc -w -o build src/          # 바뀔 때마다 다시 컴파일
 rlc -w --check src/           # 쓰지 않고 검사만 (tsc --noEmit --watch에 해당)
+rlc -w --types src/           # 사이드카를 계속 갱신 (변경 시 파이프라인 재실행)
 ```
 
 - 입력은 매 회차 다시 수집하므로, 감시 중인 디렉터리에 **새로 생긴 `.rl`도**
@@ -146,45 +237,23 @@ rlc: 2 file(s) failed — watching
 파일 시스템에서도 동작합니다. `--symbols`·`--sidecar`처럼 컴파일하지 않는
 모드와는 조합되지 않습니다.
 
-## 에디터 사이드카 (`--sidecar`)
+## 에디터 사이드카 (`--sidecar`, 저수준)
 
-`.ts` 파일이 `"./notice.rl"`을 import하면 tsserver가 확장자를 몰라
-`TS2307`을 냅니다. TypeScript의 탈출구는 그 에러 메시지에 있습니다 —
-"or its corresponding type declarations". `.rl` 옆에 선언 파일을 두면
-해결됩니다.
-
-```sh
-tsc -p tsconfig.types.json          # rlc 출력에서 선언만 뽑아 types/에
-rlc --sidecar types src/notice.rl   # src/notice.rl.d.ts + .map 생성
-```
-
-`-o`를 함께 주면 사이드카를 **별도 트리**에 씁니다 (입력 구조를 미러합니다).
-소스 트리에 생성물을 남기지 않는 쪽이 에디터와 무관하게 깔끔합니다.
+`--types`의 마지막 단계를 따로 실행하는 저수준 훅입니다 — 일반 사용은
+`--types`로 충분하고, 이 옵션은 선언 방출을 자체적으로 수행하는 도구
+(VSCode 확장의 저장 시 갱신)가 씁니다.
 
 ```sh
+rlc --sidecar types src/notice.rl                # src/notice.rl.d.ts + .map
 rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
 ```
 
-이때 소비 측 `tsconfig.json`에 **`rootDirs`**를 두어 두 디렉터리를 하나로
-합쳐야 `"./notice.rl"`이 해석됩니다. 맵의 `sources`는 rlc가 사이드카 위치
-기준 상대 경로(`../src/notice.rl`)로 적어 주므로 정의 이동은 그대로
-원본으로 갑니다.
-
-```jsonc
-// src/tsconfig.json
-"rootDirs": [".", "../.rl-types"]
-```
-
-두 파일이 생깁니다.
-
-| 파일 | 역할 |
-|------|------|
-| `<이름>.rl.d.ts` | tsserver가 `"./<이름>.rl"`을 해결하는 근거 — 에러가 사라지고 자동완성·타입이 살아납니다 |
-| `<이름>.rl.d.ts.map` | `sources`가 원본 `.rl` — **정의 이동이 `.d.ts`가 아니라 원본으로** 갑니다 |
-
-선언 본문에는 타입 추론이 필요하므로 tsc가 만들고(`--emitDeclarationOnly`),
-rlc는 그 선언들이 원본 `.rl`의 어디에서 왔는지만 채웁니다. rl `enum`의
-위치는 파싱 결과에서 정확히 가져오고, 통과 영역의 선언은 이름으로 찾습니다.
+선언 본문은 `<dir>/<이름>.d.ts`(tsc `--emitDeclarationOnly` 산출물)에서
+가져오고, rlc는 그 선언들이 원본 `.rl`의 어디에서 왔는지만 맵으로
+채웁니다. rl `enum`의 위치는 파싱 결과에서 정확히 가져오고, 통과 영역의
+선언은 이름으로 찾습니다. `-o`가 없으면 입력 옆에, 있으면 그 트리에(입력
+구조 미러) 씁니다. 맵의 `sources`는 사이드카 위치 기준 상대 경로로 적히므로
+정의 이동은 어느 배치에서든 원본으로 갑니다.
 
 에디터가 선언 맵을 따라가려면 그 `.ts` 파일을 포함하는 `tsconfig.json`이
 있어야 합니다 — 추론 프로젝트로 열리면 맵 추적이 동작하지 않습니다.
@@ -220,23 +289,32 @@ rlc는 그 선언들이 원본 `.rl`의 어디에서 왔는지만 채웁니다. 
 ## 사용 예
 
 ```sh
-rlc file.rl                 # file.ts 생성
-rlc src/                    # src/ 아래 모든 .rl 재귀 컴파일 (제자리)
-rlc -o dist/ src/           # dist/ 아래에 트리 미러
-rlc -p file.rl > out.ts     # stdout으로 출력
+rlc -o build src/           # 소스 트리(.rl + .ts)를 build/ 아래 완결 트리로
+rlc file.rl                 # file.ts 생성 (제자리 — .rl만)
+rlc --types src/            # 타입 사이드카 생성 (.rl-types/)
 rlc --check src/            # CI용: 검사만, 쓰기 없음
+rlc -w -o build src/        # 감시하며 다시 빌드
+rlc -p file.rl > out.ts     # stdout으로 출력 (도구용)
 rlc --no-verify file.rl     # swc 검증 생략
-rlc --emit-std src/rl.ts    # 표준 라이브러리 모듈 생성
-rlc --rewrite-imports bare src/   # .rl import를 확장자 없이 방출 (번들러용)
-rlc --symbols file.rl             # 심볼 JSON 출력 (언어 도구용)
+rlc --symbols file.rl       # 심볼 JSON 출력 (언어 도구용)
 ```
 
-빌드 파이프라인에서는 tsc 앞 단계로 실행합니다 (표준 라이브러리를 쓴다면
-모듈 생성을 앞에 둡니다):
+두 모드, 한 파이프라인:
 
 ```jsonc
-// package.json
-{ "scripts": { "build": "rlc --emit-std src/rl.ts && rlc src/ && tsc" } }
+// 단독 (tsc) — rlc가 완결 트리를 만들고 tsc가 JS/타입검사를 맡습니다
+{ "scripts": {
+    "build": "rlc -o build src && tsc",
+    "types": "rlc --types src",
+    "check": "rlc --check src && tsc --noEmit" } }
 ```
 
-`--emit-std` 성공 시 stderr에 `rlc: std → <파일>` 진행 로그가 출력됩니다.
+```jsonc
+// 번들러 (vite) — 플러그인이 같은 컴파일러를 모듈 단위로 호출합니다
+{ "scripts": {
+    "build": "vite build",
+    "types": "rlc --types src" } }
+```
+
+소스도, 타입을 만드는 명령도 두 모드에서 동일합니다 — 다른 것은 `.rl`
+지정자를 런타임에 해석하는 주체(방출 시 재작성 vs 플러그인)뿐입니다.

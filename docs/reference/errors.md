@@ -172,10 +172,14 @@ function f(): number {
 | 메시지 | 원인 / 해결 |
 |--------|-------------|
 | `rlc: --out-dir requires a value` | `-o`/`--out-dir` 뒤에 디렉터리가 없음. |
-| `rlc: --emit-std requires a value` | `--emit-std` 뒤에 출력 파일 경로가 없음. |
+| `rlc: --tsc requires a path to the tsc binary` | `--tsc` 뒤에 경로가 없음. |
+| `rlc: --emit-std takes no inputs (...)` | `--emit-std`는 stdout 전용 단독 모드 — 빌드에서는 `@rl/std` 자동 방출이 대신합니다. |
+| `rlc: --types does not combine with -p, --check, --symbols, or --sidecar` | `--types`는 자체 파이프라인 — 다른 모드와 조합 불가 (`-w`는 가능). |
 | `rlc: unknown option <옵션>` | 알 수 없는 `-` 시작 인자. `rlc -h`로 옵션 확인. |
 | `rlc: no such file or directory: <경로>` | 입력 경로가 존재하지 않음. |
-| `rlc: no .rl files found` | 입력 디렉터리에 `.rl` 파일이 하나도 없음. |
+| `rlc: no sources found` | 입력에서 컴파일할 파일을 하나도 찾지 못함. |
+| `rlc: <경로>: output would overwrite the input — pass -o <dir>` | 통과 `.ts`를 제자리 컴파일하면 소스를 덮어쓰게 되어 거부. `-o`로 출력 트리를 분리. |
+| `rlc: tsc not found — install TypeScript (npm i -D typescript) or pass --tsc <path>` | `--types`가 실행할 tsc를 찾지 못함. |
 | `rlc: <경로>: <OS 에러>` | 파일 읽기/쓰기/디렉터리 생성 실패 (권한, 디스크 등). 해당 파일만 건너뛰고 계속 진행한 뒤 1로 종료. |
 
 인자 에러와 존재하지 않는 경로는 즉시 종료하고, IO 에러는 파일 단위로

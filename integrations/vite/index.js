@@ -59,7 +59,7 @@ export function rl(options = {}) {
 
     async load(id) {
       if (id === stdId()) {
-        const { stdout } = await run(compiler, ["--emit-std", "-", "--no-banner"], {
+        const { stdout } = await run(compiler, ["--emit-std", "--no-banner"], {
           maxBuffer: 16 * 1024 * 1024,
         });
         return { code: stdout, map: null };
