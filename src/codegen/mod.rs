@@ -92,6 +92,9 @@ impl Emitter<'_> {
                 Segment::LetElse(stmt) => {
                     out.extend_from_slice(self.emit_let_else(stmt).as_bytes());
                 }
+                Segment::IfLet(stmt) => {
+                    out.extend_from_slice(self.emit_if_let(stmt).as_bytes());
+                }
                 Segment::Pipe(pipe) => out.extend_from_slice(self.emit_pipe(pipe).as_bytes()),
                 Segment::RlImport(decl) => self.emit_rl_import(decl.spec, decl.kind, &mut out),
                 Segment::Template(template) => self.emit_template(template, &mut out),
@@ -153,6 +156,38 @@ impl Emitter<'_> {
                 .join(", ");
             code.push_str(&format!(" {} {{ {} }} = {tmp};", stmt.kw, parts));
         }
+        code
+    }
+
+    /// Emits an `if let` statement as a self-contained block: evaluate
+    /// once into a fresh temporary, test the pattern's path conditions,
+    /// and destructure the bindings inside the then-branch — tsc narrows
+    /// the temporary through the condition, so no type tricks. The whole
+    /// thing is a block statement (no IIFE, no `return` of its own), which
+    /// is why it is valid in any statement position.
+    fn emit_if_let(&self, stmt: &IfLetStmt) -> String {
+        let n = self.try_seq.get();
+        self.try_seq.set(n + 1);
+        let tmp = format!("$rl_t{n}");
+        let expr = self.emit_program(&stmt.expr);
+        let expr = expr.trim();
+        let (cond, binds) = matches::pattern_conds_binds(&stmt.pattern, &tmp);
+        let body = self.emit_program(&stmt.body);
+        let body = guard_line_comment(body.trim());
+        let mut code = format!("{{ const {tmp} = ({expr}); if ({cond}) {{ {binds}{body} }}");
+        match &stmt.else_part {
+            Some(IfLetElse::Block(block)) => {
+                let block = self.emit_program(block);
+                let block = guard_line_comment(block.trim());
+                code.push_str(&format!(" else {{ {block} }}"));
+            }
+            Some(IfLetElse::IfLet(inner)) => {
+                // the chained statement is itself a block — `else { ... }`
+                code.push_str(&format!(" else {}", self.emit_if_let(inner)));
+            }
+            None => {}
+        }
+        code.push_str(" }");
         code
     }
 

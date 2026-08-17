@@ -93,7 +93,7 @@ fn bind_str_from(bindings: &Option<Vec<Binding>>, var: &str) -> String {
 /// narrows every path through the condition chain, so the destructurings
 /// need no type tricks. For an alternative without nested patterns this is
 /// exactly the old `kind === "Tag"` + [`bind_str`] pair.
-fn pattern_conds_binds(alt: &TagPattern, root: &str) -> (String, String) {
+pub(super) fn pattern_conds_binds(alt: &TagPattern, root: &str) -> (String, String) {
     let mut conds = vec![format!("{root}.kind === \"{}\"", alt.tag)];
     let mut binds = String::new();
     collect_conds_binds(

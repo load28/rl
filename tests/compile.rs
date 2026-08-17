@@ -1656,3 +1656,121 @@ fn let_else_does_not_take_nested_patterns() {
         e.message
     );
 }
+
+/* ------------------------------------------------------------------ */
+/* if let                                                              */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn if_let_emits_a_self_contained_block() {
+    let out =
+        ok("function f() {\n  if let Some(value: user) = find() {\n    greet(user);\n  }\n}\n");
+    assert!(
+        out.contains("{ const $rl_t0 = (find()); if ($rl_t0.kind === \"Some\") { const { value: user } = $rl_t0; greet(user); } }"),
+        "{out}"
+    );
+}
+
+#[test]
+fn if_let_else_block_and_chaining() {
+    let out = ok(r#"
+function f() {
+  if let Some(value) = a() {
+    use1(value);
+  } else if let Ok(value: v) = b() {
+    use2(v);
+  } else {
+    fallback();
+  }
+}
+"#);
+    assert!(
+        out.contains("} else { const $rl_t1 = (b()); if ($rl_t1.kind === \"Ok\")"),
+        "{out}"
+    );
+    assert!(out.contains("else { fallback(); } } }"), "{out}");
+}
+
+#[test]
+fn if_let_takes_nested_patterns() {
+    let out = ok("function f(r: Res) {\n  if let Ok(value: Some(value: v)) = r { use(v); }\n}\n");
+    assert!(
+        out.contains("if ($rl_t0.kind === \"Ok\" && $rl_t0.value.kind === \"Some\") { const { value: v } = $rl_t0.value; use(v); }"),
+        "{out}"
+    );
+}
+
+#[test]
+fn if_let_shares_the_temp_counter_with_try() {
+    let out = ok(
+        "function f(): Result<number, string> {\n  const a = try g();\n  if let Some(value) = h(a) { use(value); }\n  return Result.Ok(a);\n}\n",
+    );
+    assert!(out.contains("$rl_t0"), "{out}");
+    assert!(out.contains("const $rl_t1 = (h(a));"), "{out}");
+}
+
+#[test]
+fn if_let_allowed_in_statement_contexts() {
+    // A match arm's block body and a let-else else block are statement
+    // positions — if let works there.
+    let out = ok(r#"
+function f(x: X, o: O) {
+  const r = match (x) {
+    A => {
+      if let Some(value) = o { return value; }
+      return 0;
+    },
+    _ => 1,
+  };
+  return r;
+}
+"#);
+    assert!(out.contains("if ($rl_t0.kind === \"Some\")"), "{out}");
+}
+
+#[test]
+fn if_let_in_expression_position_is_an_error() {
+    let e = err("const s = `${if let Some(value) = o { 1 }}`;\n");
+    assert!(
+        e.message
+            .contains("`if let` cannot be used in expression position"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn malformed_if_let_is_an_error_with_position() {
+    // `if let` cannot be passed through (never valid TS), so a candidate
+    // that fails to parse is reported instead of failing the self-check.
+    let e = err("function f() {\n  if let Some = o { g(); }\n}\n");
+    assert!(
+        e.message.contains("`if let` could not be parsed here"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 3));
+
+    let e = err("function f() {\n  if let Some(v) = o { g(); } else if (x) { h(); }\n}\n");
+    assert!(
+        e.message.contains("`if let` could not be parsed here"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn if_let_duplicate_binding_is_an_error() {
+    let e = err("function f() {\n  if let Both(a: v, b: v) = o { g(v); }\n}\n");
+    assert!(
+        e.message.contains("binding `v` is used more than once"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn plain_if_statements_pass_through() {
+    let src = "if (x) { a(); } else if (y) { b(); } else { c(); }\nconst z = cond ? 1 : 2;\n";
+    assert_eq!(ok(src), src);
+}

@@ -53,7 +53,8 @@
 | TASK-043 | 파이프라인 연산자 `\|>` 구현 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-043](./TASK-043-pipeline-operator-impl.md) |
 | TASK-044 | 튜플 match — 다중 스크루티니와 곱집합 소진성 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-044](./TASK-044-tuple-match.md) |
 | TASK-045 | 중첩 패턴 — `Ok(value: Some(v))` | 완료 | 2026-08-17 | 2026-08-17 | [TASK-045](./TASK-045-nested-patterns.md) |
+| TASK-046 | `if let` 문 — 조건부 값 추출 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-046](./TASK-046-if-let.md) |
 
 ## 다음 태스크 번호
 
-**TASK-046**
+**TASK-047**

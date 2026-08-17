@@ -87,7 +87,7 @@ pub(crate) fn check(
         match_checks: Vec::new(),
         tuple_checks: Vec::new(),
     };
-    checker.visit_program(program, false)?;
+    checker.visit_program(program, Ctx::Top)?;
     checker.check_exhaustiveness()?;
     checker.check_tuple_exhaustiveness()
 }
@@ -140,19 +140,39 @@ fn leaf_bindings<'a>(alt: &'a TagPattern, out: &mut Vec<&'a str>) {
     }
 }
 
+/// Where a sub-program sits, for placement rules. `try`/let-else need the
+/// [`Ctx::Top`] statement stream (their emitted `return` must exit the
+/// enclosing function, and every nested context either is an expression or
+/// sits inside a match's IIFE). `if let` compiles to a self-contained block
+/// with no `return` of its own, so any statement context ([`Ctx::Top`] or
+/// [`Ctx::Stmt`] — a block arm body, a let-else `else` block, an `if let`
+/// body) is fine; only expression positions ([`Ctx::Expr`]) are out.
+#[derive(Clone, Copy, PartialEq)]
+enum Ctx {
+    Top,
+    Stmt,
+    Expr,
+}
+
 impl Checker<'_> {
-    /// `nested` is true inside any recursively parsed sub-program (match
-    /// scrutinee, arm body, template interpolation, try expression) — the
-    /// contexts where a `try` statement is not allowed.
-    fn visit_program(&mut self, program: &Program, nested: bool) -> Result<(), RlError> {
-        // A stray `|>` cannot be passed through: it is not valid TypeScript,
-        // so the output self-check would fail without a position. Report it
-        // as an rl error here instead (error-layering contract).
+    fn visit_program(&mut self, program: &Program, ctx: Ctx) -> Result<(), RlError> {
+        // A stray `|>` or `if let` cannot be passed through: neither is
+        // valid TypeScript, so the output self-check would fail without a
+        // position. Report them as rl errors here instead (error-layering
+        // contract).
         if let Some(&off) = program.stray_pipes.first() {
             return Err(RlError::at(
                 off,
                 "pipeline: `|>` could not be parsed here (steps must be expressions; \
                  parenthesize ternaries and arrow functions)"
+                    .to_string(),
+            ));
+        }
+        if let Some(&off) = program.stray_if_lets.first() {
+            return Err(RlError::at(
+                off,
+                "`if let` could not be parsed here (pattern parens are mandatory, and the \
+                 `else` must be a block or another `if let`)"
                     .to_string(),
             ));
         }
@@ -162,20 +182,21 @@ impl Checker<'_> {
                 Segment::Enum(decl) => self.check_enum(decl)?,
                 Segment::Match(expr) => self.check_match(expr)?,
                 Segment::TupleMatch(expr) => self.check_tuple_match(expr)?,
-                Segment::Try(stmt) => self.check_try(stmt, nested)?,
-                Segment::LetElse(stmt) => self.check_let_else(stmt, nested)?,
+                Segment::Try(stmt) => self.check_try(stmt, ctx)?,
+                Segment::LetElse(stmt) => self.check_let_else(stmt, ctx)?,
+                Segment::IfLet(stmt) => self.check_if_let(stmt, ctx)?,
                 Segment::Pipe(pipe) => {
                     // Head and steps are expressions — `try` inside them is
                     // rejected for the same reason as inside a match.
-                    self.visit_program(&pipe.head, true)?;
+                    self.visit_program(&pipe.head, Ctx::Expr)?;
                     for step in &pipe.steps {
-                        self.visit_program(&step.body, true)?;
+                        self.visit_program(&step.body, Ctx::Expr)?;
                     }
                 }
                 Segment::Template(template) => {
                     for chunk in &template.chunks {
                         if let TemplateChunk::Interp(interp) = chunk {
-                            self.visit_program(interp, true)?;
+                            self.visit_program(interp, Ctx::Expr)?;
                         }
                     }
                 }
@@ -184,8 +205,8 @@ impl Checker<'_> {
         Ok(())
     }
 
-    fn check_try(&mut self, stmt: &TryStmt, nested: bool) -> Result<(), RlError> {
-        if nested {
+    fn check_try(&mut self, stmt: &TryStmt, ctx: Ctx) -> Result<(), RlError> {
+        if ctx != Ctx::Top {
             return Err(RlError::at(
                 stmt.keyword_off,
                 "`try` cannot be used inside a match expression, a template interpolation, \
@@ -193,11 +214,11 @@ impl Checker<'_> {
                     .to_string(),
             ));
         }
-        self.visit_program(&stmt.expr, true)
+        self.visit_program(&stmt.expr, Ctx::Expr)
     }
 
-    fn check_let_else(&mut self, stmt: &LetElseStmt, nested: bool) -> Result<(), RlError> {
-        if nested {
+    fn check_let_else(&mut self, stmt: &LetElseStmt, ctx: Ctx) -> Result<(), RlError> {
+        if ctx != Ctx::Top {
             return Err(RlError::at(
                 stmt.keyword_off,
                 "let-else cannot be used inside a match expression, a template interpolation, \
@@ -213,8 +234,29 @@ impl Checker<'_> {
                     .to_string(),
             ));
         }
-        self.visit_program(&stmt.expr, true)?;
-        self.visit_program(&stmt.else_body, true)
+        self.visit_program(&stmt.expr, Ctx::Expr)?;
+        self.visit_program(&stmt.else_body, Ctx::Stmt)
+    }
+
+    fn check_if_let(&mut self, stmt: &IfLetStmt, ctx: Ctx) -> Result<(), RlError> {
+        if ctx == Ctx::Expr {
+            return Err(RlError::at(
+                stmt.keyword_off,
+                "`if let` cannot be used in expression position (a template interpolation, \
+                 a scrutinee or guard, an expression arm body, a `try` expression, or a \
+                 pipeline) — it compiles to a block statement"
+                    .to_string(),
+            ));
+        }
+        self.check_leaf_bindings(&stmt.pattern)?;
+        self.visit_program(&stmt.expr, Ctx::Expr)?;
+        self.visit_program(&stmt.body, Ctx::Stmt)?;
+        match &stmt.else_part {
+            Some(IfLetElse::Block(block)) => self.visit_program(block, Ctx::Stmt)?,
+            Some(IfLetElse::IfLet(inner)) => self.check_if_let(inner, Ctx::Stmt)?,
+            None => {}
+        }
+        Ok(())
     }
 
     fn check_enum(&mut self, decl: &EnumDecl) -> Result<(), RlError> {
@@ -359,12 +401,13 @@ impl Checker<'_> {
         }
 
         // children, in source order: scrutinee first, then guards and bodies
-        self.visit_program(&expr.scrutinee, true)?;
+        self.visit_program(&expr.scrutinee, Ctx::Expr)?;
         for arm in &expr.arms {
             if let Some(guard) = &arm.guard {
-                self.visit_program(&guard.expr, true)?;
+                self.visit_program(&guard.expr, Ctx::Expr)?;
             }
-            self.visit_program(&arm.body, true)?;
+            // A block arm body is a statement context (inside the IIFE)
+            self.visit_program(&arm.body, if arm.block { Ctx::Stmt } else { Ctx::Expr })?;
         }
         Ok(())
     }
@@ -476,13 +519,13 @@ impl Checker<'_> {
 
         // children, in source order
         for (_, scrutinee) in &expr.scrutinees {
-            self.visit_program(scrutinee, true)?;
+            self.visit_program(scrutinee, Ctx::Expr)?;
         }
         for arm in &expr.arms {
             if let Some(guard) = &arm.guard {
-                self.visit_program(&guard.expr, true)?;
+                self.visit_program(&guard.expr, Ctx::Expr)?;
             }
-            self.visit_program(&arm.body, true)?;
+            self.visit_program(&arm.body, if arm.block { Ctx::Stmt } else { Ctx::Expr })?;
         }
         Ok(())
     }

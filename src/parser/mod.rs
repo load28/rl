@@ -31,6 +31,7 @@
 
 mod cursor;
 mod enums;
+mod iflets;
 mod imports;
 mod lets;
 mod matches;
@@ -141,6 +142,7 @@ fn segment_start(seg: &Segment) -> usize {
         Segment::TupleMatch(m) => m.keyword_off,
         Segment::Try(t) => t.keyword_off,
         Segment::LetElse(l) => l.keyword_off,
+        Segment::IfLet(s) => s.keyword_off,
         Segment::RlImport(d) => d.spec.start,
         Segment::Template(t) => match t.chunks.first() {
             Some(TemplateChunk::Raw(span)) => span.start,
@@ -193,6 +195,7 @@ impl Parser<'_> {
     pub(crate) fn parse_tokens(&self, tokens: &[Token], start: usize, end: usize) -> Program {
         let mut segments: Vec<Segment> = Vec::new();
         let mut stray_pipes: Vec<usize> = Vec::new();
+        let mut stray_if_lets: Vec<usize> = Vec::new();
         let mut seg_start = start;
         let mut i = 0usize;
 
@@ -357,6 +360,28 @@ impl Parser<'_> {
                 }
             }
 
+            // `if let ...` — an undotted `if` followed by `let` is never
+            // valid TypeScript, so a candidate that fails to parse cannot
+            // be passed through either; it is recorded for sema.
+            if !dotted
+                && word == "if"
+                && matches!(tokens.get(i + 1),
+                    Some(t) if matches!(t.kind, TokenKind::Ident)
+                        && &self.src[t.span.start..t.span.end] == "let")
+            {
+                if let Some((cur, byte_end, stmt)) =
+                    iflets::parse_if_let(Cursor::new(self, tokens, i + 1, end), tok.span)
+                {
+                    flush_verbatim(&mut segments, seg_start, tok.span.start);
+                    segments.push(Segment::IfLet(stmt));
+                    seg_start = byte_end;
+                    i = cur.idx;
+                    expr = (i, false);
+                    continue;
+                }
+                stray_if_lets.push(tok.span.start);
+            }
+
             if !dotted && PIPE_BOUNDARY_WORDS.contains(&word) {
                 expr = (i + 1, false);
             }
@@ -367,6 +392,7 @@ impl Parser<'_> {
         Program {
             segments,
             stray_pipes,
+            stray_if_lets,
         }
     }
 

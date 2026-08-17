@@ -29,6 +29,10 @@ pub(crate) struct Program {
     /// would fail the self-check without a position — the semantic phase
     /// reports these as rl errors instead (the parser stays infallible).
     pub stray_pipes: Vec<usize>,
+    /// Byte offsets of `if let` sequences that could not be claimed as an
+    /// `if let` statement — same reporting story as [`Self::stray_pipes`]
+    /// (an undotted `if` followed by `let` is never valid TypeScript).
+    pub stray_if_lets: Vec<usize>,
 }
 
 /// One top-level piece of a [`Program`], in source order.
@@ -46,6 +50,8 @@ pub(crate) enum Segment {
     Try(TryStmt),
     /// An rl let-else statement (Rust-style refutable binding).
     LetElse(LetElseStmt),
+    /// An rl `if let` statement (conditional refutable binding).
+    IfLet(IfLetStmt),
     /// A static import declaration or `export ... from` re-export whose
     /// specifier is a relative path ending in `.rl`. Only the specifier
     /// string is lifted out of the byte stream — the rest of the statement
@@ -152,6 +158,39 @@ pub(crate) struct LetElseStmt {
     /// for Rust's "the else block must diverge" rule. Computed by the
     /// parser (which stays infallible), enforced by sema.
     pub diverges: bool,
+}
+
+/// A structurally parsed rl `if let` statement:
+/// `if let Tag(bindings...) = <expr> { ... } else ...`. let-else's
+/// non-diverging sibling: evaluate once, run the body with the bindings
+/// when the pattern matches, the `else` part (a block or another `if let`)
+/// otherwise. Contract safety: in valid TypeScript `if` is always followed
+/// by `(`, never by `let`. Compiles to a self-contained block statement —
+/// no IIFE and no `return` of its own — so it is valid in any statement
+/// position; the bindings materialize as `const`s, which keeps their
+/// narrowed types inside closures.
+#[derive(Debug)]
+pub(crate) struct IfLetStmt {
+    /// Byte offset of the `if` keyword, for error reporting.
+    pub keyword_off: usize,
+    /// The pattern (parens mandatory; nested patterns allowed, or-patterns
+    /// not — same binding grammar as a match arm's single alternative).
+    pub pattern: TagPattern,
+    /// The expression after `=`, recursively parsed.
+    pub expr: Program,
+    /// The then-block body, recursively parsed (braces excluded).
+    pub body: Program,
+    /// The `else` continuation, if any.
+    pub else_part: Option<IfLetElse>,
+}
+
+/// The `else` continuation of an [`IfLetStmt`].
+#[derive(Debug)]
+pub(crate) enum IfLetElse {
+    /// `else { ... }` (braces excluded).
+    Block(Program),
+    /// `else if let ...` — chained.
+    IfLet(Box<IfLetStmt>),
 }
 
 /// A structurally parsed rl `try` statement: `try <expr>;` or

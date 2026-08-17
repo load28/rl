@@ -1395,3 +1395,52 @@ function f(r: Res): number {
     );
     assert!(ok, "{out}");
 }
+
+/* ------------------------------------------------------------------ */
+/* if let                                                              */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn runtime_if_let_chains_and_falls_back() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Opt { Some(value: number), None }
+
+function pick(a: Opt, b: Opt): number {
+  let out = -1;
+  if let Some(value) = a {
+    out = value;
+  } else if let Some(value) = b {
+    out = value * 10;
+  } else {
+    out = 0;
+  }
+  return out;
+}
+
+console.log(pick(Opt.Some(1), Opt.Some(2)));
+console.log(pick(Opt.None, Opt.Some(2)));
+console.log(pick(Opt.None, Opt.None));
+"#);
+    assert_eq!(lines, vec!["1", "20", "0"]);
+}
+
+#[test]
+fn if_let_bindings_stay_narrowed_inside_closures() {
+    require_toolchain!();
+    // The binding materializes as a const, so the narrowed type survives
+    // closure boundaries — the gap that motivated the feature (TASK-042 G5).
+    let (ok, out) = typecheck(
+        r#"
+enum Opt { Some(value: string), None }
+function f(o: Opt, xs: number[]): string[] {
+  const collected: string[] = [];
+  if let Some(value) = o {
+    xs.forEach(() => collected.push(value.toUpperCase()));
+  }
+  return collected;
+}
+"#,
+    );
+    assert!(ok, "{out}");
+}

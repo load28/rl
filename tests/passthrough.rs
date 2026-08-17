@@ -296,3 +296,9 @@ fn match_shaped_calls_with_two_arguments_pass_through() {
     // follow, so it can never be claimed.
     assert_passthrough("const x = match(a, b);\nobj.match(a, (b, c));\n");
 }
+
+#[test]
+fn if_statements_and_if_shaped_members_pass_through() {
+    assert_passthrough("if (c) { a(); } else if (d) { b(); } else { e(); }\n");
+    assert_passthrough("const o = { if: 1 };\ninterface I { if: number }\nobj.if(x);\n");
+}

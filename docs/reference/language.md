@@ -6,7 +6,7 @@ CLI는 [`cli.md`](./cli.md), 에러 메시지는 [`errors.md`](./errors.md), 표
 
 1. [기본 원칙](#1-기본-원칙) · 2. [`enum`](#2-enum-선언) ·
 3. [`match`](#3-match-표현식) · 4. [표준 라이브러리](#4-표준-라이브러리와-내장-enum) ·
-5. [`try`](#5-에러-전파-try-문) · 6. [`let-else`](#6-값-추출-let-else-문) ·
+5. [`try`](#5-에러-전파-try-문) · 6. [`let-else`·`if let`](#6-값-추출-let-else-문) ·
 7. [`|>`](#7-파이프라인-연산자-) · 8. [모듈](#8-모듈-rl-import-지정자-재작성) ·
 9. [제한사항](#9-제한사항)
 
@@ -14,8 +14,8 @@ CLI는 [`cli.md`](./cli.md), 에러 메시지는 [`errors.md`](./errors.md), 표
 
 ## 1. 기본 원칙
 
-`.rl` 파일은 TypeScript에 다섯 구문 — `enum` 선언, `match` 표현식, `try` 문,
-let-else 문, 파이프라인 연산자 `|>` — 을 더한 것입니다.
+`.rl` 파일은 TypeScript에 여섯 구문 — `enum` 선언, `match` 표현식, `try` 문,
+let-else 문, `if let` 문, 파이프라인 연산자 `|>` — 을 더한 것입니다.
 
 > **모든 유효한 TypeScript 파일은 그대로 유효한 `.rl` 파일이며, 자기 자신으로
 > 컴파일됩니다.** 유일한 예외는 상대 경로 `.rl` import 지정자의 재작성입니다
@@ -459,6 +459,46 @@ const $rl_t0 = (findUser(id)); if ($rl_t0.kind !== "Some") { return "who?"; } co
   발산 키워드로 끝내도록 재구성하세요.
 - `= try 식 else { ... };` 조합은 지원하지 않습니다.
 
+### 6.5 `if let` 문 — 조건부 값 추출
+
+let-else의 비발산 짝입니다. 패턴이 맞으면 바인딩과 함께 본문을, 아니면
+`else` 부분을 실행하고, 이탈 의무는 없습니다.
+
+```
+if-let-문 ::= "if" "let" 태그 "(" 바인딩-목록? ")" "=" 식 블록
+              ("else" (블록 | if-let-문))?
+```
+
+```rl
+if let Some(value: user) = findUser(id) {
+  greet(user);
+} else if let Some(value: cached) = cache.get(id) {
+  greet(cached);
+} else {
+  prompt();
+}
+```
+
+- 유효한 TS에서 `if` 뒤에는 반드시 `(`가 오므로 `if let`은 rl 전용
+  구문입니다. 따라서 **파싱에 실패한 `if let`은 통과되지 않고** `파일:행:열`
+  과 함께 에러로 보고됩니다 (`|>`와 같은 원리 — [`errors.md`](./errors.md)).
+- 바인딩 문법은 match 패턴과 같고 **중첩 패턴도 됩니다**:
+  `if let Ok(value: Some(value: v)) = r { ... }`. or-패턴은 없습니다.
+- `else`는 블록 또는 또 다른 if-let만 됩니다 — 일반 `else if (조건)`을
+  이어 붙이려면 else 블록 안에 쓰세요.
+
+**컴파일 결과**: 자기 완결적인 블록 문장입니다 (IIFE 없음, `$rl_t` 공유).
+
+```ts
+{ const $rl_t0 = (findUser(id)); if ($rl_t0.kind === "Some") { const { value: user } = $rl_t0; greet(user); } else ... }
+```
+
+바인딩이 `const`로 물질화되므로 본문 안의 클로저에서도 좁혀진 타입이
+유지됩니다. `try`/let-else와 달리 자체 `return`을 방출하지 않으므로 **모든
+문장 위치**(match 암의 블록 본문, let-else의 else 블록 포함)에서 쓸 수
+있고, 표현식 위치(템플릿 보간, 스크루티니, 표현식 암 본문 등)에서는 컴파일
+에러입니다.
+
 ---
 
 ## 7. 파이프라인 연산자 `|>`
@@ -616,6 +656,7 @@ rlc: parser.rl:3:28: match on enum Token (imported from "./token.rl")
 | import 재작성 | 정적 상대 경로 `.rl` 지정자만. 참조 파일의 존재는 검사하지 않습니다 ([§8](#8-모듈-rl-import-지정자-재작성)) |
 | `try` | `;` 필수, 식은 `(`/`<`로 시작 불가, match 내부·템플릿 보간·모듈 최상위 불가. `Option` 전파 미지원 |
 | `let-else` | 패턴 괄호와 `;` 필수, else는 발산 키워드로 끝나야 함. or-패턴·가드·중첩 패턴, `= try 식 else` 조합 미지원 |
+| `if let` | else는 블록 또는 if-let만(일반 `else if (조건)` 불가 — else 블록 안에 쓰기). or-패턴·가드 미지원. 표현식 위치 불가. `= 식` 최상위의 괄호 없는 블록 화살표는 괄호 필수 |
 | 표현식 암 | 객체 리터럴은 괄호 필수: `Tag => ({ a: 1 })` |
 | 스크루티니 | 괄호 필수: `match (x) { ... }` |
 | `\|>` head 판별 | 구조 추적입니다. 삼항·화살표는 괄호 필수([§7.4](#74-구조-규칙)), 이항 `in`/`instanceof`·복합 시프트 대입(`>>=`) 옆이나 세미콜론 없는 코드의 문장 경계에서는 head를 짧거나 길게 잡을 수 있습니다 — head를 괄호로 감싸면 항상 명확합니다 |

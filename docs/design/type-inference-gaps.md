@@ -320,6 +320,11 @@ switch ($rl_m) { case "ArrowUp": { return (-1); } ... default: { return (NaN); }
 
 ## 6. 제안 P4: `if let` — 조건부 스코프의 값 추출
 
+> **상태: 구현됨** (TASK-046) — 규범은
+> [`language.md` §6.5](../reference/language.md#65-if-let-문--조건부-값-추출).
+> 제안과 달리 중첩 패턴도 지원하고, 표현식 위치 금지는 sema의 문맥 구분
+> (Top/Stmt/Expr)으로 강제한다.
+
 ### 6.1 문법과 의미
 
 ```

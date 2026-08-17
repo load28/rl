@@ -6,9 +6,10 @@
 ## 프로젝트 개요
 
 **rl**은 TypeScript로 컴파일되는 초경량 전처리 언어이고, **rlc**는 Rust로 작성된
-그 컴파일러입니다. rl은 TypeScript 위에 딱 다섯 가지만 추가합니다:
-Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드·튜플 match
-포함), 에러 전파 `try` 문, 값 추출 `let-else` 문, 파이프라인 연산자 `|>`.
+그 컴파일러입니다. rl은 TypeScript 위에 딱 여섯 가지만 추가합니다:
+Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드·튜플 match·
+중첩 패턴 포함), 에러 전파 `try` 문, 값 추출 `let-else`·`if let` 문,
+파이프라인 연산자 `|>`.
 
 ### 절대 불변 원칙 (설계 계약)
 
@@ -45,6 +46,7 @@ src/
     matches.rs   match 표현식 구조 파싱 (scrutinee/arm body 재귀 파싱)
     tries.rs     try 문 구조 파싱 (유효 TS의 try 형태 배제 규칙 포함)
     lets.rs      let-else 문 구조 파싱 (발산 판정 포함)
+    iflets.rs    if let 문 구조 파싱 (else 체이닝 포함)
     pipes.rs     파이프라인 스텝 구조 파싱 (head는 mod.rs의 식-시작 추적)
   sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입, 소진성
                  (임포트 선언·내장 Option/Result 포함, 로컬 > 임포트 > 내장 섀도잉)
