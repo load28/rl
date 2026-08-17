@@ -5,42 +5,38 @@
 //! verbatim. rl-level errors — duplicate cases, bad field types — are the
 //! semantic phase's job.
 
-use super::{Parser, is_reserved};
+use super::cursor::Cursor;
+use super::is_reserved;
 use crate::ast::{EnumCase, EnumDecl, Field};
-use crate::scanner::*;
+use crate::lexer::TokenKind;
 
-/// `j` is just past the `enum` keyword. On success returns the index just
-/// past the closing brace and the parsed declaration.
-pub(super) fn parse_enum(
-    p: &Parser,
-    j: usize,
-    end: usize,
+/// `cur` is positioned just past the `enum` keyword. On success returns
+/// the advanced cursor, the byte just past the closing brace, and the
+/// parsed declaration.
+pub(super) fn parse_enum<'t>(
+    mut cur: Cursor<'t>,
     exported: bool,
-) -> Option<(usize, EnumDecl)> {
-    let src = p.bytes;
-    let mut i = skip_ws_comments(src, j, end);
-    if i >= end || !is_ident_start(src[i]) {
-        return None;
-    }
-    let k = ident_end(src, i, end);
-    let name = &p.src[i..k];
+) -> Option<(Cursor<'t>, usize, EnumDecl)> {
+    let (name, _) = cur.eat_ident()?;
     if is_reserved(name) {
         return None;
     }
 
-    i = skip_ws_comments(src, k, end);
     let mut generics = "";
-    if at(src, i, end) == Some(b'<') {
-        let close = find_matching(src, i, end)?;
-        generics = &p.src[i..close + 1];
-        i = skip_ws_comments(src, close + 1, end);
+    if cur.at_punct(b'<') {
+        let close = cur.find_close()?;
+        generics = &cur.parser.src[cur.tokens[cur.idx].span.start..cur.tokens[close].span.end];
+        cur.idx = close + 1;
     }
-    if at(src, i, end) != Some(b'{') {
+
+    if !cur.at_punct(b'{') {
         return None;
     }
-    let close_brace = find_matching(src, i, end)?;
+    let open = cur.idx;
+    let close = cur.find_close()?;
+    let inner = cur.sub(open + 1, close, cur.tokens[close].span.start);
 
-    let cases = match parse_enum_cases(p, i + 1, close_brace) {
+    let cases = match parse_enum_cases(inner) {
         Some(cases) if !cases.is_empty() => cases,
         _ => return None,
     };
@@ -54,8 +50,11 @@ pub(super) fn parse_enum(
         return None;
     }
 
+    let byte_end = cur.tokens[close].span.end;
+    cur.idx = close + 1;
     Some((
-        close_brace + 1,
+        cur,
+        byte_end,
         EnumDecl {
             name: name.to_string(),
             exported,
@@ -65,102 +64,108 @@ pub(super) fn parse_enum(
     ))
 }
 
-fn parse_enum_cases(p: &Parser, start: usize, end: usize) -> Option<Vec<EnumCase>> {
-    let src = p.bytes;
+fn parse_enum_cases(mut cur: Cursor) -> Option<Vec<EnumCase>> {
     let mut cases = Vec::new();
-    let mut i = start;
     loop {
-        i = skip_ws_comments(src, i, end);
-        if i >= end {
+        if cur.peek().is_none() {
             break;
         }
-        if !is_ident_start(src[i]) {
-            return None;
-        }
-        let tag_off = i;
-        let j = ident_end(src, i, end);
-        let tag = &p.src[i..j];
+        let (tag, tag_span) = cur.eat_ident()?;
         if is_reserved(tag) {
             return None;
         }
-        i = skip_ws_comments(src, j, end);
 
         let mut fields = None;
-        if at(src, i, end) == Some(b'(') {
-            let close = find_matching(src, i, end)?;
-            fields = Some(parse_fields(p, i + 1, close)?);
-            i = close + 1;
+        if cur.at_punct(b'(') {
+            let open = cur.idx;
+            let close = cur.find_close()?;
+            fields = Some(parse_fields(cur.sub(
+                open + 1,
+                close,
+                cur.tokens[close].span.start,
+            ))?);
+            cur.idx = close + 1;
         }
         cases.push(EnumCase {
             tag: tag.to_string(),
-            tag_off,
+            tag_off: tag_span.start,
             fields,
         });
 
-        i = skip_ws_comments(src, i, end);
-        if i >= end {
+        if cur.peek().is_none() {
             break;
         }
-        if src[i] == b',' {
-            i += 1;
-            continue;
-        }
-        return None;
+        cur.eat_punct(b',')?;
     }
     Some(cases)
 }
 
 /// Parses `name: Type, name?: Type, ...`. Returns None on failure.
-fn parse_fields(p: &Parser, start: usize, end: usize) -> Option<Vec<Field>> {
-    let src = p.bytes;
+fn parse_fields(mut cur: Cursor) -> Option<Vec<Field>> {
     let mut fields = Vec::new();
-    let mut i = start;
     loop {
-        i = skip_ws_comments(src, i, end);
-        if i >= end {
+        if cur.peek().is_none() {
             break;
         }
-        if !is_ident_start(src[i]) {
-            return None;
-        }
-        let j = ident_end(src, i, end);
-        let name = &p.src[i..j];
+        let (name, _) = cur.eat_ident()?;
         if is_reserved(name) {
             return None;
         }
-        i = skip_ws_comments(src, j, end);
 
         let mut optional = false;
-        if at(src, i, end) == Some(b'?') {
+        if cur.eat_punct(b'?').is_some() {
             optional = true;
-            i = skip_ws_comments(src, i + 1, end);
         }
-        if at(src, i, end) != Some(b':') {
-            return None;
-        }
-        i += 1;
-        let ty_start = i;
-        i = scan_type_end(src, i, end);
-        let ty = p.src[ty_start..i].trim();
+        let colon = cur.eat_punct(b':')?;
+
+        // The annotation text runs from just past the `:` to the stopping
+        // token, exactly like the byte scanner — comments inside stay part
+        // of the text; only surrounding whitespace is trimmed.
+        let ty_start = colon.end;
+        let (stop_idx, stop_byte) = type_end(&cur);
+        let raw = &cur.parser.src[ty_start..stop_byte];
+        let ty = raw.trim();
         if ty.is_empty() {
             return None;
         }
-        let ty_off = ty_start + (p.src[ty_start..i].len() - p.src[ty_start..i].trim_start().len());
+        let ty_off = ty_start + (raw.len() - raw.trim_start().len());
         fields.push(Field {
             name: name.to_string(),
             optional,
             ty: ty.to_string(),
             ty_off,
         });
+        cur.idx = stop_idx;
 
-        if i >= end {
+        if cur.peek().is_none() {
             break;
         }
-        if src[i] == b',' {
-            i += 1;
-            continue;
-        }
-        return None;
+        cur.eat_punct(b',')?;
     }
     Some(fields)
+}
+
+/// Scans a type annotation from `cur.idx` until a top-level `,` or closing
+/// bracket, returning the stopping token index and the byte where the
+/// annotation ends (`range_end` when the tokens run out — the enclosing
+/// closer's position).
+fn type_end(cur: &Cursor) -> (usize, usize) {
+    let mut depth = 0usize;
+    let mut k = cur.idx;
+    while k < cur.tokens.len() {
+        match cur.tokens[k].kind {
+            TokenKind::Punct(b'(' | b'[' | b'{' | b'<') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                if depth == 0 {
+                    return (k, cur.tokens[k].span.start);
+                }
+                depth -= 1;
+            }
+            TokenKind::Punct(b'>') => depth = depth.saturating_sub(1),
+            TokenKind::Punct(b',') if depth == 0 => return (k, cur.tokens[k].span.start),
+            _ => {}
+        }
+        k += 1;
+    }
+    (k, cur.range_end)
 }

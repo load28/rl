@@ -35,9 +35,11 @@ src/
   lib.rs         공개 API: compile(source, &Options) -> Result<String, CompileError>
   error.rs       CompileError(공개) / RlError(내부, 바이트 오프셋) / line_col
   scanner.rs     바이트 단위 저수준 스캔 (문자열/템플릿/주석/정규식/괄호 매칭)
+  lexer.rs       유의 토큰 스트림 생성 (정규식 휴리스틱, 템플릿 중첩 렉싱)
   ast.rs         타입드 AST — 단계 간 계약 (Program/Segment/EnumDecl/MatchExpr...)
   parser/
-    mod.rs       메인 스캔 루프 → Program (무오류 구조 파싱, 템플릿 재귀)
+    mod.rs       메인 토큰 루프 → Program (무오류 구조 파싱, 템플릿 재귀)
+    cursor.rs    토큰 커서 (Copy 백트래킹, 괄호 매칭, 공용 토큰 스캔)
     enums.rs     rl enum 구조 파싱 (TS enum 구분 규칙 포함)
     imports.rs   정적 import/re-export의 상대 경로 .rl 지정자 추출
     matches.rs   match 표현식 구조 파싱 (scrutinee/arm body 재귀 파싱)
@@ -65,9 +67,10 @@ docs/
   tasks/         태스크 관리 (아래 참조)
 ```
 
-파이프라인 (swc 스타일 단계 분리): `compile()` = parser::parse(무오류 구조
-파싱 → AST) → sema::check(모든 rl 수준 에러 + 소진성) → codegen::emit(무오류
-방출) → verify_output(swc 파싱 자가 검사, `--no-verify`로 생략 가능).
+파이프라인 (swc 스타일 단계 분리): `compile()` = parser::parse(lexer::lex
+토큰화 → 무오류 구조 파싱 → AST) → sema::check(모든 rl 수준 에러 + 소진성) →
+codegen::emit(무오류 방출) → verify_output(swc 파싱 자가 검사, `--no-verify`로
+생략 가능).
 새 기능은 해당 단계에만 손댄다: 새 구문 = ast + parser(+codegen), 새 검사 =
 sema, 방출 형태 변경 = codegen.
 

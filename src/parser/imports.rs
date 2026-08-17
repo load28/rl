@@ -8,43 +8,43 @@
 //! every rl construct — a clause that deviates from the expected token
 //! shape aborts the attempt, leaving the statement untouched.
 
+use super::cursor::Cursor;
+use super::is_reserved;
 use crate::ast::Span;
-use crate::scanner::*;
 
-use super::{Parser, is_reserved};
+use crate::lexer::TokenKind;
 
-/// `kw` is `import` or `export` and `kw_end` the offset just past it.
-/// Returns the span of the statement's module specifier string (including
-/// quotes) when the clause fully parses as a static import/re-export *and*
-/// the specifier is a relative `.rl` path.
-pub(super) fn parse_rl_import(p: &Parser, kw: &str, kw_end: usize, end: usize) -> Option<Span> {
-    let src = p.bytes;
-    let i = skip_ws_comments(src, kw_end, end);
-    let c = at(src, i, end)?;
+/// `cur` is positioned just past an `import` or `export` keyword (`kw`).
+/// Returns the advanced cursor and the span of the statement's module
+/// specifier string (including quotes) when the clause fully parses as a
+/// static import/re-export *and* the specifier is a relative `.rl` path.
+pub(super) fn parse_rl_import<'t>(mut cur: Cursor<'t>, kw: &str) -> Option<(Cursor<'t>, Span)> {
+    let first = cur.peek()?;
 
     if kw == "import" {
-        // `import "spec";` — side-effect import, the specifier is right here.
-        if c == b'"' || c == b'\'' {
-            return rl_spec_span(src, i, end);
+        match first.kind {
+            // `import "spec";` — side-effect import, the specifier is right here.
+            TokenKind::Str => {
+                let spec = rl_spec_span(&cur, first.span)?;
+                cur.bump();
+                return Some((cur, spec));
+            }
+            // `import(...)` / `import.meta` — not a static declaration.
+            TokenKind::Punct(b'(' | b'.') | TokenKind::OptChain => return None,
+            _ => {}
         }
-        // `import(...)` / `import.meta` — not a static declaration.
-        if c == b'(' || c == b'.' {
-            return None;
-        }
-        clause_then_spec(p, i, end)
+        clause_then_spec(cur)
     } else {
         // A re-export starts with `{`, `*`, or `type` followed by `{`/`*`;
         // anything else (`const`, `default`, `enum`, ...) is not one.
-        match c {
-            b'{' | b'*' => clause_then_spec(p, i, end),
-            _ if is_ident_start(c) => {
-                let j = ident_end(src, i, end);
-                if &p.src[i..j] != "type" {
-                    return None;
-                }
-                let k = skip_ws_comments(src, j, end);
-                match at(src, k, end)? {
-                    b'{' | b'*' => clause_then_spec(p, k, end),
+        match first.kind {
+            TokenKind::Punct(b'{' | b'*') => clause_then_spec(cur),
+            TokenKind::Ident if cur.text(first) == "type" => {
+                match cur.tokens.get(cur.idx + 1).map(|t| &t.kind) {
+                    Some(TokenKind::Punct(b'{' | b'*')) => {
+                        cur.bump();
+                        clause_then_spec(cur)
+                    }
                     _ => None,
                 }
             }
@@ -53,56 +53,58 @@ pub(super) fn parse_rl_import(p: &Parser, kw: &str, kw_end: usize, end: usize) -
     }
 }
 
-/// Scans an import/re-export clause token by token until `from`, then
+/// Consumes an import/re-export clause token by token until `from`, then
 /// expects the specifier string. Clauses are only identifiers (bindings,
 /// contextual `type`/`as`), `{ ... }` lists, `*`, and `,` — any other
 /// token (a reserved word, `=`, `;`, ...) means this is not a static
 /// import clause.
-fn clause_then_spec(p: &Parser, mut i: usize, end: usize) -> Option<Span> {
-    let src = p.bytes;
+fn clause_then_spec(mut cur: Cursor<'_>) -> Option<(Cursor<'_>, Span)> {
     loop {
-        i = skip_ws_comments(src, i, end);
-        let c = at(src, i, end)?;
-        match c {
-            b'{' => i = find_matching(src, i, end)? + 1,
-            b'*' | b',' => i += 1,
-            _ if is_ident_start(c) => {
-                let j = ident_end(src, i, end);
-                let word = &p.src[i..j];
+        let t = cur.peek()?;
+        match t.kind {
+            TokenKind::Punct(b'{') => {
+                let close = cur.find_close()?;
+                cur.idx = close + 1;
+            }
+            TokenKind::Punct(b'*' | b',') => {
+                cur.bump();
+            }
+            TokenKind::Ident => {
+                let word = cur.text(t);
                 if word == "from" {
-                    let k = skip_ws_comments(src, j, end);
-                    return rl_spec_span(src, k, end);
+                    cur.bump();
+                    let spec_tok = cur.peek()?;
+                    if !matches!(spec_tok.kind, TokenKind::Str) {
+                        return None;
+                    }
+                    let spec = rl_spec_span(&cur, spec_tok.span)?;
+                    cur.bump();
+                    return Some((cur, spec));
                 }
                 if is_reserved(word) {
                     return None;
                 }
-                i = j;
+                cur.bump();
             }
             _ => return None,
         }
     }
 }
 
-/// `src[i]` should start a string literal whose content is a relative path
-/// ending in `.rl`; returns its span (including quotes) if so.
-fn rl_spec_span(src: &[u8], i: usize, end: usize) -> Option<Span> {
-    let quote = at(src, i, end)?;
-    if quote != b'"' && quote != b'\'' {
+/// `span` is a lexed string token; returns it back if its content is a
+/// relative path ending in `.rl`.
+fn rl_spec_span(cur: &Cursor, span: Span) -> Option<Span> {
+    let src = cur.parser.bytes;
+    let quote = src[span.start];
+    // The lexer tolerates unterminated strings (stopping at a newline or
+    // EOF) — require a real closing quote.
+    if span.end < span.start + 2 || src[span.end - 1] != quote {
         return None;
     }
-    let close = scan_string(src, i, end);
-    // `scan_string` stops at a newline/EOF for unterminated strings —
-    // require a real closing quote.
-    if close < i + 2 || src[close - 1] != quote {
-        return None;
-    }
-    let spec = &src[i + 1..close - 1];
+    let spec = &src[span.start + 1..span.end - 1];
     let relative = spec.starts_with(b"./") || spec.starts_with(b"../");
     if relative && spec.ends_with(b".rl") {
-        Some(Span {
-            start: i,
-            end: close,
-        })
+        Some(span)
     } else {
         None
     }
