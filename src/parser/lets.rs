@@ -180,10 +180,8 @@ fn block_diverges(parser: &super::Parser, tokens: &[crate::lexer::Token]) -> boo
                     last = k + 1;
                 }
             }
-            TokenKind::Punct(b';') if depth == 0 => {
-                if k + 1 < tokens.len() {
-                    last = k + 1;
-                }
+            TokenKind::Punct(b';') if depth == 0 && k + 1 < tokens.len() => {
+                last = k + 1;
             }
             _ => {}
         }

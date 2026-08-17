@@ -116,6 +116,18 @@ TASK-010이 파이프라인(parse → sema → codegen → verify)을 swc 스타
 
 ## 이슈 및 해결
 
+### 이슈 0 (사후): CI clippy 버전 차이로 게이트 실패
+
+- **증상**: 로컬 게이트는 전부 통과했지만 CI(`dtolnay/rust-toolchain@stable`)
+  가 clippy 1.97의 신규 린트 2건으로 실패 — `while_let_loop`
+  (matches.rs `parse_arms`의 `loop { let Some .. else break }`),
+  `collapsible_match`(lets.rs `block_diverges`의 `;` arm 내부 `if`).
+- **원인**: 로컬 clippy가 1.94로 CI의 stable(1.97)보다 낮아 두 린트가
+  로컬에서 보이지 않았다.
+- **해결**: 로컬 툴체인을 1.97로 올려 CI와 맞춘 뒤 두 곳을 리라이트
+  (`while let` 루프, match 가드로 조건 합침 — 동작 동일, 전체 테스트로
+  확인). 후속 수정 커밋으로 반영.
+
 ### 이슈 1: clippy `question_mark` 4건
 
 - **증상**: `if cur.eat_punct(b',').is_none() { return None; }`가

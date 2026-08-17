@@ -67,10 +67,7 @@ pub(super) fn parse_match<'t>(
 
 fn parse_arms(mut cur: Cursor) -> Option<Vec<Arm>> {
     let mut arms = Vec::new();
-    loop {
-        let Some(first) = cur.peek() else {
-            break;
-        };
+    while let Some(first) = cur.peek() {
         let pattern_off = first.span.start;
 
         // pattern
