@@ -784,6 +784,19 @@ fn run_rlc(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
     )
 }
 
+/// Whether TypeScript resolves without a project-local copy — true when a
+/// global install happens to be reachable, which changes what `--types` can
+/// legitimately do.
+fn global_typescript_resolvable() -> bool {
+    let dir = tmpdir();
+    Command::new("node")
+        .current_dir(&dir)
+        .args(["-e", "require(\"typescript\")"])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn cli_checks_exhaustiveness_across_rl_imports() {
     let dir = tmpdir();
@@ -933,11 +946,51 @@ const CONSUMER_MAIN_TS: &str = "import { Option } from \"@rl/std\";\nimport { No
 
 /// A mixed source tree: two `.rl` modules (one importing the other and the
 /// standard library) plus a hand-written `.ts` entry that imports `.rl`.
+/// Every file under `dir`, recursively.
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // node_modules is the linked TypeScript, not project output.
+        if path.file_name().is_some_and(|name| name == "node_modules") {
+            continue;
+        }
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
 fn write_consumer_tree(dir: &std::path::Path) {
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(dir.join("src/level.rl"), LEVEL_RL).unwrap();
     fs::write(dir.join("src/notice.rl"), NOTICE_RL).unwrap();
     fs::write(dir.join("src/main.ts"), CONSUMER_MAIN_TS).unwrap();
+    link_typescript(dir);
+}
+
+/// `--types` emits declarations through TypeScript's API, which it resolves
+/// from the project — the way ts-node, tsup and vite do. A fixture is a
+/// project, so it needs its own `node_modules/typescript`; this links the
+/// copy the repository already vendors for the language server.
+fn link_typescript(dir: &std::path::Path) {
+    let vendored = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("editors/vscode/server/node_modules/typescript");
+    if !vendored.exists() {
+        return; // the test's toolchain guard reports the skip
+    }
+    let modules = dir.join("node_modules");
+    fs::create_dir_all(&modules).unwrap();
+    #[cfg(unix)]
+    let _ = std::os::unix::fs::symlink(&vendored, modules.join("typescript"));
+    #[cfg(windows)]
+    let _ = std::os::windows::fs::symlink_dir(&vendored, modules.join("typescript"));
 }
 
 #[test]
@@ -1005,6 +1058,80 @@ fn cli_refuses_to_overwrite_a_pass_through_input() {
     // A separate output tree is fine.
     let (ok, err) = run_rlc(&dir, &["-o", "out", "main.ts"]);
     assert!(ok, "build failed:\n{err}");
+}
+
+#[test]
+fn cli_types_leaves_nothing_but_the_sidecars() {
+    require_toolchain!();
+    let dir = tmpdir();
+    write_consumer_tree(&dir);
+
+    let (ok, err) = run_rlc(&dir, &["--types", "src"]);
+    assert!(ok, "--types failed:\n{err}");
+
+    // Declaration emit runs in memory: no cache tree, and above all no
+    // copy of the hand-written TypeScript anywhere.
+    assert!(!dir.join(".rl-build").exists(), "a cache tree was created");
+    let copies: Vec<String> = walk(&dir)
+        .into_iter()
+        .filter(|path| {
+            path.file_name().is_some_and(|name| name == "main.ts")
+                && !path.starts_with(dir.join("src"))
+        })
+        .map(|path| path.display().to_string())
+        .collect();
+    assert!(
+        copies.is_empty(),
+        "hand-written source was copied: {copies:?}"
+    );
+
+    // What it does leave: one sidecar pair per .rl, plus the std types.
+    assert!(dir.join(".rl-types/notice.rl.d.ts").exists());
+    assert!(dir.join(".rl-types/notice.rl.d.ts.map").exists());
+    assert!(dir.join(".rl-types/level.rl.d.ts").exists());
+    assert!(dir.join(".rl-types/rl.d.ts").exists());
+}
+
+#[test]
+fn cli_types_reports_type_errors_but_keeps_the_sidecars_fresh() {
+    require_toolchain!();
+    let dir = tmpdir();
+    write_consumer_tree(&dir);
+    // A type error in the consumer, not an rl-level one: declarations are
+    // still emitted, so the sidecars must be written and the run must fail.
+    fs::write(
+        dir.join("src/main.ts"),
+        format!("{CONSUMER_MAIN_TS}\nconst wrong: number = \"text\";\n"),
+    )
+    .unwrap();
+
+    let (ok, err) = run_rlc(&dir, &["--types", "src"]);
+    assert!(!ok, "expected a failing exit code:\n{err}");
+    assert!(
+        err.contains("main.ts"),
+        "diagnostic should name the file: {err}"
+    );
+    assert!(
+        dir.join(".rl-types/notice.rl.d.ts").exists(),
+        "sidecars should still be written: {err}"
+    );
+}
+
+#[test]
+fn cli_types_without_typescript_says_so() {
+    require_toolchain!();
+    let dir = tmpdir();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/level.rl"), LEVEL_RL).unwrap();
+    // No node_modules/typescript on purpose. A machine with a globally
+    // resolvable copy would (correctly) succeed, so skip there.
+    if global_typescript_resolvable() {
+        eprintln!("skipping: a global TypeScript is resolvable here");
+        return;
+    }
+    let (ok, err) = run_rlc(&dir, &["--types", "src"]);
+    assert!(!ok, "expected failure:\n{err}");
+    assert!(err.contains("typescript not found"), "{err}");
 }
 
 #[test]
