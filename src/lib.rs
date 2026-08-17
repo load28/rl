@@ -60,7 +60,7 @@ mod verify;
 pub use error::CompileError;
 pub use stdlib::STD_SOURCE;
 
-use error::{RlError, line_col};
+use error::RlError;
 
 /// How relative `.rl` import specifiers are rewritten in the emitted
 /// TypeScript. Applies to static `import` declarations and
@@ -181,6 +181,101 @@ pub fn rl_imports(source: &str) -> Vec<RlImport> {
             _ => None,
         })
         .collect()
+}
+
+/// An rl enum declaration with source positions — the symbol-interface
+/// counterpart of [`ExternEnum`], produced by [`enum_symbols`] and emitted
+/// as JSON by `rlc --symbols` for language tooling (go-to-definition,
+/// completion, hover).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumSymbol {
+    /// The enum's declared name.
+    pub name: String,
+    /// Byte offset of the name in the source (see [`line_col`]).
+    pub offset: usize,
+    /// Whether the declaration has an `export` modifier.
+    pub exported: bool,
+    /// The verbatim `<...>` generic parameter list, or `""`.
+    pub generics: String,
+    /// The enum's cases, in declaration order.
+    pub cases: Vec<CaseSymbol>,
+}
+
+/// One case of an [`EnumSymbol`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseSymbol {
+    /// The case tag.
+    pub tag: String,
+    /// Byte offset of the tag in the source.
+    pub offset: usize,
+    /// `None` for a unit case without parens; `Some` (possibly empty) for
+    /// a case with a field list.
+    pub fields: Option<Vec<FieldSymbol>>,
+}
+
+/// One field of a payload-carrying case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldSymbol {
+    /// The field name.
+    pub name: String,
+    /// Whether the field is optional (`name?: T`).
+    pub optional: bool,
+    /// The verbatim type annotation text.
+    pub ty: String,
+}
+
+/// Extracts every rl enum declaration of a source file with positions —
+/// exported or not, flagged by [`EnumSymbol::exported`]. Plain TypeScript
+/// enums are not rl enums and are not included.
+///
+/// ```
+/// let syms = rlc::enum_symbols("export enum Token { Num(value: number), Eof }\n");
+/// assert_eq!(syms[0].name, "Token");
+/// assert_eq!(rlc::line_col(
+///     "export enum Token { Num(value: number), Eof }\n", syms[0].offset), (1, 13));
+/// assert_eq!(syms[0].cases[1].tag, "Eof");
+/// assert_eq!(syms[0].cases[1].fields, None);
+/// ```
+pub fn enum_symbols(source: &str) -> Vec<EnumSymbol> {
+    let program = parser::parse(source);
+    program
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            ast::Segment::Enum(decl) => Some(EnumSymbol {
+                name: decl.name.clone(),
+                offset: decl.name_off,
+                exported: decl.exported,
+                generics: decl.generics.clone(),
+                cases: decl
+                    .cases
+                    .iter()
+                    .map(|c| CaseSymbol {
+                        tag: c.tag.clone(),
+                        offset: c.tag_off,
+                        fields: c.fields.as_ref().map(|fields| {
+                            fields
+                                .iter()
+                                .map(|f| FieldSymbol {
+                                    name: f.name.clone(),
+                                    optional: f.optional,
+                                    ty: f.ty.clone(),
+                                })
+                                .collect()
+                        }),
+                    })
+                    .collect(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Converts a byte offset into `source` to a 1-based `(line, column)` —
+/// the same mapping [`CompileError`] positions use (column counted in
+/// UTF-8 code points). Offsets past the end clamp to the last position.
+pub fn line_col(source: &str, offset: usize) -> (usize, usize) {
+    error::line_col(source, offset)
 }
 
 /// Compilation options for [`compile`].

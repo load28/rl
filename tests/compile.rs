@@ -1070,3 +1070,32 @@ import { skip } from "./not-rl.ts";
     assert_eq!(imports[3].specifier, "./re.rl");
     assert_eq!(imports[3].names, RlImportNames::None);
 }
+
+/* ------------------------------------------------------------------ */
+/* symbol API                                                          */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn enum_symbols_carries_positions_and_field_shapes() {
+    let src =
+        "export enum Token {\n  Num(value: number),\n  Empty(),\n  Eof,\n}\nenum Local { A() }\n";
+    let syms = rlc::enum_symbols(src);
+    assert_eq!(syms.len(), 2);
+
+    let token = &syms[0];
+    assert_eq!(token.name, "Token");
+    assert!(token.exported);
+    assert_eq!(rlc::line_col(src, token.offset), (1, 13));
+    assert_eq!(token.cases.len(), 3);
+    assert_eq!(rlc::line_col(src, token.cases[0].offset), (2, 3));
+    let fields = token.cases[0].fields.as_ref().unwrap();
+    assert_eq!(fields[0].name, "value");
+    assert_eq!(fields[0].ty, "number");
+    assert!(!fields[0].optional);
+    // `Empty()` has an empty field list; `Eof` has none at all.
+    assert_eq!(token.cases[1].fields.as_deref(), Some(&[][..]));
+    assert_eq!(token.cases[2].fields, None);
+
+    assert_eq!(syms[1].name, "Local");
+    assert!(!syms[1].exported);
+}

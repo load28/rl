@@ -262,3 +262,65 @@ test("template interpolation code is analyzed", () => {
   const { matches } = analyzeAll(src);
   assert.equal(matches.length, 1);
 });
+
+/* ---- imported enums (rlc --symbols, module graph phase 3) ---- */
+
+import type { EnumInfo } from "../analysis";
+
+const importedEnum = (name: string, tags: string[]): EnumInfo => ({
+  name,
+  nameStart: -1,
+  nameEnd: -1,
+  generics: "",
+  exported: true,
+  builtin: false,
+  start: -1,
+  end: -1,
+  cases: tags.map((tag) => ({
+    tag,
+    tagStart: -1,
+    tagEnd: -1,
+    fields: [],
+    hasParens: true,
+  })),
+  imported: {
+    path: "/proj/token.rl",
+    specifier: "./token.rl",
+    name,
+    line: 1,
+    col: 13,
+    cases: Object.fromEntries(tags.map((t) => [t, { line: 2, col: 3 }])),
+  },
+});
+
+test("visibleEnums shadows local > imported > builtin", () => {
+  const src = "enum Token { A() }\n";
+  const { masked } = { masked: maskNonCode(src) };
+  const locals = parseEnums(src, masked);
+  const imported = [
+    importedEnum("Token", ["X", "Y"]), // shadowed by the local Token
+    importedEnum("Option", ["Some", "None", "Maybe"]), // shadows the builtin
+    importedEnum("Extra", ["E"]),
+  ];
+  const visible = visibleEnums(locals, imported);
+  const token = visible.find((e) => e.name === "Token")!;
+  assert.equal(token.imported, undefined); // the local one won
+  const option = visible.find((e) => e.name === "Option")!;
+  assert.ok(option.imported); // the imported one shadows the builtin
+  assert.equal(option.cases.length, 3);
+  assert.ok(visible.some((e) => e.name === "Extra"));
+  assert.ok(visible.some((e) => e.name === "Result" && e.builtin));
+});
+
+test("symbolAt resolves pattern tags of an imported enum", () => {
+  const src = 'import { Token } from "./token.rl";\nconst r = match (t) { Num(v) => v, Eof => 0 };\n';
+  const masked = maskNonCode(src);
+  const matches = parseMatches(masked);
+  const imported = [importedEnum("Token", ["Num", "Eof"])];
+  const offset = src.indexOf("Eof");
+  const sym = symbolAt(src, masked, offset, [], matches, imported);
+  assert.ok(sym);
+  assert.equal(sym!.kind, "case");
+  assert.equal(sym!.enum.name, "Token");
+  assert.ok(sym!.enum.imported);
+});

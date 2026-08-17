@@ -883,3 +883,68 @@ fn cli_cross_file_match_runs_end_to_end() {
     assert!(out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ix");
 }
+
+/* ------------------------------------------------------------------ */
+/* symbol interface (--symbols)                                        */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn symbols_reports_imports_and_positions_as_valid_json() {
+    let dir = tmpdir();
+    fs::write(dir.join("token.rl"), TOKEN_RL).unwrap();
+    fs::write(
+        dir.join("parser.rl"),
+        "import { Token as Tok } from \"./token.rl\";\nimport { Gone } from \"./missing.rl\";\nenum Local { A(x: number) }\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .current_dir(&dir)
+        .args(["--symbols", "parser.rl"])
+        .output()
+        .expect("failed to run rlc");
+    assert!(out.status.success());
+    let json = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    // Shape: the local enum with its position, the resolved import with the
+    // referenced file's exported declarations, and the unresolvable import
+    // marked null.
+    assert!(json.contains("\"file\":\"parser.rl\""), "{json}");
+    assert!(json.contains("\"name\":\"Local\""), "{json}");
+    assert!(
+        json.contains("\"entries\":[{\"name\":\"Token\",\"alias\":\"Tok\"}]"),
+        "{json}"
+    );
+    assert!(
+        json.contains(
+            "\"name\":\"Token\",\"exported\":true,\"generics\":\"\",\"line\":1,\"col\":13"
+        ),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"tag\":\"Eof\",\"line\":4,\"col\":3,\"fields\":null"),
+        "{json}"
+    );
+    assert!(json.contains("\"specifier\":\"./missing.rl\""), "{json}");
+    assert!(json.contains("\"resolved\":null,\"enums\":[]"), "{json}");
+
+    // And it must be JSON a real parser accepts.
+    if have("node") {
+        let mut child = Command::new("node")
+            .args([
+                "-e",
+                "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>JSON.parse(d))",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("failed to run node");
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(json.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "not valid JSON:\n{json}");
+    }
+}

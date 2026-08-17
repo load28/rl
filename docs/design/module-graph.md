@@ -2,10 +2,10 @@
 
 이 문서는 **제안**이다. 규범 문서가 아니다
 (구현된 구조는 [`compiler-architecture.md`](./compiler-architecture.md)).
-TASK-019에서 작성했다. **1단계는 TASK-020에서, 2단계는 TASK-022에서
-구현되었다** (규범 서술:
-[`language.md` §7](../reference/language.md#7-모듈-rl-import-지정자-재작성));
-3단계는 여전히 제안 상태다.
+TASK-019에서 작성했다. **세 단계 모두 구현되었다** — 1단계는 TASK-020,
+2단계는 TASK-022, 3단계는 TASK-023 (규범 서술:
+[`language.md` §7](../reference/language.md#7-모듈-rl-import-지정자-재작성),
+[`cli.md` "심볼 출력"](../reference/cli.md#심볼-출력---symbols)).
 
 rlc는 지금 **파일 하나를 파일 하나로** 바꾼다. `compile(source, &Options) ->
 Result<String, CompileError>`라는 시그니처가 그 사실을 그대로 드러낸다. 이
@@ -71,7 +71,7 @@ parse(b.rl) ──┘
 이 단계에서 `import { Token } from "./token.rl"` 한 줄이면 파서 파일의
 `match (token)`이 빠뜨린 케이스를 rlc가 잡는다.
 
-### 3단계 — 심볼 인터페이스와 언어 서버
+### 3단계 — 심볼 인터페이스와 언어 서버 (구현됨 — TASK-023)
 
 2단계에서 만들어진 선언 테이블을 언어 서버가 쓸 수 있게 내보낸다. 예를 들어
 `rlc --symbols <file>`이 JSON으로 `{ 파일, 이름, 태그, 위치 }`를 출력하면,

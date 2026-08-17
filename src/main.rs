@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use rlc::{ExternEnum, ImportRewrite, Options, RlImportNames, compile};
+use rlc::{EnumSymbol, ExternEnum, ImportRewrite, Options, RlImportNames, compile};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -31,6 +31,9 @@ Options:
   --rewrite-imports <js|bare|off>
                         how relative .rl import specifiers are emitted:
                         js = ./x.js (default), bare = ./x, off = untouched
+  --symbols             print rl enum declarations (with positions) and the
+                        direct .rl imports of each input as JSON; compiles
+                        nothing (for language tooling)
   -h, --help            show this help
   -v, --version         show version"
     );
@@ -62,6 +65,152 @@ fn collect_rl_files(entry: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()>
 struct Job {
     file: PathBuf,
     out_path: PathBuf,
+}
+
+/// `--symbols`: prints, as a JSON array on stdout, each input file's rl
+/// enum declarations (positions included) and its direct relative `.rl`
+/// imports with the referenced files' exported declarations — the symbol
+/// interface language tooling consumes (module graph phase 3). Compiles
+/// nothing; unreadable *imported* files yield `"resolved": null` while
+/// unreadable *input* files fail the run.
+fn symbols_mode(jobs: &[Job]) -> ExitCode {
+    let mut entries: Vec<String> = Vec::new();
+    let mut failed = false;
+    for job in jobs {
+        let filename = job.file.display().to_string();
+        let source = match fs::read_to_string(&job.file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("rlc: {filename}: {e}");
+                failed = true;
+                continue;
+            }
+        };
+        let mut entry = format!("{{\"file\":{}", json_str(&filename));
+        entry.push_str(",\"enums\":");
+        entry.push_str(&enums_json(&source, &rlc::enum_symbols(&source)));
+        entry.push_str(",\"imports\":[");
+        let dir = job.file.parent().unwrap_or(Path::new("."));
+        let imports = rlc::rl_imports(&source)
+            .iter()
+            .map(|import| {
+                let mut o = format!("{{\"specifier\":{}", json_str(&import.specifier));
+                o.push_str(",\"names\":");
+                o.push_str(&names_json(&import.names));
+                let target = dir.join(&import.specifier);
+                match fs::read_to_string(&target) {
+                    Ok(imported_src) => {
+                        o.push_str(&format!(
+                            ",\"resolved\":{}",
+                            json_str(&target.display().to_string())
+                        ));
+                        let exported: Vec<EnumSymbol> = rlc::enum_symbols(&imported_src)
+                            .into_iter()
+                            .filter(|e| e.exported)
+                            .collect();
+                        o.push_str(",\"enums\":");
+                        o.push_str(&enums_json(&imported_src, &exported));
+                    }
+                    Err(_) => o.push_str(",\"resolved\":null,\"enums\":[]"),
+                }
+                o.push('}');
+                o
+            })
+            .collect::<Vec<_>>();
+        entry.push_str(&imports.join(","));
+        entry.push_str("]}");
+        entries.push(entry);
+    }
+    println!("[{}]", entries.join(","));
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn enums_json(source: &str, symbols: &[EnumSymbol]) -> String {
+    let objects = symbols
+        .iter()
+        .map(|e| {
+            let (line, col) = rlc::line_col(source, e.offset);
+            let cases = e
+                .cases
+                .iter()
+                .map(|c| {
+                    let (line, col) = rlc::line_col(source, c.offset);
+                    let fields = match &c.fields {
+                        None => "null".to_string(),
+                        Some(fields) => format!(
+                            "[{}]",
+                            fields
+                                .iter()
+                                .map(|f| format!(
+                                    "{{\"name\":{},\"optional\":{},\"type\":{}}}",
+                                    json_str(&f.name),
+                                    f.optional,
+                                    json_str(&f.ty)
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
+                    };
+                    format!(
+                        "{{\"tag\":{},\"line\":{line},\"col\":{col},\"fields\":{fields}}}",
+                        json_str(&c.tag)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"name\":{},\"exported\":{},\"generics\":{},\"line\":{line},\"col\":{col},\"cases\":[{cases}]}}",
+                json_str(&e.name),
+                e.exported,
+                json_str(&e.generics)
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", objects.join(","))
+}
+
+fn names_json(names: &RlImportNames) -> String {
+    match names {
+        RlImportNames::Namespace(ns) => {
+            format!("{{\"kind\":\"namespace\",\"name\":{}}}", json_str(ns))
+        }
+        RlImportNames::Named(entries) => format!(
+            "{{\"kind\":\"named\",\"entries\":[{}]}}",
+            entries
+                .iter()
+                .map(|(name, alias)| format!(
+                    "{{\"name\":{},\"alias\":{}}}",
+                    json_str(name),
+                    alias.as_deref().map_or("null".to_string(), json_str)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        RlImportNames::None => "{\"kind\":\"none\"}".to_string(),
+    }
+}
+
+/// Minimal JSON string encoding (quotes, backslashes, control characters).
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Collects enum declarations from the file's direct relative `.rl`
@@ -117,6 +266,7 @@ fn main() -> ExitCode {
     let mut check = false;
     let mut banner = true;
     let mut verify = true;
+    let mut symbols = false;
     let mut rewrite_imports = ImportRewrite::default();
 
     let mut it = argv.iter();
@@ -132,6 +282,7 @@ fn main() -> ExitCode {
             }
             "-p" | "--print" => print = true,
             "--check" => check = true,
+            "--symbols" => symbols = true,
             "--no-banner" => banner = false,
             "--no-verify" => verify = false,
             "-o" | "--out-dir" => match it.next() {
@@ -227,6 +378,10 @@ fn main() -> ExitCode {
     if jobs.is_empty() {
         eprintln!("rlc: no .rl files found");
         return ExitCode::FAILURE;
+    }
+
+    if symbols {
+        return symbols_mode(&jobs);
     }
 
     let mut failed = false;

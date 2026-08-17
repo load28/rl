@@ -124,6 +124,83 @@ function analyze(doc: TextDocument): Analyzed {
   return result;
 }
 
+// ------------------------------------------------- imported declarations
+
+/* Cross-file declarations come from the compiler (`rlc --symbols`,
+ * cli.md): the file's direct `.rl` imports and the referenced files'
+ * exported enums, with positions. Only named imports (aliases applied)
+ * are merged — mirroring the compiler's collection — and the compiler is
+ * run on the saved file, so a not-yet-saved edit to the import lines can
+ * lag one save behind. */
+
+const importedCache = new Map<
+  string,
+  { version: number; enums: analysis.EnumInfo[] }
+>();
+
+async function importedEnums(doc: TextDocument): Promise<analysis.EnumInfo[]> {
+  const cached = importedCache.get(doc.uri);
+  if (cached && cached.version === doc.version) return cached.enums;
+  let enums: analysis.EnumInfo[] = [];
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme === "file") {
+    const settings = await getSettings(doc.uri);
+    const compiler = rlc.findCompiler(settings.compilerPath, workspaceRoots);
+    const symbols = await rlc.runSymbols(compiler, uri.fsPath);
+    if (symbols) enums = toImportedEnumInfos(symbols);
+  }
+  importedCache.set(doc.uri, { version: doc.version, enums });
+  return enums;
+}
+
+/** Convert the compiler's symbol report into EnumInfo entries for merging
+ * (named imports only; aliases applied; offsets are -1 — positions live in
+ * the declaring file via `imported`). */
+function toImportedEnumInfos(symbols: rlc.SymbolsFile): analysis.EnumInfo[] {
+  const out: analysis.EnumInfo[] = [];
+  for (const imp of symbols.imports) {
+    if (imp.resolved === null || imp.names.kind !== "named") continue;
+    for (const entry of imp.names.entries) {
+      const e = imp.enums.find((x) => x.name === entry.name);
+      if (!e) continue;
+      const casePositions: Record<string, { line: number; col: number }> = {};
+      for (const c of e.cases) {
+        casePositions[c.tag] = { line: c.line, col: c.col };
+      }
+      out.push({
+        name: entry.alias ?? entry.name,
+        nameStart: -1,
+        nameEnd: -1,
+        generics: e.generics,
+        exported: true,
+        builtin: false,
+        start: -1,
+        end: -1,
+        cases: e.cases.map((c) => ({
+          tag: c.tag,
+          tagStart: -1,
+          tagEnd: -1,
+          fields: (c.fields ?? []).map((f) => ({
+            name: f.name,
+            optional: f.optional,
+            type: f.type,
+          })),
+          hasParens: c.fields !== null,
+        })),
+        imported: {
+          path: imp.resolved,
+          specifier: imp.specifier,
+          name: e.name,
+          line: e.line,
+          col: e.col,
+          cases: casePositions,
+        },
+      });
+    }
+  }
+  return out;
+}
+
 // ------------------------------------------------------------- diagnostics
 
 const pendingValidation = new Map<string, NodeJS.Timeout>();
@@ -213,9 +290,18 @@ function toDiagnostic(doc: TextDocument, d: rlc.RlcDiagnostic): Diagnostic {
 }
 
 documents.onDidOpen((e) => scheduleValidation(e.document));
-documents.onDidChangeContent((e) => scheduleValidation(e.document));
+documents.onDidChangeContent((e) => {
+  // Editing one file can change what its siblings import — drop their
+  // cached imported declarations (the edited doc's own entry refreshes by
+  // version).
+  for (const uri of importedCache.keys()) {
+    if (uri !== e.document.uri) importedCache.delete(uri);
+  }
+  scheduleValidation(e.document);
+});
 documents.onDidClose((e) => {
   analysisCache.delete(e.document.uri);
+  importedCache.delete(e.document.uri);
   const pending = pendingValidation.get(e.document.uri);
   if (pending !== undefined) {
     clearTimeout(pending);
@@ -246,7 +332,7 @@ const KEYWORD_SNIPPETS: CompletionItem[] = [
     documentation: {
       kind: MarkupKind.Markdown,
       value:
-        "`kind` 태그로 분기하는 match 표현식. `_` 없는 match는 같은 파일의 rl enum에 대해 소진성이 검사됩니다.",
+        "`kind` 태그로 분기하는 match 표현식. `_` 없는 match는 같은 파일·import한 rl enum에 대해 소진성이 검사됩니다.",
     },
     insertTextFormat: InsertTextFormat.Snippet,
     insertText: "match (${1:value}) {\n\t$0\n}",
@@ -278,12 +364,12 @@ const KEYWORD_SNIPPETS: CompletionItem[] = [
   },
 ];
 
-connection.onCompletion((params): CompletionItem[] => {
+connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
   const { masked, enums, matches } = analyze(doc);
   const offset = doc.offsetAt(params.position);
-  const visible = analysis.visibleEnums(enums);
+  const visible = analysis.visibleEnums(enums, await importedEnums(doc));
 
   // `Enum.` member access → constructors of that enum.
   const base = analysis.memberAccessAt(masked, offset);
@@ -355,7 +441,9 @@ connection.onCompletion((params): CompletionItem[] => {
     kind: CompletionItemKind.Enum,
     detail: e.builtin
       ? `내장 enum ${e.name}${e.generics}`
-      : `enum ${e.name}${e.generics}`,
+      : e.imported
+        ? `enum ${e.name}${e.generics} — ${e.imported.specifier}`
+        : `enum ${e.name}${e.generics}`,
     sortText: `0${e.name}`,
   }));
   return items.concat(KEYWORD_SNIPPETS);
@@ -384,7 +472,7 @@ function constructorItem(
 
 // ------------------------------------------------------------------- hover
 
-connection.onHover((params) => {
+connection.onHover(async (params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
   const { text, masked, enums, matches } = analyze(doc);
@@ -400,21 +488,30 @@ connection.onHover((params) => {
           value:
             "```rl\nmatch (값) { 패턴 => 본문, ... }\n```\n" +
             "rl match 표현식 — 값의 `kind` 필드로 분기합니다. " +
-            "`_` 없는 match는 같은 파일의 rl enum(내장 `Option`/`Result` 포함)에 대해 소진성이 검사됩니다.",
+            "`_` 없는 match는 같은 파일·import한 rl enum(내장 `Option`/`Result` 포함)에 대해 소진성이 검사됩니다.",
         },
         range: { start: doc.positionAt(w.start), end: doc.positionAt(w.end) },
       };
     }
   }
 
-  const sym = analysis.symbolAt(text, masked, offset, enums, matches);
+  const sym = analysis.symbolAt(
+    text,
+    masked,
+    offset,
+    enums,
+    matches,
+    await importedEnums(doc),
+  );
   if (!sym || !w) return null;
 
   const range = { start: doc.positionAt(w.start), end: doc.positionAt(w.end) };
   if (sym.kind === "enum") {
     const note = sym.enum.builtin
       ? "내장 enum — 선언 없이도 match 소진성 검사의 대상입니다. 값·타입은 표준 라이브러리 모듈(`rlc --emit-std`)에서 import하세요."
-      : "rl enum — 같은 이름의 타입 별칭(`kind` 태그드 유니언)과 생성자 객체로 컴파일됩니다.";
+      : sym.enum.imported
+        ? `\`${sym.enum.imported.specifier}\`에서 import한 rl enum — match 소진성 검사의 대상입니다.`
+        : "rl enum — 같은 이름의 타입 별칭(`kind` 태그드 유니언)과 생성자 객체로 컴파일됩니다.";
     return {
       contents: {
         kind: MarkupKind.Markdown,
@@ -428,7 +525,11 @@ connection.onHover((params) => {
   const what = unit
     ? "유닛 케이스 — 싱글턴 값으로 컴파일됩니다."
     : "페이로드 케이스 — 생성자 함수로 컴파일됩니다.";
-  const origin = sym.enum.builtin ? `내장 enum \`${sym.enum.name}\`` : `\`enum ${sym.enum.name}\``;
+  const origin = sym.enum.builtin
+    ? `내장 enum \`${sym.enum.name}\``
+    : sym.enum.imported
+      ? `\`${sym.enum.imported.specifier}\`의 \`enum ${sym.enum.name}\``
+      : `\`enum ${sym.enum.name}\``;
   return {
     contents: {
       kind: MarkupKind.Markdown,
@@ -440,13 +541,40 @@ connection.onHover((params) => {
 
 // -------------------------------------------------------------- definition
 
-connection.onDefinition((params) => {
+connection.onDefinition(async (params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
   const { text, masked, enums, matches } = analyze(doc);
   const offset = doc.offsetAt(params.position);
-  const sym = analysis.symbolAt(text, masked, offset, enums, matches);
+  const sym = analysis.symbolAt(
+    text,
+    masked,
+    offset,
+    enums,
+    matches,
+    await importedEnums(doc),
+  );
   if (!sym || sym.enum.builtin) return null;
+
+  // Imported enum: the declaration lives in the imported file, at the
+  // 1-based position the compiler reported. The name/tag is an ASCII
+  // identifier, so its length is its column width.
+  const imported = sym.enum.imported;
+  if (imported) {
+    const target =
+      sym.kind === "enum"
+        ? { pos: imported, length: imported.name.length }
+        : { pos: imported.cases[sym.case.tag], length: sym.case.tag.length };
+    if (!target.pos) return null;
+    const start = {
+      line: target.pos.line - 1,
+      character: target.pos.col - 1,
+    };
+    return Location.create(URI.file(imported.path).toString(), {
+      start,
+      end: { line: start.line, character: start.character + target.length },
+    });
+  }
 
   const [start, end] =
     sym.kind === "enum"
@@ -500,9 +628,9 @@ connection.onDocumentSymbol((params): DocumentSymbol[] => {
 // ------------------------------------------------------------ code actions
 
 const NON_EXHAUSTIVE_RE =
-  /match on (?:built-in )?enum (\w+) is not exhaustive: missing (.+?) \(add/;
+  /match on (?:built-in |imported )?enum ([\w.]+)(?: \(imported from "[^"]+"\))? is not exhaustive: missing (.+?) \(add/;
 
-connection.onCodeAction((params): CodeAction[] => {
+connection.onCodeAction(async (params): Promise<CodeAction[]> => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
   const actions: CodeAction[] = [];
@@ -519,7 +647,7 @@ connection.onCodeAction((params): CodeAction[] => {
     const match = analysis.matchKeywordAt(matches, offset);
     if (!match) continue;
     const e = analysis
-      .visibleEnums(enums)
+      .visibleEnums(enums, await importedEnums(doc))
       .find((x) => x.name === m[1]);
 
     const armFor = (tag: string): string => {

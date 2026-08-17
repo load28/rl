@@ -17,7 +17,7 @@ pub(super) fn parse_enum<'t>(
     mut cur: Cursor<'t>,
     exported: bool,
 ) -> Option<(Cursor<'t>, usize, EnumDecl)> {
-    let (name, _) = cur.eat_ident()?;
+    let (name, name_span) = cur.eat_ident()?;
     if is_reserved(name) {
         return None;
     }
@@ -57,6 +57,7 @@ pub(super) fn parse_enum<'t>(
         byte_end,
         EnumDecl {
             name: name.to_string(),
+            name_off: name_span.start,
             exported,
             generics: generics.to_string(),
             cases,

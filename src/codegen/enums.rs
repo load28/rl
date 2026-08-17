@@ -7,6 +7,7 @@ use crate::scanner::*;
 pub(super) fn emit_enum(decl: &EnumDecl) -> String {
     let EnumDecl {
         name,
+        name_off: _,
         exported,
         generics,
         cases,

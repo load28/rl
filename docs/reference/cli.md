@@ -28,6 +28,7 @@ cargo build --release        # → target/release/rlc
 | `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
 | `--no-verify` | 필드 타입 검사와 생성물 자가 검사를 생략합니다. 검증기가 아직 모르는 최신 TS 문법을 쓴 코드를 위한 탈출구입니다. |
 | `--rewrite-imports <js\|bare\|off>` | 상대 경로 `.rl` import 지정자의 방출 형태 ([`language.md` §7](./language.md#7-모듈-rl-import-지정자-재작성)): `js`(기본) = `./x.js`, `bare` = `./x`, `off` = 재작성 끔. 그 외 값은 에러입니다. |
+| `--symbols` | 컴파일하지 않고 각 입력 파일의 rl enum 선언(위치 포함)과 직접 `.rl` import를 JSON으로 stdout에 출력합니다 (아래 "심볼 출력"). 언어 도구용. |
 | `-h, --help` | 도움말을 출력하고 종료합니다 (종료 코드 0). |
 | `-v, --version` | 버전만 출력하고 종료합니다 (종료 코드 0). |
 
@@ -62,6 +63,40 @@ cargo build --release        # → target/release/rlc
 
 기존 파일은 덮어씁니다. `-p`가 있으면 파일을 쓰지 않고, `--check`면 아무
 출력도 만들지 않습니다.
+
+## 심볼 출력 (`--symbols`)
+
+언어 도구(VSCode 확장 등)가 rl 문법을 다시 구현하지 않도록, 컴파일러가
+심볼 정보를 JSON 배열(입력 파일당 한 항목)로 내보냅니다:
+
+```jsonc
+[{
+  "file": "parser.rl",
+  "enums": [                       // 이 파일의 rl enum (exported 여부 포함)
+    { "name": "Local", "exported": false, "generics": "",
+      "line": 3, "col": 6,         // 이름 위치 (1-기반, 열은 UTF-8 코드포인트)
+      "cases": [
+        { "tag": "A", "line": 3, "col": 14,
+          "fields": [ { "name": "x", "optional": false, "type": "number" } ] },
+        { "tag": "B", "line": 3, "col": 30, "fields": null }  // null = 유닛 케이스
+      ] }
+  ],
+  "imports": [                     // 직접 상대 경로 .rl import/re-export
+    { "specifier": "./token.rl",
+      "names": { "kind": "named",  // "namespace" { name } / "none" 도 가능
+                 "entries": [ { "name": "Token", "alias": "Tok" } ] },
+      "resolved": "./token.rl",    // 읽지 못하면 null (enums는 [])
+      "enums": [ /* 참조 파일의 exported enum, 같은 형태 */ ] }
+  ]
+}]
+```
+
+- 위치는 에러 보고와 같은 규약입니다: 1-기반 행, UTF-8 코드포인트 단위 열.
+- import 수집은 소진성 검사와 같은 **1-홉**입니다
+  ([`language.md` §7.3](./language.md#73-선언-수집과-프로젝트-단위-소진성)).
+- `--symbols`는 컴파일 모드와 조합되지 않습니다 — 지정하면 심볼 출력만
+  하고 종료합니다 (`-o`/`-p`/`--check` 무시). 입력 파일을 읽지 못하면
+  종료 코드 1입니다.
 
 ## 배너
 
@@ -102,6 +137,7 @@ rlc --check src/            # CI용: 검사만, 쓰기 없음
 rlc --no-verify file.rl     # swc 검증 생략
 rlc --emit-std src/rl.ts    # 표준 라이브러리 모듈 생성
 rlc --rewrite-imports bare src/   # .rl import를 확장자 없이 방출 (번들러용)
+rlc --symbols file.rl             # 심볼 JSON 출력 (언어 도구용)
 ```
 
 빌드 파이프라인에서는 tsc 앞 단계로 실행합니다 (표준 라이브러리를 쓴다면

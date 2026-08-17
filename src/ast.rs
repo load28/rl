@@ -127,6 +127,8 @@ pub(crate) struct TryStmt {
 #[derive(Debug)]
 pub(crate) struct EnumDecl {
     pub name: String,
+    /// Byte offset of the name, for error reporting and the symbol API.
+    pub name_off: usize,
     pub exported: bool,
     /// The verbatim `<...>` generic parameter list, or `""`.
     pub generics: String,

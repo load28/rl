@@ -8,6 +8,13 @@
 
 ### Added
 
+- 심볼 인터페이스: `rlc --symbols <file>`이 rl enum 선언(1-기반 위치 포함)과
+  직접 `.rl` import(참조 파일의 exported 선언 포함)를 JSON으로 출력. VSCode
+  언어 서버가 이를 소비해 **크로스 파일 정의 이동·자동완성·호버·빠른 수정**
+  제공 (named import 별칭 반영). 라이브러리 API: `enum_symbols` /
+  `EnumSymbol`/`CaseSymbol`/`FieldSymbol` / `line_col`. 모듈 그래프 로드맵
+  3단계 완결. (TASK-023)
+
 - 프로젝트 단위 소진성 검사: 직접 import한 `.rl` 파일의 exported enum에
   대한 match도 빠진 케이스를 컴파일 에러로 보고
   (`match on enum Token (imported from "./token.rl") is not exhaustive`).

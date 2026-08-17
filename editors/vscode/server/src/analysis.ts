@@ -235,6 +235,21 @@ export interface CaseInfo {
   hasParens: boolean;
 }
 
+/** Where an enum imported from another `.rl` file was declared. */
+export interface ImportedOrigin {
+  /** Path of the declaring file (as resolved by `rlc --symbols`). */
+  path: string;
+  /** The import specifier as written (e.g. `./token.rl`), for hover. */
+  specifier: string;
+  /** The enum's declared (pre-alias) name in that file. */
+  name: string;
+  /** 1-based position of the enum name in the declaring file. */
+  line: number;
+  col: number;
+  /** 1-based positions of each case tag in the declaring file. */
+  cases: Record<string, { line: number; col: number }>;
+}
+
 export interface EnumInfo {
   name: string;
   nameStart: number;
@@ -247,6 +262,9 @@ export interface EnumInfo {
   /** Byte range of the whole declaration (export .. closing brace). */
   start: number;
   end: number;
+  /** Set for enums brought in by a `.rl` import (offsets above are -1 —
+   * positions live in the declaring file). */
+  imported?: ImportedOrigin;
 }
 
 /** Built-in enums (sema.rs BUILTIN_ENUMS): exhaustiveness-checked without a
@@ -300,10 +318,18 @@ export const BUILTIN_ENUMS: EnumInfo[] = [
   },
 ];
 
-/** Declared enums plus non-shadowed built-ins. */
-export function visibleEnums(declared: EnumInfo[]): EnumInfo[] {
-  return declared.concat(
-    BUILTIN_ENUMS.filter((b) => !declared.some((d) => d.name === b.name)),
+/** Declared enums, then non-shadowed imported enums, then non-shadowed
+ * built-ins — the same local > imported > built-in shadowing the compiler
+ * applies (sema.rs). */
+export function visibleEnums(
+  declared: EnumInfo[],
+  imported: EnumInfo[] = [],
+): EnumInfo[] {
+  const visible = declared.concat(
+    imported.filter((i) => !declared.some((d) => d.name === i.name)),
+  );
+  return visible.concat(
+    BUILTIN_ENUMS.filter((b) => !visible.some((d) => d.name === b.name)),
   );
 }
 
@@ -734,10 +760,11 @@ export function symbolAt(
   offset: number,
   declared: EnumInfo[],
   matches: MatchInfo[],
+  imported: EnumInfo[] = [],
 ): SymbolAt | null {
   const w = wordAt(src, offset);
   if (w === null || !isIdent(w.word)) return null;
-  const enums = visibleEnums(declared);
+  const enums = visibleEnums(declared, imported);
 
   // Enum.Tag member access.
   const base = memberAccessAt(masked, w.start);

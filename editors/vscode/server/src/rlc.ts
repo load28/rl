@@ -106,6 +106,86 @@ export function runCheck(
   });
 }
 
+/* ----------------------------------------------------------------------
+ * Symbol interface (`rlc --symbols`, docs/reference/cli.md): the compiler
+ * reports a file's rl enum declarations (with 1-based positions) and its
+ * direct relative `.rl` imports, including each referenced file's exported
+ * declarations — the server consumes this for cross-file features instead
+ * of re-implementing import resolution.
+ * -------------------------------------------------------------------- */
+
+export interface SymbolsField {
+  name: string;
+  optional: boolean;
+  type: string;
+}
+
+export interface SymbolsCase {
+  tag: string;
+  line: number;
+  col: number;
+  /** null for a unit case without parens. */
+  fields: SymbolsField[] | null;
+}
+
+export interface SymbolsEnum {
+  name: string;
+  exported: boolean;
+  generics: string;
+  line: number;
+  col: number;
+  cases: SymbolsCase[];
+}
+
+export type SymbolsNames =
+  | { kind: "namespace"; name: string }
+  | { kind: "named"; entries: { name: string; alias: string | null }[] }
+  | { kind: "none" };
+
+export interface SymbolsImport {
+  specifier: string;
+  names: SymbolsNames;
+  /** Path the specifier resolved to, or null if unreadable. */
+  resolved: string | null;
+  enums: SymbolsEnum[];
+}
+
+export interface SymbolsFile {
+  file: string;
+  enums: SymbolsEnum[];
+  imports: SymbolsImport[];
+}
+
+/**
+ * Run `rlc --symbols` on a file on disk. Returns null when the compiler is
+ * missing, predates `--symbols`, or the output is unparseable — callers
+ * degrade to single-file behavior.
+ */
+export function runSymbols(
+  compiler: string,
+  file: string,
+): Promise<SymbolsFile | null> {
+  return new Promise((resolve) => {
+    execFile(
+      compiler,
+      ["--symbols", file],
+      { timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) {
+          resolve(null);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(String(stdout)) as SymbolsFile[];
+          resolve(parsed[0] ?? null);
+        } catch {
+          resolve(null);
+        }
+      },
+    );
+  });
+}
+
 /** Parse `rlc: <file>:<line>:<col>: <msg>` / `rlc: <file>: <msg>` lines. */
 export function parseStderr(stderr: string, file: string): RlcDiagnostic[] {
   const diagnostics: RlcDiagnostic[] = [];
