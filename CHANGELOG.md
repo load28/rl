@@ -8,6 +8,14 @@
 
 ### Added
 
+- npm 패키징: `npm install --save-dev rl-lang`으로 rlc가 프리빌트
+  바이너리로 설치된다 (bin `rlc`, esbuild/swc 방식의 플랫폼 패키지
+  optionalDependencies — linux-x64/arm64는 musl 정적 링크, darwin-x64/arm64,
+  win32-x64). 릴리스 워크플로(`release.yml`)가 태그 `vX.Y.Z`에서 빌드·npm
+  배포·GitHub Release 업로드를 자동화한다. `unplugin-rl`은 설치된
+  `rl-lang`의 바이너리를 자동으로 찾는다 (`rl-lang`의 `binaryPath()` 공개
+  API, 없으면 종전대로 PATH의 `rlc`). (TASK-048)
+
 - 통일된 타입·빌드 파이프라인 (TASK-036 계획, TASK-037):
   - 기본 모드가 **build**가 되어 디렉터리 입력에서 손으로 쓴
     TypeScript(`.ts`/`.mts`/`.cts`)도 함께 수집한다 — 바이트 그대로

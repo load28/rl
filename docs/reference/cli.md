@@ -11,6 +11,22 @@
 rlc [options] <file | dir> ...
 ```
 
+## 설치
+
+```sh
+npm install --save-dev rl-lang    # 프리빌트 바이너리, `npx rlc`로 실행
+```
+
+npm 패키지 [`rl-lang`](https://www.npmjs.com/package/rl-lang)은 플랫폼별
+프리빌트 바이너리(linux-x64/arm64 · darwin-x64/arm64 · win32-x64)를
+optionalDependencies로 함께 설치합니다. 그 밖의 플랫폼은
+`cargo install --git https://github.com/load28/rl`로 빌드한 뒤, npm 런처를
+쓰려면 `RLC_BINARY` 환경 변수로 바이너리를 가리키면 됩니다.
+
+릴리스는 태그 `vX.Y.Z` 푸시로 이루어집니다 — `.github/workflows/release.yml`이
+태그와 `Cargo.toml` 버전 일치를 검증하고, 5개 타깃을 빌드해 npm 배포와
+GitHub Release 업로드까지 수행합니다.
+
 ## 옵션
 
 | 옵션 | 설명 |

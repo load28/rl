@@ -83,12 +83,22 @@ function readPort(raw: string): Result<number, string> {
 
 ## 설치와 사용
 
-```sh
-cargo install --path .        # rlc
+TypeScript처럼 npm으로 설치합니다. 프리빌트 바이너리가 함께 설치되므로
+Rust 툴체인이 필요 없습니다.
 
-rlc -o build src/             # 소스 트리 → TypeScript 트리
-rlc --check src/              # 컴파일하지 않고 검사만
-rlc --types src/              # 에디터·tsc용 타입 선언
+```sh
+npm install --save-dev rl-lang    # rlc 컴파일러 (프리빌트 바이너리)
+
+npx rlc -o build src/             # 소스 트리 → TypeScript 트리
+npx rlc --check src/              # 컴파일하지 않고 검사만
+npx rlc --types src/              # 에디터·tsc용 타입 선언
+```
+
+프리빌트 지원 플랫폼은 linux-x64 / linux-arm64 / darwin-x64 / darwin-arm64 /
+win32-x64입니다. 그 밖의 플랫폼이거나 npm 없이 쓰려면 소스에서 빌드합니다:
+
+```sh
+cargo install --git https://github.com/load28/rl   # 또는 클론 후 --path .
 ```
 
 번들러를 쓰면 [`unplugin-rl`](./integrations/unplugin)이 `.rl`을 직접 읽습니다.
