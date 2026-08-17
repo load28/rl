@@ -41,6 +41,9 @@ export function rl(options = {}) {
     enforce: "pre",
 
     resolveId(source, importer) {
+      // The standard library has no file: rlc prints it on demand, so it
+      // becomes a virtual module. Nothing lands in the project tree.
+      if (source === STD_SPECIFIER) return stdId();
       if (!source.endsWith(".rl")) return null;
       const file = path.isAbsolute(source)
         ? source
@@ -55,6 +58,12 @@ export function rl(options = {}) {
     },
 
     async load(id) {
+      if (id === stdId()) {
+        const { stdout } = await run(compiler, ["--emit-std", "-", "--no-banner"], {
+          maxBuffer: 16 * 1024 * 1024,
+        });
+        return { code: stdout, map: null };
+      }
       if (!id.endsWith(`.rl${TS_SUFFIX}`)) return null;
       const file = id.slice(0, -TS_SUFFIX.length);
 
@@ -79,5 +88,20 @@ export function rl(options = {}) {
 
 /** Virtual suffix that marks a compiled `.rl` module as TypeScript. */
 const TS_SUFFIX = ".ts";
+
+/** The bare specifier rl sources use for the standard library. */
+const STD_SPECIFIER = "@rl/std";
+
+/**
+ * Virtual module id for the standard library.
+ *
+ * Deliberately *not* the conventional `\0`-prefixed form: hosts skip their
+ * TypeScript pass on `\0` ids, and rlc emits TypeScript. A path-shaped id
+ * ending in `.ts` gets transformed like any other module; nothing reads it
+ * from disk because this plugin resolves and loads it first.
+ */
+function stdId() {
+  return path.resolve(process.cwd(), `__rl_std__${TS_SUFFIX}`);
+}
 
 export default rl;

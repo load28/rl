@@ -14,6 +14,16 @@
 /// `docs/reference/std.md` for the module's API.
 pub const STD_SOURCE: &str = include_str!("stdlib/rl_std.ts");
 
+/// The bare specifier a `.rl` file uses to reach [`STD_SOURCE`].
+///
+/// It is bare rather than relative on purpose: a relative path would have
+/// to name a file that only exists after generation, and TypeScript's
+/// `paths` — the mapping an editor needs — does not apply to relative
+/// specifiers. The `rlc` CLI writes the module into the output tree and
+/// rewrites this specifier to point at it; a bundler plugin can serve it
+/// as a virtual module instead.
+pub const STD_SPECIFIER: &str = "@rl/std";
+
 /// Enums the exhaustiveness check knows about without a declaration in the
 /// file: name → case tags. A file-local rl enum with the same name shadows
 /// the built-in one (see [`crate::sema`]).

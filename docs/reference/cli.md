@@ -25,7 +25,7 @@ cargo build --release        # → target/release/rlc
 | `-p, --print` | 파일을 쓰는 대신 컴파일 결과를 stdout으로 출력합니다. |
 | `-w, --watch` | 한 번 컴파일한 뒤 계속 실행하며 바뀐 파일을 다시 컴파일합니다 (아래 "감시 모드"). |
 | `--check` | 컴파일만 하고 아무것도 쓰지 않습니다 (문법·소진성 검사 용도). |
-| `--emit-std <file>` | 표준 라이브러리 모듈(`Option`/`Result` + 콤비네이터, [`std.md`](./std.md))을 `<file>`에 씁니다. 입력 없이 단독으로 쓸 수도, 컴파일과 함께 쓸 수도 있습니다. 배너가 붙으며 `--no-banner`로 생략합니다. |
+| `--emit-std <file>` | 표준 라이브러리 모듈(`Option`/`Result` + 콤비네이터, [`std.md`](./std.md))을 `<file>`에 씁니다. `-`를 주면 stdout으로 출력합니다 (번들러 플러그인용). 입력 없이 단독으로 쓸 수도, 컴파일과 함께 쓸 수도 있습니다. 배너가 붙으며 `--no-banner`로 생략합니다. |
 | `--no-banner` | 출력 첫 줄의 "generated" 배너 주석을 생략합니다. |
 | `--no-verify` | 필드 타입 검사와 생성물 자가 검사를 생략합니다. 검증기가 아직 모르는 최신 TS 문법을 쓴 코드를 위한 탈출구입니다. |
 | `--rewrite-imports <js\|ts\|bare\|off>` | 상대 경로 `.rl` import 지정자의 방출 형태 ([`language.md` §7](./language.md#7-모듈-rl-import-지정자-재작성)): `js`(기본) = `./x.js`, `ts` = `./x.ts`(tsc의 `rewriteRelativeImportExtensions` 필요), `bare` = `./x`, `off` = 재작성 끔. 그 외 값은 에러입니다. |
@@ -99,6 +99,25 @@ cargo build --release        # → target/release/rlc
 - `--symbols`는 컴파일 모드와 조합되지 않습니다 — 지정하면 심볼 출력만
   하고 종료합니다 (`-o`/`-p`/`--check` 무시). 입력 파일을 읽지 못하면
   종료 코드 1입니다.
+
+## 표준 라이브러리 자동 방출
+
+입력 중 하나라도 `@rl/std`를 import하면, 컴파일할 때 표준 라이브러리 모듈이
+**출력 트리에 자동으로** 쓰이고 각 출력의 지정자가 그것을 가리키도록
+재작성됩니다 — `--emit-std`를 따로 부를 필요가 없습니다.
+
+```sh
+$ rlc -o build src/
+rlc: std → build/rl.ts
+rlc: src/main.rl → build/main.ts        # import ... from "./rl.js"
+rlc: src/deep/nested.rl → build/deep/nested.ts   # "../rl.js"
+```
+
+- 위치는 `-o` 디렉터리(없으면 출력들의 공통 상위)이고 파일 이름은 `rl.ts`입니다.
+- 지정자의 형태는 `--rewrite-imports`를 따릅니다: `js`(기본) → `./rl.js`,
+  `ts` → `./rl.ts`, `bare` → `./rl`, `off` → `@rl/std` 그대로.
+- `off`로 두는 것은 번들러 플러그인이 이 지정자를 직접 해석할 때입니다
+  ([`integrations/vite`](../../integrations/vite/README.md)).
 
 ## 감시 모드 (`-w`)
 

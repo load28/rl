@@ -873,6 +873,34 @@ fn rewrite_keeps_quote_style_and_parent_paths() {
 }
 
 #[test]
+fn the_std_specifier_is_left_alone_by_default() {
+    // A bundler plugin resolves `@rl/std` itself, so the untouched
+    // specifier is the right default.
+    let src = "import { Option, Result } from \"@rl/std\";\n";
+    assert_eq!(ok(src), src);
+}
+
+#[test]
+fn the_std_specifier_is_rewritten_when_the_caller_places_the_module() {
+    let opts = Options {
+        std_import: Some("../rl.js"),
+        ..Options::default()
+    };
+    let out = compile("import { Option } from '@rl/std';\n", &opts).unwrap();
+    // The quote style survives; only the specifier's text changes.
+    assert_eq!(out, "import { Option } from '../rl.js';\n");
+}
+
+#[test]
+fn the_std_specifier_is_not_a_project_module() {
+    // It has no file to follow, so it is not part of the module graph the
+    // CLI walks for declarations.
+    assert!(rlc::rl_imports("import { Option } from \"@rl/std\";\n").is_empty());
+    assert!(rlc::imports_std("export { Result } from \"@rl/std\";\n"));
+    assert!(!rlc::imports_std("import { Option } from \"./rl.js\";\n"));
+}
+
+#[test]
 fn ts_mode_points_at_the_emitted_file() {
     // With `allowImportingTsExtensions` + `rewriteRelativeImportExtensions`,
     // tsc accepts `.ts` specifiers and rewrites them to `.js` on emit — so

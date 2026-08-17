@@ -55,8 +55,19 @@ pub(crate) enum Segment {
 pub(crate) struct RlImportDecl {
     /// Span of the specifier string, including quotes.
     pub spec: Span,
+    /// Which kind of rl specifier this is.
+    pub kind: RlSpecifier,
     /// What the statement brings into local scope.
     pub names: RlImportNames,
+}
+
+/// The two specifiers rlc understands beyond plain passthrough.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RlSpecifier {
+    /// A relative path ending in `.rl` — another module of this project.
+    Relative,
+    /// The standard library (`@rl/std`), which rlc supplies itself.
+    Std,
 }
 
 /// The bindings a lifted `.rl` import brings into local scope. Collection

@@ -60,7 +60,7 @@ mod verify;
 
 pub use error::CompileError;
 pub use sidecar::{Sidecar, build_sidecar};
-pub use stdlib::STD_SOURCE;
+pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
 
 use error::RlError;
 
@@ -177,17 +177,40 @@ pub fn rl_imports(source: &str) -> Vec<RlImport> {
         .segments
         .iter()
         .filter_map(|segment| match segment {
-            ast::Segment::RlImport(decl) => Some(RlImport {
-                specifier: source[decl.spec.start + 1..decl.spec.end - 1].to_string(),
-                names: match &decl.names {
-                    ast::RlImportNames::Namespace(ns) => RlImportNames::Namespace(ns.clone()),
-                    ast::RlImportNames::Named(entries) => RlImportNames::Named(entries.clone()),
-                    ast::RlImportNames::None => RlImportNames::None,
-                },
-            }),
+            // The standard library is not a project module — nothing to
+            // resolve or collect declarations from.
+            ast::Segment::RlImport(decl) if decl.kind == ast::RlSpecifier::Relative => {
+                Some(RlImport {
+                    specifier: source[decl.spec.start + 1..decl.spec.end - 1].to_string(),
+                    names: match &decl.names {
+                        ast::RlImportNames::Namespace(ns) => RlImportNames::Namespace(ns.clone()),
+                        ast::RlImportNames::Named(entries) => RlImportNames::Named(entries.clone()),
+                        ast::RlImportNames::None => RlImportNames::None,
+                    },
+                })
+            }
             _ => None,
         })
         .collect()
+}
+
+/// Whether a source file imports the standard library ([`STD_SPECIFIER`]).
+///
+/// Build tools use this to decide whether the module has to be written out
+/// (the `rlc` CLI does it automatically) and where the importing file
+/// should point — see [`Options::std_import`].
+///
+/// ```
+/// assert!(rlc::imports_std("import { Option } from \"@rl/std\";\n"));
+/// assert!(!rlc::imports_std("import { Option } from \"./rl.js\";\n"));
+/// ```
+pub fn imports_std(source: &str) -> bool {
+    parser::parse(source).segments.iter().any(|segment| {
+        matches!(
+            segment,
+            ast::Segment::RlImport(decl) if decl.kind == ast::RlSpecifier::Std
+        )
+    })
 }
 
 /// An rl enum declaration with source positions — the symbol-interface
@@ -314,6 +337,12 @@ pub struct Options<'a> {
     /// built-ins of the same name). The `rlc` CLI fills this from the
     /// file's direct relative `.rl` imports.
     pub extern_enums: &'a [ExternEnum],
+    /// What `"@rl/std"` ([`STD_SPECIFIER`]) is rewritten to on the way out
+    /// — the path of the standard library module this output will sit
+    /// next to (`"./rl.js"`, `"../rl.ts"`, ...). `None` leaves the bare
+    /// specifier untouched, which is what a bundler plugin wants: it
+    /// resolves the module itself.
+    pub std_import: Option<&'a str>,
 }
 
 impl Default for Options<'_> {
@@ -323,6 +352,7 @@ impl Default for Options<'_> {
             verify: true,
             rewrite_imports: ImportRewrite::default(),
             extern_enums: &[],
+            std_import: None,
         }
     }
 }
@@ -377,7 +407,12 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
     // tsc) → code emission (infallible).
     let program = parser::parse(source);
     sema::check(&program, options.verify, options.extern_enums).map_err(to_compile_error)?;
-    let code = codegen::emit(&program, source, options.rewrite_imports);
+    let code = codegen::emit(
+        &program,
+        source,
+        options.rewrite_imports,
+        options.std_import,
+    );
 
     if options.verify
         && let Err(message) = verify::verify_output(&code)

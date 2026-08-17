@@ -16,7 +16,7 @@
 
 use super::cursor::Cursor;
 use super::is_reserved;
-use crate::ast::{RlImportDecl, RlImportNames, Span};
+use crate::ast::{RlImportDecl, RlImportNames, RlSpecifier, Span};
 
 use crate::lexer::TokenKind;
 
@@ -34,12 +34,13 @@ pub(super) fn parse_rl_import<'t>(
         match first.kind {
             // `import "spec";` — side-effect import, the specifier is right here.
             TokenKind::Str => {
-                let spec = rl_spec_span(&cur, first.span)?;
+                let (spec, kind) = rl_spec_span(&cur, first.span)?;
                 cur.bump();
                 return Some((
                     cur,
                     RlImportDecl {
                         spec,
+                        kind,
                         names: RlImportNames::None,
                     },
                 ));
@@ -115,7 +116,7 @@ fn clause_then_spec(mut cur: Cursor<'_>, local: bool) -> Option<(Cursor<'_>, RlI
                     if !matches!(spec_tok.kind, TokenKind::Str) {
                         return None;
                     }
-                    let spec = rl_spec_span(&cur, spec_tok.span)?;
+                    let (spec, kind) = rl_spec_span(&cur, spec_tok.span)?;
                     cur.bump();
                     let names = match (namespace, named) {
                         _ if !local => RlImportNames::None,
@@ -124,7 +125,7 @@ fn clause_then_spec(mut cur: Cursor<'_>, local: bool) -> Option<(Cursor<'_>, RlI
                         // only a default binding (rl enums are named exports)
                         (None, None) => RlImportNames::None,
                     };
-                    return Some((cur, RlImportDecl { spec, names }));
+                    return Some((cur, RlImportDecl { spec, kind, names }));
                 }
                 if is_reserved(word) {
                     return None;
@@ -178,7 +179,7 @@ fn named_entries(cur: Cursor) -> Vec<(String, Option<String>)> {
 
 /// `span` is a lexed string token; returns it back if its content is a
 /// relative path ending in `.rl`.
-fn rl_spec_span(cur: &Cursor, span: Span) -> Option<Span> {
+fn rl_spec_span(cur: &Cursor, span: Span) -> Option<(Span, RlSpecifier)> {
     let src = cur.parser.bytes;
     let quote = src[span.start];
     // The lexer tolerates unterminated strings (stopping at a newline or
@@ -187,9 +188,12 @@ fn rl_spec_span(cur: &Cursor, span: Span) -> Option<Span> {
         return None;
     }
     let spec = &src[span.start + 1..span.end - 1];
+    if spec == crate::stdlib::STD_SPECIFIER.as_bytes() {
+        return Some((span, RlSpecifier::Std));
+    }
     let relative = spec.starts_with(b"./") || spec.starts_with(b"../");
     if relative && spec.ends_with(b".rl") {
-        Some(span)
+        Some((span, RlSpecifier::Relative))
     } else {
         None
     }

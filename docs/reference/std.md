@@ -1,28 +1,35 @@
 # rl 표준 라이브러리 레퍼런스
 
-`rlc --emit-std <파일>`이 생성하는 표준 라이브러리 모듈의 API를 정의합니다.
+`@rl/std`가 제공하는 표준 라이브러리 모듈의 API를 정의합니다.
 언어에서의 위치(내장 enum, 소진성 검사)는
 [`language.md` §4](./language.md#4-표준-라이브러리와-내장-enum), CLI 옵션은
 [`cli.md`](./cli.md) 참조.
 
 ## 개요
 
-표준 라이브러리는 **순수 TypeScript 모듈 파일 하나**입니다. rl은 런타임을
-주입하지 않으므로, 이 파일을 프로젝트에 한 번 생성해 두고 일반 모듈처럼
-import합니다:
-
-```sh
-rlc --emit-std src/rl.ts
-```
+표준 라이브러리는 **순수 TypeScript 모듈 하나**입니다. rl은 런타임을
+주입하지 않으므로, 소스에서는 bare 지정자로 가져다 씁니다.
 
 ```rl
-import { Option, Result } from "./rl.js";
+import { Option, Result } from "@rl/std";
 ```
 
-- import 경로는 사용자의 모듈 해석 설정을 따릅니다 — Node ESM(`nodenext`)은
-  `./rl.js`처럼 확장자가 필요하고, 번들러 해석에서는 `./rl`도 됩니다.
-- 파일은 재생성으로 갱신합니다 (직접 수정하지 않기). 기본적으로
-  `@generated` 배너가 붙습니다 (`--no-banner`로 생략).
+지정자가 상대 경로가 아닌 이유는 소비자마다 이 모듈이 있는 곳이 다르기
+때문입니다. 셋 다 알아서 풉니다.
+
+| 소비자 | 해석 |
+|--------|------|
+| `rlc` | 이 지정자를 발견하면 **출력 트리에 모듈을 자동으로 쓰고** 지정자를 그 상대 경로로 바꿉니다 ([`cli.md`](./cli.md) "표준 라이브러리 자동 방출") |
+| 번들러 | 플러그인이 가상 모듈로 내용을 바로 제공합니다 — 파일이 생기지 않습니다 ([`integrations/vite`](../../integrations/vite/README.md)) |
+| tsc·에디터 | `tsconfig.json`의 `paths`로 매핑합니다 (bare 지정자라 `paths`가 적용됩니다) |
+
+```jsonc
+// tsconfig.json — 에디터·타입 검사용
+"paths": { "@rl/std": ["./build/rl.ts"] }
+```
+
+파일이 직접 필요하면(vendoring, npm을 쓰지 않는 환경) 여전히
+`rlc --emit-std <파일>`로 뽑을 수 있고, `-`를 주면 stdout으로 나옵니다.
 
 ### 값의 형태 계약
 

@@ -22,10 +22,16 @@ use crate::ImportRewrite;
 use crate::ast::*;
 
 /// Emits a whole program back to TypeScript text.
-pub(crate) fn emit(program: &Program, src: &str, rewrite_imports: ImportRewrite) -> String {
+pub(crate) fn emit(
+    program: &Program,
+    src: &str,
+    rewrite_imports: ImportRewrite,
+    std_import: Option<&str>,
+) -> String {
     let emitter = Emitter {
         bytes: src.as_bytes(),
         rewrite_imports,
+        std_import,
         try_seq: Cell::new(0),
     };
     emitter.emit_program(program)
@@ -34,6 +40,9 @@ pub(crate) fn emit(program: &Program, src: &str, rewrite_imports: ImportRewrite)
 pub(super) struct Emitter<'a> {
     pub(super) bytes: &'a [u8],
     rewrite_imports: ImportRewrite,
+    /// Replacement for the standard library's bare specifier, if the caller
+    /// supplied one (see [`crate::Options::std_import`]).
+    std_import: Option<&'a str>,
     /// File-wide counter for `try` and let-else temporaries — unlike the
     /// match IIFE's `$rl_m`, these statements emit into the enclosing
     /// scope, so every temporary needs a unique name (`$rl_t0`, `$rl_t1`, ...).
@@ -56,7 +65,7 @@ impl Emitter<'_> {
                 Segment::LetElse(stmt) => {
                     out.extend_from_slice(self.emit_let_else(stmt).as_bytes());
                 }
-                Segment::RlImport(decl) => self.emit_rl_import(decl.spec, &mut out),
+                Segment::RlImport(decl) => self.emit_rl_import(decl.spec, decl.kind, &mut out),
                 Segment::Template(template) => self.emit_template(template, &mut out),
             }
         }
@@ -123,8 +132,24 @@ impl Emitter<'_> {
     /// the extension per [`ImportRewrite`]. The parser guarantees the span
     /// is a quoted string whose content ends in `.rl`, so the last four
     /// bytes are `.rl` plus the closing quote.
-    fn emit_rl_import(&self, span: Span, out: &mut Vec<u8>) {
+    fn emit_rl_import(&self, span: Span, kind: RlSpecifier, out: &mut Vec<u8>) {
         let spec = &self.bytes[span.start..span.end];
+
+        // The standard library is not on disk until rlc writes it, so its
+        // specifier is only rewritten when the caller says where it went.
+        if kind == RlSpecifier::Std {
+            match self.std_import {
+                Some(path) => {
+                    let quote = spec[0];
+                    out.push(quote);
+                    out.extend_from_slice(path.as_bytes());
+                    out.push(quote);
+                }
+                None => out.extend_from_slice(spec),
+            }
+            return;
+        }
+
         match self.rewrite_imports {
             ImportRewrite::Off => out.extend_from_slice(spec),
             ImportRewrite::Js => {
