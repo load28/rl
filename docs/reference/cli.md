@@ -206,7 +206,7 @@ rlc: src/deep/nested.rl → build/deep/nested.ts   # "../rl.js"
 - 지정자의 형태는 `--rewrite-imports`를 따릅니다: `js`(기본) → `./rl.js`,
   `ts` → `./rl.ts`, `off` → `@rl/std` 그대로.
 - `off`로 두는 것은 번들러 플러그인이 이 지정자를 직접 해석할 때입니다
-  ([`integrations/vite`](../../integrations/vite/README.md)) — 플러그인은
+  ([`integrations/unplugin`](../../integrations/unplugin/README.md)) — 플러그인은
   `--emit-std`(stdout)로 모듈 본문을 받아 가상 모듈로 서빙합니다.
 
 ## 감시 모드 (`-w`)

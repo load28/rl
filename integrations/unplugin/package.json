@@ -1,0 +1,41 @@
+{
+  "name": "unplugin-rl",
+  "version": "0.1.0",
+  "description": "Compile .rl modules with rlc in Vite, Rollup, webpack, Rspack, esbuild and Farm",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./vite": "./vite.js",
+    "./rollup": "./rollup.js",
+    "./rolldown": "./rolldown.js",
+    "./webpack": "./webpack.js",
+    "./rspack": "./rspack.js",
+    "./esbuild": "./esbuild.js",
+    "./farm": "./farm.js"
+  },
+  "files": [
+    "index.js",
+    "vite.js",
+    "rollup.js",
+    "rolldown.js",
+    "webpack.js",
+    "rspack.js",
+    "esbuild.js",
+    "farm.js",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/load28/rl",
+    "directory": "integrations/unplugin"
+  },
+  "keywords": ["unplugin", "vite-plugin", "rollup-plugin", "webpack-plugin", "esbuild-plugin", "rl", "typescript"],
+  "dependencies": {
+    "unplugin": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

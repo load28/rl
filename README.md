@@ -98,7 +98,7 @@ rlc -w -o build src/     # 감시 모드
 rlc file.rl              # 단일 파일: file.ts 생성
 ```
 
-단독(tsc)이든 번들러 플러그인([`integrations/vite`](./integrations/vite))
+단독(tsc)이든 번들러 플러그인([`integrations/unplugin`](./integrations/unplugin))
 이든 소스는 같은 모양입니다 — 손으로 쓴 `.ts`도 `"./x.rl"`을 그대로
 import하고, 타입은 어느 쪽이든 `rlc --types`가 만듭니다:
 

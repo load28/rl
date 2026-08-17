@@ -20,7 +20,7 @@ import { Option, Result } from "@rl/std";
 | 소비자 | 해석 |
 |--------|------|
 | `rlc` | 이 지정자를 발견하면 **출력 트리에 모듈을 자동으로 쓰고** 지정자를 그 상대 경로로 바꿉니다 ([`cli.md`](./cli.md) "표준 라이브러리 자동 방출") |
-| 번들러 | 플러그인이 가상 모듈로 내용을 바로 제공합니다 — 파일이 생기지 않습니다 ([`integrations/vite`](../../integrations/vite/README.md)) |
+| 번들러 | 플러그인이 가상 모듈로 내용을 바로 제공합니다 — 파일이 생기지 않습니다 ([`integrations/unplugin`](../../integrations/unplugin/README.md)) |
 | tsc·에디터 | `tsconfig.json`의 `paths`로 매핑합니다 (bare 지정자라 `paths`가 적용됩니다) |
 
 ```jsonc
