@@ -562,8 +562,23 @@ CLI 플래그(라이브러리에서는 `Options { rewrite_imports }`)로 선택�
 | 모드 | `"./error.rl"` → | 용도 |
 |------|------------------|------|
 | `js` (기본) | `"./error.js"` | `nodenext`(Node ESM — 확장자 필수)와 `bundler`(tsc가 `.js`를 `.ts`에 대응) 모두에서 동작 |
+| `ts` | `"./error.ts"` | tsc가 `.ts` 지정자를 받아 방출 시 `.js`로 바꾸는 설정 (아래 조건) |
 | `bare` | `"./error"` | 확장자 없는 지정자를 선호하는 번들러 설정 |
 | `off` | `"./error.rl"` | 재작성 끔 — 바이트 그대로 통과 |
+
+`ts` 모드는 소비 측 `tsconfig.json`에 다음 두 옵션이 필요하고 TypeScript
+5.7 이상이어야 합니다. `allowImportingTsExtensions`만 켜면 emit이 막힙니다
+(`TS5096`).
+
+```jsonc
+{ "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true } }
+```
+
+이 모드에서는 확장자 재작성이 층마다 한 번씩 일어납니다 —
+`.rl` →(rlc)→ `.ts` →(tsc)→ `.js`. rlc는 자기가 실제로 방출하는 파일만
+가리키면 되고, `.js`는 tsc의 몫이 됩니다.
 
 `rlc`는 `x.rl`을 `x.ts`로 컴파일하고 tsc가 그것을 `x.js`로 방출하므로,
 기본값 `js`는 "컴파일된 이웃 파일"을 가리키는 정확한 지정자입니다.

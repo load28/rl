@@ -873,6 +873,36 @@ fn rewrite_keeps_quote_style_and_parent_paths() {
 }
 
 #[test]
+fn ts_mode_points_at_the_emitted_file() {
+    // With `allowImportingTsExtensions` + `rewriteRelativeImportExtensions`,
+    // tsc accepts `.ts` specifiers and rewrites them to `.js` on emit — so
+    // rlc only has to name the file it actually produces.
+    let opts = Options {
+        rewrite_imports: rlc::ImportRewrite::Ts,
+        ..Options::default()
+    };
+    let out = compile("import { E } from \"./error.rl\";\n", &opts).unwrap();
+    assert_eq!(out, "import { E } from \"./error.ts\";\n");
+}
+
+#[test]
+fn ts_mode_preserves_the_quote_style_and_path() {
+    let opts = Options {
+        rewrite_imports: rlc::ImportRewrite::Ts,
+        ..Options::default()
+    };
+    let out = compile(
+        "import a from './x.rl';\nexport * from \"../up/y.rl\";\n",
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(
+        out,
+        "import a from './x.ts';\nexport * from \"../up/y.ts\";\n"
+    );
+}
+
+#[test]
 fn bare_mode_strips_the_extension() {
     let opts = Options {
         rewrite_imports: rlc::ImportRewrite::Bare,

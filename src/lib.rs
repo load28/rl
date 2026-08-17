@@ -74,6 +74,11 @@ pub enum ImportRewrite {
     /// `.js` to `.ts`). The default.
     #[default]
     Js,
+    /// `"./x.rl"` → `"./x.ts"` — points at the file rlc actually emits.
+    /// Requires the consumer to enable TypeScript's
+    /// `allowImportingTsExtensions` *and* `rewriteRelativeImportExtensions`
+    /// (TypeScript 5.7+), which turn `.ts` specifiers into `.js` on emit.
+    Ts,
     /// `"./x.rl"` → `"./x"` — for bundler setups that prefer
     /// extensionless specifiers.
     Bare,

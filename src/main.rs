@@ -28,9 +28,10 @@ Options:
   --emit-std <file>     write the standard library module (Option/Result) to <file>
   --no-banner           omit the \"generated\" banner comment
   --no-verify           skip swc validation of types and generated output
-  --rewrite-imports <js|bare|off>
+  --rewrite-imports <js|ts|bare|off>
                         how relative .rl import specifiers are emitted:
-                        js = ./x.js (default), bare = ./x, off = untouched
+                        js = ./x.js (default), ts = ./x.ts, bare = ./x,
+                        off = untouched
   --symbols             print rl enum declarations (with positions) and the
                         direct .rl imports of each input as JSON; compiles
                         nothing (for language tooling)
@@ -294,14 +295,15 @@ fn main() -> ExitCode {
             },
             "--rewrite-imports" => match it.next().map(String::as_str) {
                 Some("js") => rewrite_imports = ImportRewrite::Js,
+                Some("ts") => rewrite_imports = ImportRewrite::Ts,
                 Some("bare") => rewrite_imports = ImportRewrite::Bare,
                 Some("off") => rewrite_imports = ImportRewrite::Off,
                 Some(other) => {
-                    eprintln!("rlc: --rewrite-imports expects js, bare, or off (got {other})");
+                    eprintln!("rlc: --rewrite-imports expects js, ts, bare, or off (got {other})");
                     return ExitCode::FAILURE;
                 }
                 None => {
-                    eprintln!("rlc: --rewrite-imports requires a value (js, bare, or off)");
+                    eprintln!("rlc: --rewrite-imports requires a value (js, ts, bare, or off)");
                     return ExitCode::FAILURE;
                 }
             },
