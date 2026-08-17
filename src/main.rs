@@ -460,7 +460,7 @@ fn main() -> ExitCode {
             "--node" => match it.next() {
                 Some(path) => node = Some(PathBuf::from(path)),
                 None => {
-                    eprintln!("rlc: --tsc requires a path to the tsc binary");
+                    eprintln!("rlc: --node requires a path to the node binary");
                     return ExitCode::FAILURE;
                 }
             },

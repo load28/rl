@@ -1,62 +1,41 @@
 # rl 표준 라이브러리 레퍼런스
 
-`@rl/std`가 제공하는 표준 라이브러리 모듈의 API를 정의합니다.
-언어에서의 위치(내장 enum, 소진성 검사)는
-[`language.md` §4](./language.md#4-표준-라이브러리와-내장-enum), CLI 옵션은
-[`cli.md`](./cli.md) 참조.
-
-## 개요
-
-표준 라이브러리는 **순수 TypeScript 모듈 하나**입니다. rl은 런타임을
-주입하지 않으므로, 소스에서는 bare 지정자로 가져다 씁니다.
+`@rl/std`가 제공하는 `Option<T>`/`Result<T, E>`와 콤비네이터입니다. 언어에서의
+위치(내장 enum, 소진성 검사)는
+[`language.md` §4](./language.md#4-표준-라이브러리와-내장-enum), 실체화 방식은
+[`cli.md`](./cli.md)를 보세요.
 
 ```rl
 import { Option, Result } from "@rl/std";
 ```
 
-지정자가 상대 경로가 아닌 이유는 소비자마다 이 모듈이 있는 곳이 다르기
-때문입니다. 셋 다 알아서 풉니다.
+지정자가 bare인 이유는 모듈의 위치가 소비 층마다 다르기 때문입니다.
 
 | 소비자 | 해석 |
 |--------|------|
-| `rlc` | 이 지정자를 발견하면 **출력 트리에 모듈을 자동으로 쓰고** 지정자를 그 상대 경로로 바꿉니다 ([`cli.md`](./cli.md) "표준 라이브러리 자동 방출") |
-| 번들러 | 플러그인이 가상 모듈로 내용을 바로 제공합니다 — 파일이 생기지 않습니다 ([`integrations/unplugin`](../../integrations/unplugin/README.md)) |
-| tsc·에디터 | `tsconfig.json`의 `paths`로 매핑합니다 (bare 지정자라 `paths`가 적용됩니다) |
+| `rlc` | 출력 트리에 모듈을 자동으로 쓰고 지정자를 그 상대 경로로 바꿉니다 |
+| 번들러 | 플러그인이 가상 모듈로 제공합니다 — 파일이 생기지 않습니다 |
+| tsc·에디터 | `tsconfig.json`의 `paths`로 매핑합니다 (`rlc --types`가 `rl.d.ts`를 함께 만듭니다) |
 
-```jsonc
-// tsconfig.json — 에디터·타입 검사용
-"paths": { "@rl/std": ["./build/rl.ts"] }
-```
+파일이 직접 필요하면 `rlc --emit-std`로 stdout에 받을 수 있습니다.
 
-모듈 본문이 직접 필요하면(번들러 플러그인의 가상 모듈, vendoring)
-`rlc --emit-std`가 stdout으로 출력합니다 — 빌드에서는 자동 방출이
-대신하므로 파일로 뽑아 둘 일은 없습니다.
+## 값의 형태 계약
 
-### 값의 형태 계약
-
-모듈 안의 선언은 아래 rl enum을 컴파일한 결과와 **바이트 단위로 같은
-형태**입니다 (컴파일러 테스트로 보장):
+모듈 안의 선언은 아래 rl enum을 컴파일한 결과와 **바이트 단위로 같은 형태**입니다
+(컴파일러 테스트로 보장).
 
 ```rl
-export enum Option<T> {
-  Some(value: T),
-  None,
-}
-export enum Result<T, E> {
-  Ok(value: T),
-  Err(error: E),
-}
+export enum Option<T> { Some(value: T), None }
+export enum Result<T, E> { Ok(value: T), Err(error: E) }
 ```
 
-즉 값은 순수 데이터(`kind` 태그드 객체)이고, `match`·소진성 검사·
-`JSON.stringify`가 모두 그대로 동작합니다. `Some`/`Ok`의 페이로드 필드명은
-`value`, `Err`는 `error`입니다 — match 바인딩은 이름 기준이므로
-`Some(value)`, `Err(error)` 또는 별칭 `Some(value: v)`로 씁니다.
+즉 값은 순수 데이터(`kind` 태그드 객체)라 `match`·소진성 검사·`JSON.stringify`가
+그대로 동작합니다. 페이로드 필드명은 `Some`/`Ok`가 `value`, `Err`가 `error`이고,
+match 바인딩은 이름 기준이므로 `Some(value)`·`Err(error)` 또는 별칭
+`Some(value: v)`로 씁니다. 콤비네이터는 전부 **데이터-우선 정적 함수**입니다
+(메서드 체이닝 없음).
 
 ## `Option<T>`
-
-`Option.Some(x)` / `Option.None`으로 만들고, 콤비네이터는 전부 **데이터-우선
-정적 함수**입니다 (값은 순수 객체로 유지 — 메서드 체이닝 없음).
 
 | 함수 | 시그니처 | 설명 |
 |------|----------|------|
@@ -105,7 +84,7 @@ export enum Result<T, E> {
 ## 사용 예
 
 ```rl
-import { Option, Result } from "./rl.js";
+import { Option, Result } from "@rl/std";
 
 function parseNum(raw: string): Result<number, string> {
   const n = Number(raw);
@@ -116,7 +95,7 @@ const half = (n: number): Option<number> =>
   n % 2 === 0 ? Option.Some(n / 2) : Option.None;
 
 // 콤비네이터로 파이프라인을 만들고, 마지막 분기는 match로:
-const msg = match (Result.map(parseNum("42"), (n) => half(n))) {
+const msg = match (Result.map(parseNum("42"), half)) {
   Ok(value) => match (value) {
     Some(value: h) => `half=${h}`,
     None => "odd",
@@ -125,10 +104,7 @@ const msg = match (Result.map(parseNum("42"), (n) => half(n))) {
 };
 ```
 
-`Some`/`None`, `Ok`/`Err`에 대한 `_` 없는 match는 내장 enum 소진성 검사를
-받습니다 — 빠진 케이스는 rlc 컴파일 에러입니다
-([language.md §4.2](./language.md#42-내장-enum과-소진성-검사)).
-
-`Result`를 반환하는 함수 안에서는 `try` 문으로 에러를 Rust의 `?`처럼 전파할
-수 있습니다: `const n = try parseNum(raw);`
-([language.md §5](./language.md#5-에러-전파-try-문)).
+`Some`/`None`, `Ok`/`Err`에 대한 `_` 없는 match는 내장 enum 소진성 검사를 받고
+([§4.2](./language.md#42-내장-enum과-소진성-검사)), `Result`를 반환하는 함수
+안에서는 `try`로 Rust의 `?`처럼 전파할 수 있습니다
+([§5](./language.md#5-에러-전파-try-문)).
