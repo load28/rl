@@ -31,6 +31,7 @@ import { URI } from "vscode-uri";
 
 import * as analysis from "./analysis";
 import * as rlc from "./rlc";
+import * as tsproject from "./tsproject";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -122,6 +123,70 @@ function analyze(doc: TextDocument): Analyzed {
   };
   analysisCache.set(doc.uri, result);
   return result;
+}
+
+// -------------------------------------------- TypeScript language service
+
+/* An .rl file is TypeScript plus four constructs, so symbols the rl
+ * analysis does not own — variables, functions, types, imported values —
+ * are answered by the real TypeScript language service over the same
+ * sources (tsproject.ts). Used as the fallback for definitions and hover;
+ * TS diagnostics are never surfaced. */
+
+let tsProjectInstance: tsproject.TsProject | null = null;
+
+function getTsProject(): tsproject.TsProject {
+  tsProjectInstance ??= new tsproject.TsProject(
+    (fileName) => {
+      for (const doc of documents.all()) {
+        const uri = URI.parse(doc.uri);
+        if (uri.scheme === "file" && uri.fsPath === fileName) {
+          return { text: doc.getText(), version: doc.version };
+        }
+      }
+      return null;
+    },
+    () =>
+      documents
+        .all()
+        .map((d) => URI.parse(d.uri))
+        .filter((u) => u.scheme === "file")
+        .map((u) => u.fsPath),
+    workspaceRoots[0] ?? process.cwd(),
+  );
+  return tsProjectInstance;
+}
+
+function tsDefinitions(doc: TextDocument, offset: number): Location[] | null {
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return null;
+  const definitions = getTsProject().definitionsAt(uri.fsPath, offset);
+  if (definitions.length === 0) return null;
+  return definitions.map((d) =>
+    Location.create(URI.file(d.fileName).toString(), {
+      start: tsproject.positionAt(d.fileText, d.start),
+      end: tsproject.positionAt(d.fileText, d.start + d.length),
+    }),
+  );
+}
+
+function tsHover(doc: TextDocument, offset: number) {
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return null;
+  const info = getTsProject().quickInfoAt(uri.fsPath, offset);
+  if (!info || info.signature === "") return null;
+  const value =
+    "```ts\n" +
+    info.signature +
+    "\n```" +
+    (info.documentation ? `\n${info.documentation}` : "");
+  return {
+    contents: { kind: MarkupKind.Markdown, value },
+    range: {
+      start: doc.positionAt(info.start),
+      end: doc.positionAt(info.start + info.length),
+    },
+  };
 }
 
 // ------------------------------------------------- imported declarations
@@ -503,7 +568,8 @@ connection.onHover(async (params) => {
     matches,
     await importedEnums(doc),
   );
-  if (!sym || !w) return null;
+  // Not an rl symbol — an ordinary TypeScript one, perhaps. Delegate.
+  if (!sym || !w) return tsHover(doc, offset);
 
   const range = { start: doc.positionAt(w.start), end: doc.positionAt(w.end) };
   if (sym.kind === "enum") {
@@ -554,36 +620,45 @@ connection.onDefinition(async (params) => {
     matches,
     await importedEnums(doc),
   );
-  if (!sym || sym.enum.builtin) return null;
-
-  // Imported enum: the declaration lives in the imported file, at the
-  // 1-based position the compiler reported. The name/tag is an ASCII
-  // identifier, so its length is its column width.
-  const imported = sym.enum.imported;
-  if (imported) {
-    const target =
-      sym.kind === "enum"
-        ? { pos: imported, length: imported.name.length }
-        : { pos: imported.cases[sym.case.tag], length: sym.case.tag.length };
-    if (!target.pos) return null;
-    const start = {
-      line: target.pos.line - 1,
-      character: target.pos.col - 1,
-    };
-    return Location.create(URI.file(imported.path).toString(), {
-      start,
-      end: { line: start.line, character: start.character + target.length },
-    });
+  if (sym && !sym.enum.builtin) {
+    // Imported enum: the declaration lives in the imported file, at the
+    // 1-based position the compiler reported. The name/tag is an ASCII
+    // identifier, so its length is its column width.
+    const imported = sym.enum.imported;
+    if (imported) {
+      const target =
+        sym.kind === "enum"
+          ? { pos: imported, length: imported.name.length }
+          : { pos: imported.cases[sym.case.tag], length: sym.case.tag.length };
+      if (target.pos) {
+        const start = {
+          line: target.pos.line - 1,
+          character: target.pos.col - 1,
+        };
+        return Location.create(URI.file(imported.path).toString(), {
+          start,
+          end: {
+            line: start.line,
+            character: start.character + target.length,
+          },
+        });
+      }
+    } else {
+      const [start, end] =
+        sym.kind === "enum"
+          ? [sym.enum.nameStart, sym.enum.nameEnd]
+          : [sym.case.tagStart, sym.case.tagEnd];
+      return Location.create(doc.uri, {
+        start: doc.positionAt(start),
+        end: doc.positionAt(end),
+      });
+    }
   }
 
-  const [start, end] =
-    sym.kind === "enum"
-      ? [sym.enum.nameStart, sym.enum.nameEnd]
-      : [sym.case.tagStart, sym.case.tagEnd];
-  return Location.create(doc.uri, {
-    start: doc.positionAt(start),
-    end: doc.positionAt(end),
-  });
+  // Everything else — ordinary TypeScript symbols, and built-in enum
+  // names the user may have imported from the std module — is the
+  // TypeScript language service's answer.
+  return tsDefinitions(doc, offset);
 });
 
 // ----------------------------------------------------------------- symbols
