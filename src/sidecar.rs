@@ -60,16 +60,20 @@ pub fn build_sidecar(source: &str, declarations: &str, rl_file_name: &str) -> Si
 
     let map_name = format!("{rl_file_name}.d.ts.map");
     let body = decl_lines.join("\n");
+    // The banner costs one generated line, so the mappings are shifted by
+    // one (the leading `;` below).
     let declarations = format!(
-        "{}\n//# sourceMappingURL={}\n",
+        "// @generated from {rl_file_name} by rlc --sidecar — do not edit.\n{}\n//# sourceMappingURL={}\n",
         body.trim_end(),
         map_name.as_str()
     );
+    // A leading `;` skips the banner line the declarations open with.
+    let mappings = format!(";{}", encode_mappings(&hits));
     let map = format!(
         "{{\"version\":3,\"file\":{},\"sourceRoot\":\"\",\"sources\":[{}],\"names\":[],\"mappings\":\"{}\"}}\n",
         json_string(&format!("{rl_file_name}.d.ts")),
         json_string(rl_file_name),
-        encode_mappings(&hits),
+        mappings,
     );
 
     Sidecar { declarations, map }

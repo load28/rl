@@ -71,6 +71,29 @@ TS 파서의 오류 복구 덕분에 rl 구문이 섞여 있어도 통과 영역
 사이드카를 읽으려면 그 `.ts` 파일을 포함하는 `tsconfig.json`이 있어야
 합니다 — 추론 프로젝트로 열리면 tsserver가 선언 맵을 따라가지 않습니다.
 
+### 소스 트리를 어지럽히지 않게
+
+사이드카는 반드시 `.rl` **옆에** 그 이름으로 있어야 합니다. TypeScript는
+상대 경로 지정자를 `paths`로 우회시키지 않으므로(`TS2307`) 다른 디렉터리로
+옮길 수 없습니다. 대신 이 확장이 보이는 방식을 정리해 둡니다.
+
+| 기본값 | 효과 |
+|--------|------|
+| `explorer.fileNesting` | `notice.rl.d.ts`와 `.map`을 `notice.rl` 아래로 접어 넣습니다 |
+| `search.exclude` | 검색 결과에서 뺍니다 |
+| `files.readonlyInclude` | 생성물이므로 읽기 전용으로 엽니다 |
+
+파일 자체도 `// @generated ... do not edit.` 배너로 시작합니다. 셋 다
+사용자 설정으로 덮어쓸 수 있고, 아예 숨기려면 `files.exclude`에
+`**/*.rl.d.ts`와 `**/*.rl.d.ts.map`을 추가하세요.
+
+생성물이므로 `.gitignore`에 넣는 것을 권합니다.
+
+```gitignore
+*.rl.d.ts
+*.rl.d.ts.map
+```
+
 ## 개발
 
 ```sh

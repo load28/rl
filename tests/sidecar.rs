@@ -105,6 +105,20 @@ fn field(map: &str, key: &str) -> String {
 }
 
 #[test]
+fn declarations_open_with_a_generated_banner() {
+    // The file sits next to the source (TypeScript resolves `./x.rl` to a
+    // sibling `x.rl.d.ts` and nowhere else), so it says what it is.
+    let sidecar = build_sidecar(SOURCE, DECLARATIONS, "notice.rl");
+    assert!(
+        sidecar
+            .declarations
+            .starts_with("// @generated from notice.rl by rlc --sidecar"),
+        "{}",
+        sidecar.declarations
+    );
+}
+
+#[test]
 fn declarations_carry_a_source_mapping_url() {
     let sidecar = build_sidecar(SOURCE, DECLARATIONS, "notice.rl");
     assert!(
@@ -150,10 +164,11 @@ fn every_declaration_maps_to_its_position_in_the_rl_source() {
     let notice: Vec<&Segment> = segments.iter().filter(|s| s.source_line == 3).collect();
     assert!(!notice.is_empty(), "{segments:?}");
     assert!(notice.iter().all(|s| s.source_column == 12), "{notice:?}");
+    // Generated lines are shifted by one: line 0 is the @generated banner.
     assert_eq!(
         notice.iter().map(|s| s.generated_line).collect::<Vec<_>>(),
-        vec![1, 1, 8, 8],
-        "type alias (d.ts line 2) and const (line 9) both point at the enum"
+        vec![2, 2, 9, 9],
+        "type alias and constructor const both point at the enum"
     );
 
     // `export function render` is on source line 9 (zero-based 8), name at

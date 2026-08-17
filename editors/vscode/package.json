@@ -39,6 +39,20 @@
         "path": "./syntaxes/rl.tmLanguage.json"
       }
     ],
+    "configurationDefaults": {
+      "explorer.fileNesting.enabled": true,
+      "explorer.fileNesting.patterns": {
+        "*.rl": "${capture}.rl.d.ts, ${capture}.rl.d.ts.map"
+      },
+      "search.exclude": {
+        "**/*.rl.d.ts": true,
+        "**/*.rl.d.ts.map": true
+      },
+      "files.readonlyInclude": {
+        "**/*.rl.d.ts": true,
+        "**/*.rl.d.ts.map": true
+      }
+    },
     "configuration": {
       "type": "object",
       "title": "rl",
