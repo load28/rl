@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use rlc::{ImportRewrite, Options, compile};
+use rlc::{ExternEnum, ImportRewrite, Options, RlImportNames, compile};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -62,6 +62,49 @@ fn collect_rl_files(entry: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()>
 struct Job {
     file: PathBuf,
     out_path: PathBuf,
+}
+
+/// Collects enum declarations from the file's direct relative `.rl`
+/// imports, so matches over imported enums get exhaustiveness-checked
+/// (module graph phase 2). One hop, import declarations only — re-exports
+/// bring nothing into scope. A specifier that cannot be read is skipped
+/// silently: module resolution is tsc's domain (`TS2307`), and an unknown
+/// enum simply stays unchecked, exactly as before.
+fn collect_extern_enums(file: &Path, source: &str) -> Vec<ExternEnum> {
+    let dir = file.parent().unwrap_or(Path::new("."));
+    let mut externs: Vec<ExternEnum> = Vec::new();
+    for import in rlc::rl_imports(source) {
+        if matches!(import.names, RlImportNames::None) {
+            continue;
+        }
+        let Ok(imported_src) = fs::read_to_string(dir.join(&import.specifier)) else {
+            continue;
+        };
+        let decls = rlc::exported_enums(&imported_src);
+        let from = Some(import.specifier.clone());
+        match &import.names {
+            RlImportNames::Namespace(ns) => {
+                externs.extend(decls.into_iter().map(|d| ExternEnum {
+                    name: format!("{ns}.{}", d.name),
+                    from: from.clone(),
+                    ..d
+                }));
+            }
+            RlImportNames::Named(entries) => {
+                for (name, alias) in entries {
+                    if let Some(d) = decls.iter().find(|d| &d.name == name) {
+                        externs.push(ExternEnum {
+                            name: alias.clone().unwrap_or_else(|| name.clone()),
+                            tags: d.tags.clone(),
+                            from: from.clone(),
+                        });
+                    }
+                }
+            }
+            RlImportNames::None => unreachable!(),
+        }
+    }
+    externs
 }
 
 fn main() -> ExitCode {
@@ -197,10 +240,12 @@ fn main() -> ExitCode {
                 continue;
             }
         };
+        let extern_enums = collect_extern_enums(&job.file, &source);
         let options = Options {
             filename: Some(&filename),
             verify,
             rewrite_imports,
+            extern_enums: &extern_enums,
         };
         let mut code = match compile(&source, &options) {
             Ok(c) => c,

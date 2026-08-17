@@ -314,10 +314,13 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
   `Some(v) if v > 0 => v` 하나만 있는 match는 `Some`·`None` 둘 다 빠진 것으로
   보고됩니다. 무가드 암이나 `_`를 추가하세요.
 - `_` 암이 있는 match는 정의상 소진적이므로 검사하지 않습니다.
-- 검사는 **파일 단위**입니다. 다른 파일에서 import한 enum이나 손으로 쓴
-  태그드 유니언에 대한 match는 검사 없이 컴파일되며, 런타임 가드([§3.4](#34-컴파일-결과))만
-  남습니다 — 단, 내장 `Option`/`Result`([§4.2](#42-내장-enum과-소진성-검사))는
-  예외입니다. 프로젝트 단위 검사는 로드맵입니다.
+- 검사 대상 enum은 세 출처입니다 (같은 이름이면 **로컬 > 임포트 > 내장**
+  순으로 섀도잉): 같은 파일에 선언된 rl enum, 상대 경로 `.rl` import로
+  가져온 exported rl enum([§7.3](#73-선언-수집과-프로젝트-단위-소진성) —
+  `rlc` CLI가 자동 수집), 내장
+  `Option`/`Result`([§4.2](#42-내장-enum과-소진성-검사)).
+- 어느 출처에도 속하지 않는 태그의 match(손으로 쓴 태그드 유니언 등)는 검사
+  없이 컴파일되며, 런타임 가드([§3.4](#34-컴파일-결과))만 남습니다.
 
 ---
 
@@ -565,13 +568,47 @@ CLI 플래그(라이브러리에서는 `Options { rewrite_imports }`)로 선택�
 `rlc`는 `x.rl`을 `x.ts`로 컴파일하고 tsc가 그것을 `x.js`로 방출하므로,
 기본값 `js`는 "컴파일된 이웃 파일"을 가리키는 정확한 지정자입니다.
 
-### 7.3 검사하지 않는 것
+### 7.3 선언 수집과 프로젝트 단위 소진성
 
-재작성은 **문자열 치환**입니다 — 참조된 파일을 열지 않으므로, 파일 존재
-여부는 검사하지 않고(없으면 tsc의 `TS2307`이 보고) import한 enum에 대한
-match 소진성 검사도 하지 않습니다([§3.6](#36-소진성-검사), 프로젝트 단위
-검사는 로드맵 —
-[`module-graph.md`](../design/module-graph.md) 2단계).
+`rlc` CLI로 컴파일하면, 파일의 **직접(1-홉) 상대 경로 `.rl` import**를
+따라가 참조된 파일에서 **exported rl enum 선언(이름 + 태그 집합)만** 뽑아
+소진성 검사([§3.6](#36-소진성-검사))에 포함합니다:
+
+```rl
+// parser.rl
+import { Token } from "./token.rl";
+const show = (t: Token) => match (t) {
+  Num(value) => `${value}`,
+  Ident(name) => name,
+};   // ← token.rl의 Token에 Eof가 있으면 여기서 컴파일 에러
+```
+
+```
+rlc: parser.rl:3:28: match on enum Token (imported from "./token.rl")
+     is not exhaustive: missing "Eof" (add the missing arms or a final `_` arm)
+```
+
+규칙:
+
+- **import 절의 이름만** 수집합니다 — `import { Token }`이면 `Token`만,
+  `import { Token as Tok }`이면 로컬 이름 `Tok`으로, `import * as ns`면
+  모든 exported enum이 `ns.<이름>`으로 등록됩니다. `import type`도
+  동일하게 취급합니다. side-effect import(`import "./x.rl"`)와
+  re-export(`export ... from`)는 로컬 스코프에 아무것도 들이지 않으므로
+  수집하지 않습니다.
+- 같은 이름은 **로컬 선언 > 임포트 > 내장** 순으로 섀도잉됩니다.
+- 수집은 **1-홉**입니다 — 참조된 파일의 re-export 체인은 따라가지
+  않습니다(그런 enum은 그냥 검사되지 않습니다). 순환 import는 1-홉 수집에선
+  재귀가 없으므로 문제가 되지 않습니다.
+- **파일 존재 여부는 검사하지 않습니다** — 읽을 수 없는 지정자는 조용히
+  건너뜁니다. 모듈 해석은 tsc의 책임이고(없는 모듈은 `TS2307`), 알 수 없는
+  enum은 이전처럼 검사 없이 컴파일될 뿐입니다.
+- 타입 검사는 여전히 tsc의 책임입니다 — rlc는 enum 태그 집합 이상을 알지
+  않습니다.
+
+라이브러리로 쓸 때는 수집을 직접 합니다: `rl_imports`(import 목록)와
+`exported_enums`(선언 추출)로 모아 `Options::extern_enums`로 넘기면
+`compile`이 동일하게 검사합니다.
 
 ---
 
@@ -597,8 +634,9 @@ typeof var void while with yield
 - **패턴은 태그 패턴(or-패턴·가드 포함)과 `_`뿐.** 리터럴 패턴, 중첩 패턴은
   의도적으로 지원하지 않습니다 (최소 기능 유지). 가드는 태그 패턴에만
   붙습니다 — `_ if ...`는 rl 구문이 아닙니다.
-- **소진성 검사는 같은 파일의 rl enum과 내장 `Option`/`Result`에 대해서만**
-  동작합니다 (§3.6, §4.2).
+- **소진성 검사의 임포트 수집은 직접(1-홉) 상대 경로 `.rl` import만**
+  대상입니다 — re-export 체인·패키지 경로의 enum과 손으로 쓴 유니언은
+  검사되지 않습니다 (§3.6, §7.3).
 - **import 재작성은 정적 상대 경로 `.rl` 지정자만** 대상입니다 — 동적
   `import(...)`와 패키지/절대 경로 지정자는 재작성되지 않고, 참조 파일의
   존재 여부도 검사하지 않습니다 (§7).

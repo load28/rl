@@ -185,12 +185,12 @@ impl Parser<'_> {
             // the rest of the statement stay verbatim.
             if !dotted
                 && (word == "import" || word == "export")
-                && let Some((cur, spec)) =
+                && let Some((cur, decl)) =
                     imports::parse_rl_import(Cursor::new(self, tokens, i + 1, end), word)
             {
-                flush_verbatim(&mut segments, seg_start, spec.start);
-                segments.push(Segment::RlImport(spec));
-                seg_start = spec.end;
+                flush_verbatim(&mut segments, seg_start, decl.spec.start);
+                seg_start = decl.spec.end;
+                segments.push(Segment::RlImport(decl));
                 i = cur.idx;
                 continue;
             }

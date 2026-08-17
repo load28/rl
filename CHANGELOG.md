@@ -8,6 +8,14 @@
 
 ### Added
 
+- 프로젝트 단위 소진성 검사: 직접 import한 `.rl` 파일의 exported enum에
+  대한 match도 빠진 케이스를 컴파일 에러로 보고
+  (`match on enum Token (imported from "./token.rl") is not exhaustive`).
+  CLI가 import 절 이름(별칭·`* as ns` 포함)대로 선언을 자동 수집하며,
+  섀도잉은 로컬 > 임포트 > 내장 순. 라이브러리 API: `rl_imports` /
+  `exported_enums` / `ExternEnum` / `Options::extern_enums`. 모듈 그래프
+  로드맵의 2단계. (TASK-022)
+
 - `.rl` 간 import: 상대 경로 `.rl` import 지정자를 방출 시 재작성
   (`import { E } from "./error.rl"` → `"./error.js"`). 정적 import 선언과
   re-export 대상, 동적 import·비상대 경로는 통과. CLI `--rewrite-imports

@@ -2,9 +2,10 @@
 
 이 문서는 **제안**이다. 규범 문서가 아니다
 (구현된 구조는 [`compiler-architecture.md`](./compiler-architecture.md)).
-TASK-019에서 작성했다. **1단계는 TASK-020에서 구현되었다**
-(규범 서술: [`language.md` §7](../reference/language.md#7-모듈-rl-import-지정자-재작성));
-2·3단계는 여전히 제안 상태다.
+TASK-019에서 작성했다. **1단계는 TASK-020에서, 2단계는 TASK-022에서
+구현되었다** (규범 서술:
+[`language.md` §7](../reference/language.md#7-모듈-rl-import-지정자-재작성));
+3단계는 여전히 제안 상태다.
 
 rlc는 지금 **파일 하나를 파일 하나로** 바꾼다. `compile(source, &Options) ->
 Result<String, CompileError>`라는 시그니처가 그 사실을 그대로 드러낸다. 이
@@ -52,7 +53,7 @@ import 문의 지정자 구간(바이트 범위)만 추가로 기록하면 된�
 
 이 단계만으로 "소스가 소스를 가리킨다"는 성질을 얻는다.
 
-### 2단계 — 선언 수집과 프로젝트 단위 소진성
+### 2단계 — 선언 수집과 프로젝트 단위 소진성 (구현됨 — TASK-022)
 
 재작성 대상이 된 지정자를 실제로 따라가 참조된 `.rl`을 파싱하고, 그 파일의
 `enum` 선언(태그 목록)만 뽑아 현재 파일의 sema에 넘긴다.
@@ -117,23 +118,38 @@ TS 파일이 `"./x.rl"`을 import하고 있으면 결과가 원문과 달라진�
 **결정(TASK-020)**: 기본 동작으로 넣고 `--rewrite-imports off`를 옵트아웃으로
 남겼다. 예외는 `CLAUDE.md` 계약 1과 `language.md` §1에 명시했다.
 
-### 3. 순환 import
+### 3. 순환 import (결정됨 — TASK-022)
 
 2단계에서 `a.rl ↔ b.rl`이 서로를 import하면 선언 수집이 무한히 돌 수 있다.
 선언만 필요하므로 방문 집합으로 끊으면 충분하다 — 순환 자체를 에러로 볼
 이유는 없다 (TypeScript도 타입 수준 순환을 허용한다).
 
-### 4. 에러 위치 보고
+**결정(TASK-022)**: 수집을 **직접 import 1-홉**으로 한정해 재귀 자체를
+없앴다 — 순환은 발생할 수 없고, 방문 집합도 필요 없다. re-export 체인
+추적(전이 수집)은 필요가 확인되면 별도 태스크로 다룬다.
+
+### 4. 에러 위치 보고 (결정됨 — TASK-022)
 
 지금 모든 에러는 컴파일 중인 파일 기준 `파일:행:열`이다. 2단계에서는 "다른
 파일의 enum" 때문에 에러가 날 수 있으므로, 선언 위치를 함께 보여줄지
 (`... declared at token.rl:7:1`) 정해야 한다.
 
-### 5. 공개 API
+**결정(TASK-022)**: 위치는 컴파일 중인 파일의 `match` 키워드 그대로 두고,
+메시지에 출처를 넣는다: `match on enum Token (imported from "./token.rl")
+is not exhaustive: ...`. 선언 파일의 행:열까지 담으려면 수집 API가 위치를
+운반해야 해서 (지금은 이름+태그뿐) 비용 대비 이득이 작다.
+
+### 5. 공개 API (결정됨 — TASK-022)
 
 `compile(source, &Options)`은 파일 하나를 컴파일하는 API로 그대로 두고,
 그래프를 다루는 새 진입점을 추가하는 편이 안전하다. 라이브러리 사용자가
 파일 하나만 변환하는 경우가 사라지지 않기 때문이다.
+
+**결정(TASK-022)**: `compile`은 그대로, IO도 여전히 라이브러리 밖이다.
+수집 재료를 주는 두 함수(`rl_imports` — import 목록,
+`exported_enums` — exported enum 선언 추출)와 주입구
+(`Options::extern_enums: &[ExternEnum]`)만 추가했고, 파일을 읽는 그래프
+순회는 CLI(`collect_extern_enums`)가 한다.
 
 ## 범위 밖
 

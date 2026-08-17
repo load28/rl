@@ -81,16 +81,119 @@ pub enum ImportRewrite {
     Off,
 }
 
+/// An enum declaration from another module, made available to [`compile`]'s
+/// exhaustiveness checking via [`Options::extern_enums`].
+///
+/// Collected by build tools (the `rlc` CLI does this for direct relative
+/// `.rl` imports) with [`exported_enums`] over the imported file's source,
+/// filtered through the importing file's clause ([`rl_imports`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternEnum {
+    /// The enum's name in the *importing* file's scope (import aliases
+    /// applied; `ns.Name` for a namespace import). A local declaration of
+    /// the same name shadows it; it shadows a built-in of the same name.
+    pub name: String,
+    /// The enum's case tags.
+    pub tags: Vec<String>,
+    /// Where the declaration came from, quoted in error messages —
+    /// typically the import specifier as written (e.g. `./token.rl`).
+    /// [`exported_enums`] leaves it `None`; the collector fills it in.
+    pub from: Option<String>,
+}
+
+/// One static relative `.rl` import (or re-export) of a source file, in
+/// source order — the file's outgoing module-graph edges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RlImport {
+    /// The specifier as written, without quotes (e.g. `./token.rl`).
+    pub specifier: String,
+    /// What the statement brings into local scope.
+    pub names: RlImportNames,
+}
+
+/// The bindings an [`RlImport`] brings into local scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RlImportNames {
+    /// `import * as ns from ...` — every export, namespace-qualified.
+    Namespace(String),
+    /// `import { a, b as c, type d } from ...` — (exported name, alias).
+    Named(Vec<(String, Option<String>)>),
+    /// A side-effect import or a re-export — nothing enters local scope.
+    None,
+}
+
+/// Extracts the exported rl enum declarations (name + case tags) of a
+/// source file, without compiling it — the declaration-table half of
+/// project-wide exhaustiveness checking. Non-exported enums and plain
+/// TypeScript enums are not included. The returned entries have
+/// [`ExternEnum::from`] set to `None`.
+///
+/// ```
+/// let decls = rlc::exported_enums(
+///     "export enum Token { Num(value: number), Eof }\nenum Private { A() }\n",
+/// );
+/// assert_eq!(decls.len(), 1);
+/// assert_eq!(decls[0].name, "Token");
+/// assert_eq!(decls[0].tags, ["Num", "Eof"]);
+/// ```
+pub fn exported_enums(source: &str) -> Vec<ExternEnum> {
+    let program = parser::parse(source);
+    program
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            ast::Segment::Enum(decl) if decl.exported => Some(ExternEnum {
+                name: decl.name.clone(),
+                tags: decl.cases.iter().map(|c| c.tag.clone()).collect(),
+                from: None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Lists a source file's static relative `.rl` imports and re-exports, in
+/// source order — the edges a build tool follows to collect declarations
+/// with [`exported_enums`].
+///
+/// ```
+/// let imports = rlc::rl_imports("import { Token as T } from \"./token.rl\";\n");
+/// assert_eq!(imports[0].specifier, "./token.rl");
+/// assert_eq!(
+///     imports[0].names,
+///     rlc::RlImportNames::Named(vec![("Token".into(), Some("T".into()))]),
+/// );
+/// ```
+pub fn rl_imports(source: &str) -> Vec<RlImport> {
+    let program = parser::parse(source);
+    program
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            ast::Segment::RlImport(decl) => Some(RlImport {
+                specifier: source[decl.spec.start + 1..decl.spec.end - 1].to_string(),
+                names: match &decl.names {
+                    ast::RlImportNames::Namespace(ns) => RlImportNames::Namespace(ns.clone()),
+                    ast::RlImportNames::Named(entries) => RlImportNames::Named(entries.clone()),
+                    ast::RlImportNames::None => RlImportNames::None,
+                },
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Compilation options for [`compile`].
 ///
-/// The default is no filename, verification enabled, and `.rl` import
-/// specifiers rewritten to `.js`:
+/// The default is no filename, verification enabled, `.rl` import
+/// specifiers rewritten to `.js`, and no imported declarations:
 ///
 /// ```
 /// let opts = rlc::Options::default();
 /// assert_eq!(opts.filename, None);
 /// assert!(opts.verify);
 /// assert_eq!(opts.rewrite_imports, rlc::ImportRewrite::Js);
+/// assert!(opts.extern_enums.is_empty());
 /// ```
 #[derive(Debug, Clone)]
 pub struct Options<'a> {
@@ -104,6 +207,11 @@ pub struct Options<'a> {
     pub verify: bool,
     /// How relative `.rl` import specifiers are rewritten in the output.
     pub rewrite_imports: ImportRewrite,
+    /// Enum declarations imported from other modules, included in
+    /// exhaustiveness checking (shadowed by local declarations; shadowing
+    /// built-ins of the same name). The `rlc` CLI fills this from the
+    /// file's direct relative `.rl` imports.
+    pub extern_enums: &'a [ExternEnum],
 }
 
 impl Default for Options<'_> {
@@ -112,6 +220,7 @@ impl Default for Options<'_> {
             filename: None,
             verify: true,
             rewrite_imports: ImportRewrite::default(),
+            extern_enums: &[],
         }
     }
 }
@@ -165,7 +274,7 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
     // (every rl-level error, including exhaustiveness — never delegated to
     // tsc) → code emission (infallible).
     let program = parser::parse(source);
-    sema::check(&program, options.verify).map_err(to_compile_error)?;
+    sema::check(&program, options.verify, options.extern_enums).map_err(to_compile_error)?;
     let code = codegen::emit(&program, source, options.rewrite_imports);
 
     if options.verify

@@ -46,6 +46,12 @@ cargo build --release        # → target/release/rlc
 - 존재하지 않는 경로는 즉시 에러이며 컴파일을 시작하지 않습니다.
 - 수집 결과가 비어 있으면 `rlc: no .rl files found` 에러입니다.
 
+컴파일할 때 각 파일의 **직접 상대 경로 `.rl` import**를 추가로 읽어 enum
+선언을 수집합니다 — import한 enum의 match 소진성 검사용입니다
+([`language.md` §7.3](./language.md#73-선언-수집과-프로젝트-단위-소진성)).
+읽을 수 없는 지정자는 조용히 건너뜁니다 (모듈 해석 에러는 tsc `TS2307`의
+영역).
+
 ## 출력 경로 규칙
 
 | 상황 | 출력 위치 |

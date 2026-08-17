@@ -926,3 +926,147 @@ const area = match (Shape.Point) {
     assert!(out.contains("\"./error.js\""), "{out}");
     assert!(out.contains("switch ($rl_m.kind)"), "{out}");
 }
+
+/* ------------------------------------------------------------------ */
+/* project-wide exhaustiveness (extern enums)                          */
+/* ------------------------------------------------------------------ */
+
+fn token_extern() -> rlc::ExternEnum {
+    rlc::ExternEnum {
+        name: "Token".to_string(),
+        tags: vec!["Num".to_string(), "Ident".to_string(), "Eof".to_string()],
+        from: Some("./token.rl".to_string()),
+    }
+}
+
+#[test]
+fn extern_enum_makes_match_checked() {
+    let externs = [token_extern()];
+    let opts = Options {
+        extern_enums: &externs,
+        ..Options::default()
+    };
+    let e = compile(
+        "const s = match (t) {\n  Num(value) => value,\n  Ident(name) => 0,\n};\n",
+        &opts,
+    )
+    .expect_err("expected non-exhaustive error");
+    assert!(
+        e.message
+            .contains("match on enum Token (imported from \"./token.rl\") is not exhaustive"),
+        "{}",
+        e.message
+    );
+    assert!(e.message.contains("missing \"Eof\""), "{}", e.message);
+    assert_eq!((e.line, e.col), (1, 11));
+}
+
+#[test]
+fn extern_enum_full_coverage_compiles() {
+    let externs = [token_extern()];
+    let opts = Options {
+        extern_enums: &externs,
+        ..Options::default()
+    };
+    let out = compile(
+        "const s = match (t) { Num(value) => value, Ident(name) => 0, Eof => -1 };\n",
+        &opts,
+    )
+    .unwrap();
+    assert!(out.contains("switch ($rl_m.kind)"));
+}
+
+#[test]
+fn local_enum_shadows_extern_of_same_name() {
+    // The local Token has only two cases; the extern one must not resurrect
+    // a third. Full local coverage compiles.
+    let externs = [token_extern()];
+    let opts = Options {
+        extern_enums: &externs,
+        ..Options::default()
+    };
+    let out = compile(
+        "enum Token { Num(value: number), Ident(name: string) }\nconst s = match (t) { Num(value) => value, Ident(name) => 0 };\n",
+        &opts,
+    )
+    .unwrap();
+    assert!(out.contains("switch ($rl_m.kind)"));
+}
+
+#[test]
+fn extern_enum_shadows_builtin_of_same_name() {
+    // An imported `Option` with an extra case replaces the built-in: the
+    // two-case match that satisfies the built-in must now be an error.
+    let externs = [rlc::ExternEnum {
+        name: "Option".to_string(),
+        tags: vec!["Some".to_string(), "None".to_string(), "Maybe".to_string()],
+        from: Some("./opt.rl".to_string()),
+    }];
+    let opts = Options {
+        extern_enums: &externs,
+        ..Options::default()
+    };
+    let e = compile(
+        "const s = match (o) { Some(value) => value, None => 0 };\n",
+        &opts,
+    )
+    .expect_err("expected non-exhaustive error");
+    assert!(e.message.contains("missing \"Maybe\""), "{}", e.message);
+}
+
+#[test]
+fn extern_enums_do_not_affect_unrelated_matches() {
+    // Tags that belong to no known enum stay unchecked (runtime guard only).
+    let externs = [token_extern()];
+    let opts = Options {
+        extern_enums: &externs,
+        ..Options::default()
+    };
+    let out = compile("const s = match (x) { Foo(a) => a, Bar => 0 };\n", &opts).unwrap();
+    assert!(out.contains("switch ($rl_m.kind)"));
+}
+
+/* ------------------------------------------------------------------ */
+/* declaration collection API                                          */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn exported_enums_returns_exported_rl_enums_only() {
+    let decls = rlc::exported_enums(
+        "export enum Token { Num(value: number), Eof }\nenum Private { A(), B }\nexport enum Color { Red, Green }\n",
+    );
+    // Color is a plain TS enum (no payload, no generics) — not an rl enum.
+    assert_eq!(decls.len(), 1);
+    assert_eq!(decls[0].name, "Token");
+    assert_eq!(decls[0].tags, vec!["Num".to_string(), "Eof".to_string()]);
+    assert_eq!(decls[0].from, None);
+}
+
+#[test]
+fn rl_imports_reports_specifiers_and_names() {
+    use rlc::RlImportNames;
+    let imports = rlc::rl_imports(
+        r#"
+import { Token, Kind as K, type T } from "./a.rl";
+import * as ns from "../b.rl";
+import "./side.rl";
+export { X } from "./re.rl";
+import { skip } from "./not-rl.ts";
+"#,
+    );
+    assert_eq!(imports.len(), 4);
+    assert_eq!(imports[0].specifier, "./a.rl");
+    assert_eq!(
+        imports[0].names,
+        RlImportNames::Named(vec![
+            ("Token".to_string(), None),
+            ("Kind".to_string(), Some("K".to_string())),
+            ("T".to_string(), None),
+        ])
+    );
+    assert_eq!(imports[1].specifier, "../b.rl");
+    assert_eq!(imports[1].names, RlImportNames::Namespace("ns".to_string()));
+    assert_eq!(imports[2].names, RlImportNames::None);
+    assert_eq!(imports[3].specifier, "./re.rl");
+    assert_eq!(imports[3].names, RlImportNames::None);
+}

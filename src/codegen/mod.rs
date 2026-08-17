@@ -56,7 +56,7 @@ impl Emitter<'_> {
                 Segment::LetElse(stmt) => {
                     out.extend_from_slice(self.emit_let_else(stmt).as_bytes());
                 }
-                Segment::RlImport(span) => self.emit_rl_import(*span, &mut out),
+                Segment::RlImport(decl) => self.emit_rl_import(decl.spec, &mut out),
                 Segment::Template(template) => self.emit_template(template, &mut out),
             }
         }

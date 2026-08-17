@@ -63,7 +63,8 @@ export const Shape = {
 - **`.rl` 간 import** — `import { E } from "./error.rl"`처럼 상대 경로로
   다른 `.rl` 파일을 그대로 가리키면, 방출 시 지정자가 `./error.js`로
   재작성되어 tsc/Node/번들러가 해석할 수 있습니다 (`--rewrite-imports`로
-  형태 변경·비활성화).
+  형태 변경·비활성화). import한 enum도 소진성 검사를 받습니다 — rlc가
+  참조된 파일의 enum 선언을 자동 수집합니다.
 - **`Option`/`Result` 표준 라이브러리** — `rlc --emit-std src/rl.ts`로
   Rust 스타일 `Option<T>`/`Result<T, E>`와 함수형 콤비네이터(`map`,
   `andThen`, `unwrapOr`, ...)가 담긴 순수 TypeScript 모듈을 생성해
@@ -245,9 +246,10 @@ README는 소개용이며, 정확한 동작은 레퍼런스가 규정합니다.
 - 소스맵은 아직 생성하지 않습니다.
 - 패턴은 케이스 태그와 `_`만 지원합니다 (리터럴/중첩/`|` 패턴 없음 —
   의도적으로 최소 기능).
-- 소진성 검사는 **같은 파일에 선언된 rl enum**에 대해서만 동작합니다.
-  import한 enum에 대한 match는 검사 없이 컴파일되고 런타임 가드만 남습니다
-  (프로젝트 단위 검사는 로드맵).
+- 소진성 검사는 같은 파일에 선언된 rl enum, **직접 import한 `.rl` 파일의
+  exported enum**, 내장 `Option`/`Result`에 대해 동작합니다. 손으로 쓴
+  유니언과 re-export 체인 너머의 enum은 검사 없이 컴파일되고 런타임 가드만
+  남습니다.
 - 표현식 암에서 객체 리터럴을 바로 반환하려면 화살표 함수처럼 괄호가
   필요합니다: `Tag => ({ a: 1 })`.
 - `try` 문은 세미콜론이 필수이고 식이 `(`/`<`로 시작할 수 없으며, match

@@ -790,3 +790,96 @@ fn cross_file_rl_import_bare_mode_typechecks() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/* ------------------------------------------------------------------ */
+/* project-wide exhaustiveness through the CLI                         */
+/* ------------------------------------------------------------------ */
+
+const TOKEN_RL: &str =
+    "export enum Token {\n  Num(value: number),\n  Ident(name: string),\n  Eof,\n}\n";
+
+/// Runs the rlc binary itself — declaration collection across files lives
+/// in the CLI, not in `compile`. No tsc/node needed.
+fn run_rlc(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("failed to run rlc");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn cli_checks_exhaustiveness_across_rl_imports() {
+    let dir = tmpdir();
+    fs::write(dir.join("token.rl"), TOKEN_RL).unwrap();
+    fs::write(
+        dir.join("parser.rl"),
+        "import { Token } from \"./token.rl\";\nconst show = (t: Token) =>\n  match (t) {\n    Num(value) => value,\n    Ident(name) => 0,\n  };\n",
+    )
+    .unwrap();
+    let (ok, err) = run_rlc(&dir, &["--check", "parser.rl"]);
+    assert!(!ok, "expected failure:\n{err}");
+    assert!(
+        err.contains("parser.rl:3:3: match on enum Token (imported from \"./token.rl\") is not exhaustive: missing \"Eof\""),
+        "{err}"
+    );
+
+    fs::write(
+        dir.join("parser.rl"),
+        "import { Token } from \"./token.rl\";\nconst show = (t: Token) =>\n  match (t) {\n    Num(value) => value,\n    Ident(name) => 0,\n    Eof => -1,\n  };\n",
+    )
+    .unwrap();
+    let (ok, err) = run_rlc(&dir, &["--check", "parser.rl"]);
+    assert!(ok, "expected success:\n{err}");
+}
+
+#[test]
+fn cli_skips_unresolvable_imports_silently() {
+    // A missing module is tsc's problem (TS2307); the match simply stays
+    // unchecked, as before phase 2.
+    let dir = tmpdir();
+    fs::write(
+        dir.join("main.rl"),
+        "import { Gone } from \"./missing.rl\";\nconst x = match (g) { A(v) => v, B => 0 };\n",
+    )
+    .unwrap();
+    let (ok, err) = run_rlc(&dir, &["--check", "main.rl"]);
+    assert!(ok, "expected success:\n{err}");
+}
+
+#[test]
+fn cli_cross_file_match_runs_end_to_end() {
+    require_toolchain!();
+    let dir = tmpdir();
+    fs::write(dir.join("token.rl"), TOKEN_RL).unwrap();
+    fs::write(
+        dir.join("main.rl"),
+        "import { Token } from \"./token.rl\";\nconst t = Token.Ident(\"x\");\nconsole.log(match (t) {\n  Num(value) => `n${value}`,\n  Ident(name) => `i${name}`,\n  Eof => \"eof\",\n});\nexport {};\n",
+    )
+    .unwrap();
+    let (ok, err) = run_rlc(&dir, &["token.rl", "main.rl"]);
+    assert!(ok, "rlc failed:\n{err}");
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args(TSC_FLAGS)
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ix");
+}

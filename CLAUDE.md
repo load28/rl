@@ -46,7 +46,7 @@ src/
     tries.rs     try 문 구조 파싱 (유효 TS의 try 형태 배제 규칙 포함)
     lets.rs      let-else 문 구조 파싱 (발산 판정 포함)
   sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입, 소진성
-                 (내장 Option/Result 포함, 로컬 선언이 섀도잉)
+                 (임포트 선언·내장 Option/Result 포함, 로컬 > 임포트 > 내장 섀도잉)
   stdlib.rs      표준 라이브러리 — STD_SOURCE(공개) / BUILTIN_ENUMS(내부)
   stdlib/
     rl_std.ts    std 모듈 본체 (Option/Result + 콤비네이터, --emit-std로 방출)
