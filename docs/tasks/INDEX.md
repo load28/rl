@@ -56,7 +56,8 @@
 | TASK-046 | `if let` 문 — 조건부 값 추출 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-046](./TASK-046-if-let.md) |
 | TASK-047 | 에디터 `.rl` 파일 아이콘 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-047](./TASK-047-file-icon.md) |
 | TASK-048 | npm 패키징 — `npm install rl-lang`으로 rlc 설치 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-048](./TASK-048-npm-packaging.md) |
+| TASK-049 | 버저닝 가이드 수립 (CLAUDE.md) | 완료 | 2026-08-17 | 2026-08-17 | [TASK-049](./TASK-049-versioning-guide.md) |
 
 ## 다음 태스크 번호
 
-**TASK-049**
+**TASK-050**
