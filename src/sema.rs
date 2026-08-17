@@ -103,6 +103,17 @@ impl Checker<'_> {
     /// scrutinee, arm body, template interpolation, try expression) — the
     /// contexts where a `try` statement is not allowed.
     fn visit_program(&mut self, program: &Program, nested: bool) -> Result<(), RlError> {
+        // A stray `|>` cannot be passed through: it is not valid TypeScript,
+        // so the output self-check would fail without a position. Report it
+        // as an rl error here instead (error-layering contract).
+        if let Some(&off) = program.stray_pipes.first() {
+            return Err(RlError::at(
+                off,
+                "pipeline: `|>` could not be parsed here (steps must be expressions; \
+                 parenthesize ternaries and arrow functions)"
+                    .to_string(),
+            ));
+        }
         for segment in &program.segments {
             match segment {
                 Segment::Verbatim(_) | Segment::RlImport(_) => {}
@@ -110,6 +121,14 @@ impl Checker<'_> {
                 Segment::Match(expr) => self.check_match(expr)?,
                 Segment::Try(stmt) => self.check_try(stmt, nested)?,
                 Segment::LetElse(stmt) => self.check_let_else(stmt, nested)?,
+                Segment::Pipe(pipe) => {
+                    // Head and steps are expressions — `try` inside them is
+                    // rejected for the same reason as inside a match.
+                    self.visit_program(&pipe.head, true)?;
+                    for step in &pipe.steps {
+                        self.visit_program(&step.body, true)?;
+                    }
+                }
                 Segment::Template(template) => {
                     for chunk in &template.chunks {
                         if let TemplateChunk::Interp(interp) = chunk {

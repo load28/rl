@@ -34,6 +34,7 @@ mod enums;
 mod imports;
 mod lets;
 mod matches;
+mod pipes;
 mod tries;
 
 use crate::ast::*;
@@ -93,6 +94,19 @@ pub(crate) fn is_reserved(word: &str) -> bool {
     RESERVED.contains(&word)
 }
 
+// Words that terminate the expression currently being scanned — an
+// undotted occurrence means whatever follows starts a new expression, so
+// the pipeline-head tracker resets there. Prefix operators that *continue*
+// an expression (`new`, `typeof`, `void`, `delete`, `await`) and
+// expression-capable keywords (`function`, `class`) are deliberately
+// absent; `in`/`of` reset for the sake of `for` heads (their rare binary
+// use next to a pipeline needs parens, documented).
+const PIPE_BOUNDARY_WORDS: &[&str] = &[
+    "break", "case", "catch", "const", "continue", "debugger", "default", "do", "else", "export",
+    "finally", "for", "if", "in", "let", "of", "return", "switch", "throw", "var", "while", "with",
+    "yield",
+];
+
 /// Parses a whole source file into a [`Program`].
 pub(crate) fn parse(src: &str) -> Program {
     let parser = Parser {
@@ -116,6 +130,60 @@ fn flush_verbatim(segments: &mut Vec<Segment>, start: usize, end: usize) {
     }
 }
 
+/// The byte where a segment starts in the source (approximate for enums —
+/// the name offset — which is fine: rewinding only compares against a
+/// pipeline head start, and an enum declaration cannot sit inside one).
+fn segment_start(seg: &Segment) -> usize {
+    match seg {
+        Segment::Verbatim(span) => span.start,
+        Segment::Enum(d) => d.name_off,
+        Segment::Match(m) => m.keyword_off,
+        Segment::Try(t) => t.keyword_off,
+        Segment::LetElse(l) => l.keyword_off,
+        Segment::RlImport(d) => d.spec.start,
+        Segment::Template(t) => match t.chunks.first() {
+            Some(TemplateChunk::Raw(span)) => span.start,
+            Some(TemplateChunk::Interp(_)) | None => 0, // first chunk is always Raw
+        },
+        Segment::Pipe(p) => p.head_span.start,
+    }
+}
+
+/// Pops (and truncates) segments back to `boundary` so a pipeline head can
+/// re-own bytes that were already lifted (a template or match inside the
+/// head). Segments are contiguous, so the returned byte — the new "flushed
+/// up to here" position — is the start of the last popped segment, or
+/// `boundary` when a verbatim segment crossing it was truncated.
+fn rewind_segments(segments: &mut Vec<Segment>, boundary: usize, seg_start: usize) -> usize {
+    let mut cover = seg_start;
+    while let Some(last) = segments.last_mut() {
+        match last {
+            Segment::Verbatim(span) => {
+                if span.start >= boundary {
+                    cover = span.start;
+                    segments.pop();
+                } else if span.end > boundary {
+                    span.end = boundary;
+                    cover = boundary;
+                    break;
+                } else {
+                    break;
+                }
+            }
+            other => {
+                let s = segment_start(other);
+                if s >= boundary {
+                    cover = s;
+                    segments.pop();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    cover
+}
+
 impl Parser<'_> {
     /// Parses a lexed token range covering `bytes[start..end]` into a
     /// [`Program`] whose segments cover the byte range exactly, in source
@@ -123,8 +191,18 @@ impl Parser<'_> {
     /// verbatim segments.
     pub(crate) fn parse_tokens(&self, tokens: &[Token], start: usize, end: usize) -> Program {
         let mut segments: Vec<Segment> = Vec::new();
+        let mut stray_pipes: Vec<usize> = Vec::new();
         let mut seg_start = start;
         let mut i = 0usize;
+
+        // Expression-start tracking for pipeline heads: the index of the
+        // token starting the expression currently being scanned, plus a
+        // taint flag for unparenthesized ternary punctuation (a tainted
+        // head aborts the claim — the normative "parenthesize ternaries"
+        // rule). Brackets save and restore the enclosing expression's
+        // state, so `f(a(b) |> g)` finds `a(b)`, not `b`.
+        let mut expr: (usize, bool) = (0, false);
+        let mut expr_stack: Vec<(usize, bool)> = Vec::new();
 
         while i < tokens.len() {
             let tok = &tokens[i];
@@ -136,8 +214,31 @@ impl Parser<'_> {
                     i += 1;
                     continue;
                 }
+                TokenKind::PipeOp => {
+                    if !expr.1
+                        && expr.0 < i
+                        && let Some((next_i, pipe)) = pipes::parse_pipeline(self, tokens, expr.0, i)
+                    {
+                        // The head may span constructs already lifted as
+                        // segments (a template, a match) — rewind them and
+                        // let the head's sub-program own those bytes.
+                        let head_start = pipe.head_span.start;
+                        let pipe_end = pipe.steps.last().map(|s| s.span.end).unwrap_or(end);
+                        seg_start = rewind_segments(&mut segments, head_start, seg_start);
+                        flush_verbatim(&mut segments, seg_start, head_start);
+                        segments.push(Segment::Pipe(pipe));
+                        seg_start = pipe_end;
+                        i = next_i;
+                        expr = (i, false);
+                        continue;
+                    }
+                    stray_pipes.push(tok.span.start);
+                    i += 1;
+                    continue;
+                }
                 TokenKind::Ident => &self.src[tok.span.start..tok.span.end],
                 _ => {
+                    self.track_expr_boundary(tok, i, tokens, &mut expr, &mut expr_stack);
                     i += 1;
                     continue;
                 }
@@ -176,6 +277,7 @@ impl Parser<'_> {
                     segments.push(Segment::Enum(decl));
                     seg_start = byte_end;
                     i = cur.idx;
+                    expr = (i, false);
                     continue;
                 }
             }
@@ -192,6 +294,7 @@ impl Parser<'_> {
                 seg_start = decl.spec.end;
                 segments.push(Segment::RlImport(decl));
                 i = cur.idx;
+                expr = (i, false);
                 continue;
             }
 
@@ -235,6 +338,7 @@ impl Parser<'_> {
                     segments.push(Segment::Try(stmt));
                     seg_start = byte_end;
                     i = cur.idx;
+                    expr = (i, false);
                     continue;
                 }
                 if let Some((cur, byte_end, stmt)) =
@@ -244,15 +348,82 @@ impl Parser<'_> {
                     segments.push(Segment::LetElse(stmt));
                     seg_start = byte_end;
                     i = cur.idx;
+                    expr = (i, false);
                     continue;
                 }
             }
 
+            if !dotted && PIPE_BOUNDARY_WORDS.contains(&word) {
+                expr = (i + 1, false);
+            }
             i += 1;
         }
 
         flush_verbatim(&mut segments, seg_start, end);
-        Program { segments }
+        Program {
+            segments,
+            stray_pipes,
+        }
+    }
+
+    /// Advances the pipeline-head tracker over one non-identifier token.
+    /// Openers save the enclosing expression's state; closers restore it —
+    /// a `}` only when what follows can *continue* an expression (an object
+    /// literal or function-expression body), otherwise it closed a block
+    /// and the next token starts fresh. `?`/`:` reset while carrying the
+    /// ternary taint that makes a later claim abort.
+    fn track_expr_boundary(
+        &self,
+        tok: &Token,
+        i: usize,
+        tokens: &[Token],
+        expr: &mut (usize, bool),
+        stack: &mut Vec<(usize, bool)>,
+    ) {
+        match tok.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => {
+                stack.push(*expr);
+                *expr = (i + 1, false);
+            }
+            TokenKind::Punct(b')' | b']') => {
+                *expr = stack.pop().unwrap_or((i + 1, false));
+            }
+            TokenKind::Punct(b'}') => {
+                let outer = stack.pop().unwrap_or((i + 1, false));
+                *expr = if self.brace_ends_expression(tokens, i) {
+                    outer
+                } else {
+                    (i + 1, false)
+                };
+            }
+            TokenKind::Punct(b';' | b',') => *expr = (i + 1, false),
+            TokenKind::Punct(b'=') if pipes::is_assignment_eq(self.bytes, tok.span) => {
+                *expr = (i + 1, false);
+            }
+            TokenKind::Punct(b':') => *expr = (i + 1, expr.1),
+            TokenKind::Punct(b'?') => *expr = (i + 1, true),
+            TokenKind::Arrow => *expr = (i + 1, false),
+            _ => {}
+        }
+    }
+
+    /// True when the token after the `}` at `close_idx` continues the
+    /// surrounding expression (`.m`, `)`, an operator, `|>`, ...) rather
+    /// than starting a new statement or expression.
+    fn brace_ends_expression(&self, tokens: &[Token], close_idx: usize) -> bool {
+        match tokens.get(close_idx + 1) {
+            None => true,
+            Some(t) => match &t.kind {
+                TokenKind::Ident => {
+                    matches!(&self.src[t.span.start..t.span.end], "instanceof" | "in")
+                }
+                TokenKind::Str | TokenKind::Template(_) | TokenKind::Regex => false,
+                TokenKind::Punct(c) => {
+                    !matches!(c, b'(' | b'[' | b'{' | b'!' | b'~') && !c.is_ascii_digit()
+                }
+                _ => true, // |>, =>, ||, ?., ?? all continue an expression
+            },
+        }
     }
 
     /// Turns a lexed template token into the AST template, recursively

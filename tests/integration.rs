@@ -1198,3 +1198,85 @@ fn cli_types_sidecars_typecheck_the_source_tree() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/* ------------------------------------------------------------------ */
+/* pipeline                                                            */
+/* ------------------------------------------------------------------ */
+
+// Inline the curried std combinators so the snippets need no module
+// resolution (the std source itself is covered by tests/stdlib.rs).
+const PIPE_PRELUDE: &str = r#"
+type Option<T> = { kind: "Some"; value: T } | { kind: "None" };
+const Option = {
+  Some: <T>(value: T): Option<T> => ({ kind: "Some", value }),
+  None: { kind: "None" } as const,
+  mapP:
+    <T, U>(f: (value: T) => U) =>
+    (o: Option<T>): Option<U> =>
+      o.kind === "Some" ? { kind: "Some", value: f(o.value) } : { kind: "None" },
+  unwrapOrP:
+    <T>(fallback: T) =>
+    (o: Option<T>): T =>
+      o.kind === "Some" ? o.value : fallback,
+};
+const half = (n: number): Option<number> =>
+  n % 2 === 0 ? Option.Some(n / 2) : Option.None;
+"#;
+
+#[test]
+fn pipeline_curried_combinator_steps_infer_without_annotations() {
+    require_toolchain!();
+    // The whole point of the $rl_ap emission: `x` in the curried step must
+    // infer as number (a direct-application emission collapses it to
+    // `unknown` — TS18046).
+    let (ok, out) = typecheck(&format!(
+        "{PIPE_PRELUDE}\nconst label: string = half(4) |> Option.mapP(x => x + 1) |> Option.unwrapOrP(0) |> .toFixed(1);\n"
+    ));
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn pipeline_generic_user_functions_instantiate() {
+    require_toolchain!();
+    // Composing generic functions is where pipe() libraries lose inference;
+    // step-by-step application must keep it.
+    let (ok, out) = typecheck(
+        "const wrap = <T,>(v: T): T[] => [v];\nconst arr: number[][] = 3 |> wrap |> wrap;\n",
+    );
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn pipeline_type_error_in_a_step_is_reported_on_user_text() {
+    require_toolchain!();
+    // A step that is not a unary function is the user's type error — tsc
+    // must reject it (rlc emits it untouched).
+    let (ok, out) = typecheck("const n: number = 1 |> ((a: string) => a.length);\n");
+    assert!(!ok, "{out}");
+}
+
+#[test]
+fn pipeline_runs_left_to_right() {
+    require_toolchain!();
+    let lines = run(r#"
+const order: string[] = [];
+const tap = <T,>(name: string) => (v: T): T => { order.push(name); return v; };
+const out = (order.push("head"), 10) |> tap("s1") |> .toFixed(0) |> tap("s2");
+console.log(order.join(","), out);
+"#);
+    assert_eq!(lines, ["head,s1,s2 10"]);
+}
+
+#[test]
+fn pipeline_await_in_head_runs_in_the_surrounding_async_context() {
+    require_toolchain!();
+    let lines = run(r#"
+const upper = (s: string) => s.toUpperCase();
+async function main() {
+  const v = await Promise.resolve("ok") |> upper |> .concat("!");
+  console.log(v);
+}
+await main();
+"#);
+    assert_eq!(lines, ["OK!"]);
+}

@@ -1147,3 +1147,135 @@ fn enum_symbols_carries_positions_and_field_shapes() {
     assert_eq!(syms[1].name, "Local");
     assert!(!syms[1].exported);
 }
+
+/* ------------------------------------------------------------------ */
+/* pipeline                                                            */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn pipeline_emits_nested_apply_helper_calls() {
+    let out = ok("const y = half(4) |> double |> label;\n");
+    assert!(
+        out.contains("const y = $rl_ap($rl_ap((half(4)), (double)), (label));"),
+        "{out}"
+    );
+    assert!(out.contains("function $rl_ap<A, B>(v: A, f: (v: A) => B): B { return f(v); }"));
+}
+
+#[test]
+fn pipeline_method_step_chains_postfix() {
+    let out = ok("const t = s |> .trim() |> .split(\",\") |> f;\n");
+    assert!(
+        out.contains("const t = $rl_ap((((s)).trim()).split(\",\"), (f));"),
+        "{out}"
+    );
+}
+
+#[test]
+fn pipeline_helper_is_emitted_once_per_file() {
+    let out = ok("const a = x |> f;\nconst b = y |> g;\n");
+    assert_eq!(out.matches("function $rl_ap").count(), 1, "{out}");
+    // and appended at the end so original lines keep their positions
+    assert!(out.trim_end().ends_with("{ return f(v); }"), "{out}");
+}
+
+#[test]
+fn file_without_pipeline_gets_no_helper() {
+    let out = ok("const a = f(x);\n");
+    assert!(!out.contains("$rl_ap"), "{out}");
+}
+
+#[test]
+fn pipeline_head_reclaims_a_lifted_template() {
+    // The template token is lifted as a segment before the `|>` is seen —
+    // the claim must rewind it into the head sub-program.
+    let out = ok("const a = `v=${n}` |> f;\n");
+    assert!(out.contains("const a = $rl_ap((`v=${n}`), (f));"), "{out}");
+}
+
+#[test]
+fn pipeline_head_reclaims_a_lifted_match() {
+    let out =
+        ok("enum E { A(v: number), B }\nconst a = match (e) { A(v) => v, B => 0, } |> double;\n");
+    assert!(out.contains("const a = $rl_ap((("), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+    assert!(out.contains(")())), (double));"), "{out}");
+}
+
+#[test]
+fn pipeline_head_is_the_whole_call_not_the_inner_argument() {
+    // Bracket tracking must restore the enclosing expression's start:
+    // the head of `a(b) |> g` is `a(b)`, not `b`.
+    let out = ok("const y = f(a(b) |> g);\n");
+    assert!(out.contains("const y = f($rl_ap((a(b)), (g)));"), "{out}");
+}
+
+#[test]
+fn pipeline_inside_match_scrutinee_arm_and_template() {
+    let out = ok(
+        "enum E { A(v: number), B }\nconst r = match (x |> norm) {\n  A(v) => v |> double,\n  B => 0,\n};\nconst t = `n=${x |> f}`;\n",
+    );
+    assert!(
+        out.contains("const $rl_m = ($rl_ap((x), (norm)));"),
+        "{out}"
+    );
+    assert!(out.contains("return ($rl_ap((v), (double)));"), "{out}");
+    assert!(out.contains("`n=${$rl_ap((x), (f))}`"), "{out}");
+}
+
+#[test]
+fn pipeline_composes_with_try() {
+    let out = ok(
+        "function f(): Result<number, string> {\n  const a = try readCfg() |> norm;\n  return Result.Ok(a);\n}\n",
+    );
+    assert!(
+        out.contains("const $rl_t0 = ($rl_ap((readCfg()), (norm)));"),
+        "{out}"
+    );
+}
+
+#[test]
+fn pipeline_await_in_head_needs_no_async_wrapper() {
+    let out = ok("async function f(p: Promise<string>) {\n  return await p |> norm;\n}\n");
+    assert!(out.contains("return $rl_ap((await p), (norm));"), "{out}");
+    assert!(!out.contains("async () =>"), "{out}");
+}
+
+#[test]
+fn unparenthesized_ternary_next_to_pipeline_is_an_error() {
+    let e = err("const a = c ? x : y |> f;\n");
+    assert!(e.message.contains("parenthesize"), "{}", e.message);
+    assert_eq!((e.line, e.col), (1, 21));
+}
+
+#[test]
+fn parenthesized_ternary_head_compiles() {
+    let out = ok("const a = (c ? x : y) |> f;\n");
+    assert!(out.contains("$rl_ap(((c ? x : y)), (f))"), "{out}");
+}
+
+#[test]
+fn unparenthesized_arrow_step_is_an_error() {
+    let e = err("const a = x |> n => n + 1;\n");
+    assert!(e.message.contains("parenthesize"), "{}", e.message);
+}
+
+#[test]
+fn empty_or_dangling_step_is_an_error() {
+    let e = err("const a = x |>;\n");
+    assert!(e.message.contains("could not be parsed"), "{}", e.message);
+    let e = err("const a = x |> |> f;\n");
+    assert!(e.message.contains("could not be parsed"), "{}", e.message);
+}
+
+#[test]
+fn optional_chain_step_is_an_error() {
+    let e = err("const a = x |> ?.trim();\n");
+    assert!(e.message.contains("could not be parsed"), "{}", e.message);
+}
+
+#[test]
+fn try_inside_a_pipeline_step_is_an_error() {
+    let e = err("const a = x |> (n => { const b = try f(n); return b; });\n");
+    assert!(e.message.contains("`try` cannot be used"), "{}", e.message);
+}

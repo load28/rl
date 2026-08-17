@@ -32,8 +32,9 @@ export enum Result<T, E> { Ok(value: T), Err(error: E) }
 즉 값은 순수 데이터(`kind` 태그드 객체)라 `match`·소진성 검사·`JSON.stringify`가
 그대로 동작합니다. 페이로드 필드명은 `Some`/`Ok`가 `value`, `Err`가 `error`이고,
 match 바인딩은 이름 기준이므로 `Some(value)`·`Err(error)` 또는 별칭
-`Some(value: v)`로 씁니다. 콤비네이터는 전부 **데이터-우선 정적 함수**입니다
-(메서드 체이닝 없음).
+`Some(value: v)`로 씁니다. 콤비네이터는 **데이터-우선 정적 함수**가 기본이고
+(메서드 체이닝 없음), 파이프라인 연산자 `|>`용으로 **data-last 커링 변형**이
+`P` 접미사로 함께 제공됩니다 ([§파이프라인 변형](#파이프라인-변형-p)).
 
 ## `Option<T>`
 
@@ -80,6 +81,28 @@ match 바인딩은 이름 기준이므로 `Some(value)`·`Err(error)` 또는 별
 | `flatten` | `(r: Result<Result<T, E>, E>) => Result<T, E>` | 중첩 한 겹 풀기 |
 | `transpose` | `(r: Result<Option<T>, E>) => Option<Result<T, E>>` | 층 교환: `Ok(None)`→`None`, `Err(e)`→`Some(Err(e))` |
 | `collect` | `(items: readonly Result<T, E>[]) => Result<T[], E>` | 전부 `Ok`이면 값 배열, 아니면 첫 `Err` |
+
+## 파이프라인 변형 (`*P`)
+
+`|>`([`language.md` §7](./language.md#7-파이프라인-연산자-))에 바로 끼울 수
+있는 data-last 커링 변형입니다. `Option.mapP(f)`는 `Option<T>`를 받는 단항
+함수를 돌려주므로 `o |> Option.mapP(f)`가 `Option.map(o, f)`와 같습니다.
+동작은 data-first 원본과 동일합니다.
+
+| 원본 | 커링 변형 |
+|------|-----------|
+| `Option.map/andThen/orElse/filter/unwrapOr/unwrapOrElse/expect/okOr` | `mapP/andThenP/orElseP/filterP/unwrapOrP/unwrapOrElseP/expectP/okOrP` |
+| `Result.map/mapErr/andThen/orElse/unwrapOr/unwrapOrElse/expect` | `mapP/mapErrP/andThenP/orElseP/unwrapOrP/unwrapOrElseP/expectP` |
+
+이미 단항인 멤버는 변형 없이 그대로 파이프에 들어갑니다:
+`r |> Result.ok |> Option.toNullable`.
+
+```rl
+const label = half(4)
+  |> Option.mapP(x => x + 1)
+  |> Option.unwrapOrP(0)
+  |> .toFixed(1);
+```
 
 ## 사용 예
 

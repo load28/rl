@@ -275,3 +275,17 @@ fn export_declarations_are_not_reexports() {
     // module specifier, even if a `from` + string appears later.
     assert_passthrough("export const from = 1;\nexport function f() { return \"./x.rl\"; }\n");
 }
+
+#[test]
+fn bitwise_or_and_unions_are_not_pipelines() {
+    assert_passthrough("const a = x | y;\nconst b = x || y;\nconst c = x | y > z;\n");
+    assert_passthrough("type U = A | B;\nlet v: string | number = 1;\n");
+    assert_passthrough("function f<T extends A | B>(x: T): T | null { return x; }\n");
+}
+
+#[test]
+fn pipe_bytes_in_strings_comments_regexes_and_templates_pass_through() {
+    assert_passthrough(
+        "const s = \"a |> b\";\n// c |> d\n/* e |> f */\nconst r = /\\|>/;\nconst t = `g |> h`;\n",
+    );
+}

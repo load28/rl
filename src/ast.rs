@@ -24,6 +24,11 @@ pub(crate) struct Span {
 #[derive(Debug)]
 pub(crate) struct Program {
     pub segments: Vec<Segment>,
+    /// Byte offsets of `|>` tokens that could not be claimed as a pipeline.
+    /// `|>` cannot occur in valid TypeScript, so leaving one in the output
+    /// would fail the self-check without a position — the semantic phase
+    /// reports these as rl errors instead (the parser stays infallible).
+    pub stray_pipes: Vec<usize>,
 }
 
 /// One top-level piece of a [`Program`], in source order.
@@ -48,6 +53,39 @@ pub(crate) enum Segment {
     RlImport(RlImportDecl),
     /// A template literal; its interpolations are recursively parsed.
     Template(Template),
+    /// An rl pipeline expression (`head |> step |> ...`).
+    Pipe(PipeExpr),
+}
+
+/// A structurally parsed rl pipeline expression: `head ("|>" step)+`.
+/// `|>` cannot occur anywhere in valid TypeScript (after a `|` an
+/// expression or type must follow, and `>` starts neither), so claiming it
+/// never affects the passthrough contract. Compiles to nested calls of a
+/// per-file two-argument apply helper (`$rl_ap`) — argument position gives
+/// each step contextual typing, which is what keeps curried combinator
+/// steps fully inferred by tsc; method steps chain as plain postfix text.
+#[derive(Debug)]
+pub(crate) struct PipeExpr {
+    /// Raw span of the head expression, for error reporting.
+    pub head_span: Span,
+    /// The head expression, recursively parsed.
+    pub head: Program,
+    /// The pipeline's steps, in source order. Never empty.
+    pub steps: Vec<PipeStep>,
+}
+
+/// One `|> step` of a [`PipeExpr`].
+#[derive(Debug)]
+pub(crate) struct PipeStep {
+    /// Raw span of the step text (for a method step, including the leading
+    /// `.`).
+    pub span: Span,
+    /// True for a method step (`|> .m(...)`) — the step text is appended
+    /// to the piped value as a postfix chain instead of applied via the
+    /// helper.
+    pub postfix: bool,
+    /// The step text, recursively parsed.
+    pub body: Program,
 }
 
 /// See [`Segment::RlImport`].
