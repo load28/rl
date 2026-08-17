@@ -789,11 +789,22 @@ fn run_rlc(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
 /// legitimately do.
 fn global_typescript_resolvable() -> bool {
     let dir = tmpdir();
-    Command::new("node")
+    let via_require = Command::new("node")
         .current_dir(&dir)
         .args(["-e", "require(\"typescript\")"])
         .output()
         .map(|out| out.status.success())
+        .unwrap_or(false);
+    if via_require {
+        return true;
+    }
+    // types_host.mjs also resolves the package that owns a `tsc` on PATH, so
+    // a setup where only the binary is reachable succeeds too and must skip.
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .any(|dir| dir.join("tsc").exists() || dir.join("tsc.cmd").exists())
+        })
         .unwrap_or(false)
 }
 
