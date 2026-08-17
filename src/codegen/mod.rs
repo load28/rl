@@ -162,10 +162,6 @@ impl Emitter<'_> {
                 out.extend_from_slice(b".ts");
                 out.push(spec[spec.len() - 1]);
             }
-            ImportRewrite::Bare => {
-                out.extend_from_slice(&spec[..spec.len() - 4]);
-                out.push(spec[spec.len() - 1]);
-            }
         }
     }
 

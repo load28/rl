@@ -65,10 +65,10 @@ export const Shape = {
   재작성되어 tsc/Node/번들러가 해석할 수 있습니다 (`--rewrite-imports`로
   형태 변경·비활성화). import한 enum도 소진성 검사를 받습니다 — rlc가
   참조된 파일의 enum 선언을 자동 수집합니다.
-- **`Option`/`Result` 표준 라이브러리** — `rlc --emit-std src/rl.ts`로
-  Rust 스타일 `Option<T>`/`Result<T, E>`와 함수형 콤비네이터(`map`,
-  `andThen`, `unwrapOr`, ...)가 담긴 순수 TypeScript 모듈을 생성해
-  import해서 씁니다.
+- **`Option`/`Result` 표준 라이브러리** — `import { Option } from "@rl/std"`
+  하나면 Rust 스타일 `Option<T>`/`Result<T, E>`와 함수형 콤비네이터(`map`,
+  `andThen`, `unwrapOr`, ...)를 쓸 수 있습니다. 컴파일하면 순수 TypeScript
+  모듈이 출력 트리에 자동으로 실체화됩니다.
 - **`try` 문으로 에러 전파** — Rust의 `?`처럼 `Err`를 즉시 리턴합니다:
   `const n = try parseNum(s);`. TypeScript의 `try/catch` 블록과 완벽히
   공존합니다 (블록 형태는 그대로 통과).
@@ -91,13 +91,22 @@ cargo install --path .
 ## 빠른 시작
 
 ```sh
-rlc file.rl              # file.ts 생성
-rlc src/                 # src/ 아래 모든 .rl 재귀 컴파일
-rlc -o out/ src/         # 출력 디렉터리 지정
-rlc -p file.rl           # stdout으로 출력
-rlc --check src/         # 컴파일만 하고 쓰지 않음 (문법 검사)
-rlc --no-verify file.rl  # swc 출력 검증 생략
-rlc --emit-std src/rl.ts # Option/Result 표준 라이브러리 모듈 생성
+rlc -o build src/        # 소스 트리(.rl + 손으로 쓴 .ts)를 완결된 TS 트리로
+rlc --types src/         # 에디터·tsc용 타입 사이드카 생성 (.rl-types/)
+rlc --check src/         # 컴파일만 하고 쓰지 않음 (문법·소진성 검사)
+rlc -w -o build src/     # 감시 모드
+rlc file.rl              # 단일 파일: file.ts 생성
+```
+
+단독(tsc)이든 번들러 플러그인([`integrations/vite`](./integrations/vite))
+이든 소스는 같은 모양입니다 — 손으로 쓴 `.ts`도 `"./x.rl"`을 그대로
+import하고, 타입은 어느 쪽이든 `rlc --types`가 만듭니다:
+
+```jsonc
+// package.json — 단독 (tsc)
+{ "scripts": { "build": "rlc -o build src && tsc", "types": "rlc --types src" } }
+// package.json — 번들러 (vite)
+{ "scripts": { "build": "vite build", "types": "rlc --types src" } }
 ```
 
 전체 동작 예시는 [`examples/shapes.rl`](./examples/shapes.rl) →
@@ -169,16 +178,12 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 
 ### `Option` / `Result` — Rust 스타일 함수형 프로그래밍
 
-표준 라이브러리 모듈을 생성해 import하면 `Option`/`Result`와 콤비네이터를
-바로 쓸 수 있습니다. 두 타입은 **내장 enum**이라 match 소진성 검사도
-선언 없이 동작합니다:
-
-```sh
-rlc --emit-std src/rl.ts
-```
+`@rl/std`를 import하면 `Option`/`Result`와 콤비네이터를 바로 쓸 수
+있습니다 — 컴파일할 때 모듈이 출력 트리에 자동으로 실체화됩니다. 두 타입은
+**내장 enum**이라 match 소진성 검사도 선언 없이 동작합니다:
 
 ```rl
-import { Option, Result } from "./rl.js";
+import { Option, Result } from "@rl/std";
 
 function parseNum(raw: string): Result<number, string> {
   const n = Number(raw);

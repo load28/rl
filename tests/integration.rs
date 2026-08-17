@@ -763,34 +763,6 @@ fn cross_file_rl_import_typechecks_and_runs() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "over 9");
 }
 
-#[test]
-fn cross_file_rl_import_bare_mode_typechecks() {
-    require_toolchain!();
-    let dir = tmpdir();
-    let opts = Options {
-        rewrite_imports: rlc::ImportRewrite::Bare,
-        ..Options::default()
-    };
-    let error_ts = compile(ERROR_RL, &opts).expect("rl compile failed");
-    let main_ts = compile(MAIN_RL, &opts).expect("rl compile failed");
-    assert!(main_ts.contains("\"./error\""), "{main_ts}");
-    fs::write(dir.join("error.ts"), &error_ts).unwrap();
-    fs::write(dir.join("main.ts"), &main_ts).unwrap();
-    // extensionless specifiers need `moduleResolution: bundler` (already in
-    // TSC_FLAGS); type-check only — Node ESM cannot resolve them at runtime.
-    let out = Command::new("tsc")
-        .arg(dir.join("main.ts"))
-        .arg("--noEmit")
-        .args(TSC_FLAGS)
-        .output()
-        .expect("failed to run tsc");
-    assert!(
-        out.status.success(),
-        "tsc failed:\n{}\n---main.ts---\n{main_ts}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-}
-
 /* ------------------------------------------------------------------ */
 /* project-wide exhaustiveness through the CLI                         */
 /* ------------------------------------------------------------------ */
@@ -947,4 +919,144 @@ fn symbols_reports_imports_and_positions_as_valid_json() {
             .unwrap();
         assert!(child.wait().unwrap().success(), "not valid JSON:\n{json}");
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* the unified pipeline through the CLI: build and --types             */
+/* ------------------------------------------------------------------ */
+
+const LEVEL_RL: &str = "export enum Level {\n  Low,\n  High(threshold: number),\n}\n";
+
+const NOTICE_RL: &str = "import { Option } from \"@rl/std\";\nimport { Level } from \"./level.rl\";\n\nexport enum Notice {\n  Info(text: string),\n  Warn(text: string, code: number),\n}\n\nexport function render(n: Notice): string {\n  return match (n) {\n    Info(text) => `info: ${text}`,\n    Warn(text, code) => `warn[${code}]: ${text}`,\n  };\n}\n\nexport function gate(l: Level): number {\n  return match (l) {\n    Low => 0,\n    High(threshold) => threshold,\n  };\n}\n\nexport function first(list: Notice[]): Option<Notice> {\n  return list.length > 0 ? Option.Some(list[0]) : Option.None;\n}\n";
+
+const CONSUMER_MAIN_TS: &str = "import { Option } from \"@rl/std\";\nimport { Notice, render, first } from \"./notice.rl\";\n\nconst items = [Notice.Info(\"hello\"), Notice.Warn(\"careful\", 7)];\nfor (const n of items) console.log(render(n));\nconsole.log(Option.isSome(first(items)));\n";
+
+/// A mixed source tree: two `.rl` modules (one importing the other and the
+/// standard library) plus a hand-written `.ts` entry that imports `.rl`.
+fn write_consumer_tree(dir: &std::path::Path) {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/level.rl"), LEVEL_RL).unwrap();
+    fs::write(dir.join("src/notice.rl"), NOTICE_RL).unwrap();
+    fs::write(dir.join("src/main.ts"), CONSUMER_MAIN_TS).unwrap();
+}
+
+#[test]
+fn cli_build_emits_a_complete_tree_that_runs() {
+    require_toolchain!();
+    let dir = tmpdir();
+    write_consumer_tree(&dir);
+
+    let (ok, err) = run_rlc(&dir, &["-o", "build", "--no-banner", "src"]);
+    assert!(ok, "build failed:\n{err}");
+
+    // Hand-written TypeScript rides along byte-for-byte except for its
+    // relative `.rl` (and `@rl/std`) specifiers.
+    let main_ts = fs::read_to_string(dir.join("build/main.ts")).unwrap();
+    assert_eq!(
+        main_ts,
+        CONSUMER_MAIN_TS
+            .replace("./notice.rl", "./notice.js")
+            .replace("@rl/std", "./rl.js")
+    );
+    assert!(dir.join("build/rl.ts").exists(), "std not materialized");
+
+    // The emitted tree stands on its own: tsc compiles it, node runs it.
+    fs::write(dir.join("build/package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .current_dir(&dir)
+        .args(["build/main.ts", "--outDir", "build"])
+        .args(TSC_FLAGS)
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .current_dir(&dir)
+        .arg("build/main.js")
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["info: hello", "warn[7]: careful", "true"]
+    );
+}
+
+#[test]
+fn cli_refuses_to_overwrite_a_pass_through_input() {
+    let dir = tmpdir();
+    fs::write(dir.join("main.ts"), "export const x = 1;\n").unwrap();
+
+    // In place, a pass-through `.ts` would land on top of itself.
+    let (ok, err) = run_rlc(&dir, &["main.ts"]);
+    assert!(!ok, "expected failure:\n{err}");
+    assert!(err.contains("output would overwrite the input"), "{err}");
+    let untouched = fs::read_to_string(dir.join("main.ts")).unwrap();
+    assert_eq!(untouched, "export const x = 1;\n");
+
+    // A separate output tree is fine.
+    let (ok, err) = run_rlc(&dir, &["-o", "out", "main.ts"]);
+    assert!(ok, "build failed:\n{err}");
+}
+
+#[test]
+fn cli_types_sidecars_typecheck_the_source_tree() {
+    require_toolchain!();
+    let dir = tmpdir();
+    write_consumer_tree(&dir);
+
+    let (ok, err) = run_rlc(&dir, &["--types", "src"]);
+    assert!(ok, "--types failed:\n{err}");
+
+    // The declarations keep the *source* specifiers — that is what resolves
+    // in the consumer's merged view.
+    let sidecar = fs::read_to_string(dir.join(".rl-types/notice.rl.d.ts")).unwrap();
+    assert!(sidecar.contains("from \"@rl/std\""), "{sidecar}");
+    assert!(sidecar.contains("from \"./level.rl\""), "{sidecar}");
+    assert!(
+        sidecar.contains("export declare function render"),
+        "{sidecar}"
+    );
+    assert!(dir.join(".rl-types/notice.rl.d.ts.map").exists());
+    assert!(dir.join(".rl-types/level.rl.d.ts").exists());
+    assert!(dir.join(".rl-types/rl.d.ts").exists(), "std types missing");
+
+    // Round trip: the untouched source tree typechecks once the sidecars
+    // are merged in (`rootDirs`) and `@rl/std` is mapped (`paths`).
+    fs::write(
+        dir.join("tsconfig.json"),
+        r#"{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "rootDirs": ["./src", "./.rl-types"],
+    "paths": { "@rl/std": ["./.rl-types/rl.d.ts"] }
+  },
+  "include": ["src"]
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new("tsc")
+        .current_dir(&dir)
+        .args(["-p", "tsconfig.json"])
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "consumer typecheck failed:\n{}\n---sidecar---\n{sidecar}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }

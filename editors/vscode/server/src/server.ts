@@ -681,7 +681,7 @@ connection.onHover(async (params) => {
   const range = { start: doc.positionAt(w.start), end: doc.positionAt(w.end) };
   if (sym.kind === "enum") {
     const note = sym.enum.builtin
-      ? "내장 enum — 선언 없이도 match 소진성 검사의 대상입니다. 값·타입은 표준 라이브러리 모듈(`rlc --emit-std`)에서 import하세요."
+      ? "내장 enum — 선언 없이도 match 소진성 검사의 대상입니다. 값·타입은 표준 라이브러리 모듈(`@rl/std`)에서 import하세요."
       : sym.enum.imported
         ? `\`${sym.enum.imported.specifier}\`에서 import한 rl enum — match 소진성 검사의 대상입니다.`
         : "rl enum — 같은 이름의 타입 별칭(`kind` 태그드 유니언)과 생성자 객체로 컴파일됩니다.";

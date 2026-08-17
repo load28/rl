@@ -1,16 +1,21 @@
-//! rlc — compile .rl files to .ts.
+//! rlc — compile .rl sources into a complete TypeScript tree.
 //!
-//!   rlc file.rl [more.rl ...]      writes file.ts next to each input
-//!   rlc src/                       compiles every .rl under src/ recursively
-//!   rlc -p file.rl                 prints the output to stdout
-//!   rlc -o out/ src/               mirrors the input tree under out/
+//!   rlc -o build src/              builds src/ under build/: .rl files are
+//!                                  compiled, hand-written .ts files pass
+//!                                  through (with .rl import specifiers
+//!                                  rewritten), and the standard library is
+//!                                  materialized when something imports it
+//!   rlc --types src/               writes editor/typecheck sidecars for the
+//!                                  same tree (compiles to .rl-build/, runs
+//!                                  tsc --emitDeclarationOnly, emits
+//!                                  .rl-types/<name>.rl.d.ts + .map)
 //!   rlc --check src/               compiles without writing anything
-//!   rlc --emit-std src/rl.ts       writes the standard library module
+//!   rlc -p file.rl                 prints one compiled module to stdout
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -22,33 +27,49 @@ fn usage() {
     println!(
         "rlc v{VERSION} — rl to TypeScript compiler
 
-Usage: rlc [options] <file.rl | dir> ...
+Usage: rlc [options] <file | dir> ...
+
+Builds a complete TypeScript tree: .rl files are compiled, hand-written
+.ts files pass through byte-for-byte (with relative .rl import specifiers
+rewritten), and the standard library is materialized when an input
+imports \"@rl/std\". Types come from the same sources via --types.
 
 Options:
   -o, --out-dir <dir>   write outputs under <dir> (mirrors input paths)
-  -p, --print           print compiled output to stdout instead of writing
   -w, --watch           keep running; recompile inputs (and their importers)
                         as they change
   --check               compile only; write nothing (syntax check)
-  --emit-std <file>     write the standard library module (Option/Result) to <file>
+  --types               write editor/typecheck sidecars instead of building:
+                        compiles the tree to .rl-build/, runs
+                        tsc --emitDeclarationOnly over it, and emits
+                        <name>.rl.d.ts + .map under -o (default .rl-types)
+  --tsc <path>          tsc binary --types should run
+                        (default: node_modules/.bin/tsc, then PATH)
+  -h, --help            show this help
+  -v, --version         show version
+
+Tooling options (bundler plugins, editors):
+  -p, --print           print compiled output to stdout instead of writing
+  --emit-std            print the standard library module to stdout
   --no-banner           omit the \"generated\" banner comment
   --no-verify           skip swc validation of types and generated output
-  --rewrite-imports <js|ts|bare|off>
+  --rewrite-imports <js|ts|off>
                         how relative .rl import specifiers are emitted:
-                        js = ./x.js (default), ts = ./x.ts, bare = ./x,
-                        off = untouched
+                        js = ./x.js (default), ts = ./x.ts, off = untouched
   --sidecar <dir>       write <name>.rl.d.ts and .map next to each input from
-                        <dir>/<name>.d.ts (tsc --emitDeclarationOnly output),
-                        so .ts files can import .rl; compiles nothing
+                        <dir>/<name>.d.ts (tsc --emitDeclarationOnly output);
+                        compiles nothing (--types runs this step for you)
   --symbols             print rl enum declarations (with positions) and the
                         direct .rl imports of each input as JSON; compiles
-                        nothing (for language tooling)
-  -h, --help            show this help
-  -v, --version         show version"
+                        nothing (for language tooling)"
     );
 }
 
-fn collect_rl_files(entry: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// Extensions a directory walk picks up when hand-written TypeScript rides
+/// along (build/--check/--types). `.rl` is always collected.
+const TS_EXTENSIONS: &[&str] = &["ts", "mts", "cts"];
+
+fn collect_sources(entry: &Path, include_ts: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     let meta = fs::metadata(entry)?;
     if meta.is_file() {
         out.push(entry.to_path_buf());
@@ -62,8 +83,22 @@ fn collect_rl_files(entry: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()>
         for child in children {
             let meta = fs::metadata(&child)?;
             if meta.is_dir() {
-                collect_rl_files(&child, out)?;
-            } else if meta.is_file() && child.extension().is_some_and(|e| e == "rl") {
+                // Dot-directories (.git, .rl-build, .rl-types, ...) and
+                // node_modules are never sources; descending into them
+                // would pull generated or vendored TypeScript into the
+                // build — or the cache tree into itself.
+                let skip = child.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with('.') || name == "node_modules"
+                });
+                if !skip {
+                    collect_sources(&child, include_ts, out)?;
+                }
+            } else if meta.is_file()
+                && child.extension().is_some_and(|e| {
+                    e == "rl" || (include_ts && TS_EXTENSIONS.iter().any(|ts| *ts == e))
+                })
+            {
                 out.push(child);
             }
         }
@@ -376,14 +411,16 @@ fn main() -> ExitCode {
 
     let mut inputs: Vec<String> = Vec::new();
     let mut out_dir: Option<PathBuf> = None;
-    let mut emit_std: Option<PathBuf> = None;
+    let mut emit_std = false;
     let mut print = false;
     let mut watch = false;
     let mut check = false;
+    let mut types = false;
     let mut banner = true;
     let mut verify = true;
     let mut symbols = false;
     let mut sidecar_dir: Option<PathBuf> = None;
+    let mut tsc: Option<PathBuf> = None;
     let mut rewrite_imports = ImportRewrite::default();
 
     let mut it = argv.iter();
@@ -400,9 +437,11 @@ fn main() -> ExitCode {
             "-p" | "--print" => print = true,
             "-w" | "--watch" => watch = true,
             "--check" => check = true,
+            "--types" => types = true,
             "--symbols" => symbols = true,
             "--no-banner" => banner = false,
             "--no-verify" => verify = false,
+            "--emit-std" => emit_std = true,
             "--sidecar" => match it.next() {
                 Some(dir) => sidecar_dir = Some(PathBuf::from(dir)),
                 None => {
@@ -417,24 +456,23 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
-            "--rewrite-imports" => match it.next().map(String::as_str) {
-                Some("js") => rewrite_imports = ImportRewrite::Js,
-                Some("ts") => rewrite_imports = ImportRewrite::Ts,
-                Some("bare") => rewrite_imports = ImportRewrite::Bare,
-                Some("off") => rewrite_imports = ImportRewrite::Off,
-                Some(other) => {
-                    eprintln!("rlc: --rewrite-imports expects js, ts, bare, or off (got {other})");
-                    return ExitCode::FAILURE;
-                }
+            "--tsc" => match it.next() {
+                Some(path) => tsc = Some(PathBuf::from(path)),
                 None => {
-                    eprintln!("rlc: --rewrite-imports requires a value (js, ts, bare, or off)");
+                    eprintln!("rlc: --tsc requires a path to the tsc binary");
                     return ExitCode::FAILURE;
                 }
             },
-            "--emit-std" => match it.next() {
-                Some(path) => emit_std = Some(PathBuf::from(path)),
+            "--rewrite-imports" => match it.next().map(String::as_str) {
+                Some("js") => rewrite_imports = ImportRewrite::Js,
+                Some("ts") => rewrite_imports = ImportRewrite::Ts,
+                Some("off") => rewrite_imports = ImportRewrite::Off,
+                Some(other) => {
+                    eprintln!("rlc: --rewrite-imports expects js, ts, or off (got {other})");
+                    return ExitCode::FAILURE;
+                }
                 None => {
-                    eprintln!("rlc: --emit-std requires a value");
+                    eprintln!("rlc: --rewrite-imports requires a value (js, ts, or off)");
                     return ExitCode::FAILURE;
                 }
             },
@@ -446,48 +484,59 @@ fn main() -> ExitCode {
         }
     }
 
-    if inputs.is_empty() && emit_std.is_none() {
-        usage();
-        return ExitCode::FAILURE;
-    }
-
-    if let Some(path) = &emit_std {
+    // The standard library on stdout — how a bundler plugin serves the
+    // module from memory. Since the build materializes it on its own
+    // (`@rl/std` auto-emission), this combines with nothing else.
+    if emit_std {
+        if !inputs.is_empty() {
+            eprintln!("rlc: --emit-std takes no inputs (the build materializes @rl/std itself)");
+            return ExitCode::FAILURE;
+        }
         let mut code = rlc::STD_SOURCE.to_string();
         if banner {
             code = format!("// @generated by rlc --emit-std — do not edit directly.\n{code}");
         }
-        // `-` means stdout: a bundler plugin serves the module from memory
-        // rather than writing it anywhere.
-        if path.as_os_str() == "-" {
-            print!("{code}");
-            if inputs.is_empty() {
-                return ExitCode::SUCCESS;
-            }
-        } else {
-            if let Some(parent) = path.parent()
-                && let Err(e) = fs::create_dir_all(parent)
-            {
-                eprintln!("rlc: {}: {e}", parent.display());
-                return ExitCode::FAILURE;
-            }
-            if let Err(e) = fs::write(path, &code) {
-                eprintln!("rlc: {}: {e}", path.display());
-                return ExitCode::FAILURE;
-            }
-            eprintln!("rlc: std → {}", path.display());
-            if inputs.is_empty() {
-                return ExitCode::SUCCESS;
-            }
-        }
+        print!("{code}");
+        return ExitCode::SUCCESS;
     }
 
-    let jobs = match build_jobs(&inputs, out_dir.as_deref()) {
+    if inputs.is_empty() {
+        usage();
+        return ExitCode::FAILURE;
+    }
+
+    if types && (print || check || symbols || sidecar_dir.is_some()) {
+        eprintln!("rlc: --types does not combine with -p, --check, --symbols, or --sidecar");
+        return ExitCode::FAILURE;
+    }
+
+    // Tooling modes stay .rl-only; the compile modes carry hand-written
+    // TypeScript along so the output tree is complete.
+    let include_ts = !symbols && sidecar_dir.is_none();
+
+    if types {
+        let opts = TypesOptions {
+            out_dir: out_dir.unwrap_or_else(|| PathBuf::from(TYPES_DIR)),
+            tsc,
+            verify,
+        };
+        return if watch {
+            types_watch(&inputs, &opts)
+        } else {
+            match types_once(&inputs, &opts) {
+                Ok(false) => ExitCode::SUCCESS,
+                Ok(true) | Err(_) => ExitCode::FAILURE,
+            }
+        };
+    }
+
+    let jobs = match build_jobs(&inputs, out_dir.as_deref(), include_ts) {
         Ok(jobs) => jobs,
         Err(code) => return code,
     };
 
     if jobs.is_empty() {
-        eprintln!("rlc: no .rl files found");
+        eprintln!("rlc: no sources found");
         return ExitCode::FAILURE;
     }
 
@@ -578,7 +627,6 @@ fn std_specifier(job: &Job, std_file: &Path, rewrite: ImportRewrite) -> Option<S
     let name = match rewrite {
         ImportRewrite::Js => "rl.js",
         ImportRewrite::Ts => "rl.ts",
-        ImportRewrite::Bare => "rl",
         ImportRewrite::Off => return None,
     };
     let job_dir = job.out_path.parent().unwrap_or(Path::new("."));
@@ -591,8 +639,15 @@ fn std_specifier(job: &Job, std_file: &Path, rewrite: ImportRewrite) -> Option<S
     })
 }
 
-/// Expands the command line's inputs into one job per `.rl` file.
-fn build_jobs(inputs: &[String], out_dir: Option<&Path>) -> Result<Vec<Job>, ExitCode> {
+/// Expands the command line's inputs into one job per source file. `.rl`
+/// files compile to a `.ts` of the same stem; hand-written TypeScript
+/// (collected when `include_ts` is set) keeps its file name and passes
+/// through with its `.rl` import specifiers rewritten.
+fn build_jobs(
+    inputs: &[String],
+    out_dir: Option<&Path>,
+    include_ts: bool,
+) -> Result<Vec<Job>, ExitCode> {
     let mut jobs: Vec<Job> = Vec::new();
     for input in inputs {
         let input_path = Path::new(input);
@@ -602,26 +657,48 @@ fn build_jobs(inputs: &[String], out_dir: Option<&Path>) -> Result<Vec<Job>, Exi
         }
         let is_dir = input_path.is_dir();
         let mut files = Vec::new();
-        if let Err(e) = collect_rl_files(input_path, &mut files) {
+        if let Err(e) = collect_sources(input_path, include_ts, &mut files) {
             eprintln!("rlc: {input}: {e}");
             return Err(ExitCode::FAILURE);
         }
         for file in files {
+            let out_name = if file.extension().is_some_and(|e| e == "rl") {
+                file.with_extension("ts")
+            } else {
+                file.clone()
+            };
             let out_path = match out_dir {
                 Some(dir) => {
                     let rel = if is_dir {
-                        file.strip_prefix(input_path).unwrap_or(&file).to_path_buf()
+                        out_name
+                            .strip_prefix(input_path)
+                            .unwrap_or(&out_name)
+                            .to_path_buf()
                     } else {
-                        PathBuf::from(file.file_name().unwrap())
+                        PathBuf::from(out_name.file_name().unwrap())
                     };
-                    dir.join(rel).with_extension("ts")
+                    dir.join(rel)
                 }
-                None => file.with_extension("ts"),
+                None => out_name,
             };
             jobs.push(Job { file, out_path });
         }
     }
     Ok(jobs)
+}
+
+/// Whether two paths name the same file. The output side may not exist
+/// yet, so the parents are compared canonically and the file names
+/// literally.
+fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.file_name() != b.file_name() {
+        return false;
+    }
+    let canon = |p: &Path| p.parent().unwrap_or(Path::new(".")).canonicalize();
+    matches!((canon(a), canon(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// Compiles every job. Returns true if any of them failed.
@@ -632,6 +709,16 @@ fn compile_jobs(jobs: &[Job], opts: &BuildOptions) -> bool {
     // one module the outputs point at.
     let std_file = std_placement(jobs, opts.out_dir.as_deref());
     if let Some(file) = &std_file
+        && !opts.check
+        && !opts.print
+        && jobs.iter().any(|job| same_file(&job.file, file))
+    {
+        eprintln!(
+            "rlc: {}: the standard library would overwrite an input — pass -o <dir>",
+            file.display()
+        );
+        failed = true;
+    } else if let Some(file) = &std_file
         && !opts.check
         && !opts.print
     {
@@ -654,6 +741,14 @@ fn compile_jobs(jobs: &[Job], opts: &BuildOptions) -> bool {
 
     for job in jobs {
         let filename = job.file.display().to_string();
+        // A pass-through `.ts` compiled in place would land on top of its
+        // own source (with specifiers rewritten) — refuse rather than
+        // destroy hand-written code.
+        if !opts.print && !opts.check && same_file(&job.file, &job.out_path) {
+            eprintln!("rlc: {filename}: output would overwrite the input — pass -o <dir>");
+            failed = true;
+            continue;
+        }
         let source = match fs::read_to_string(&job.file) {
             Ok(s) => s,
             Err(e) => {
@@ -723,7 +818,7 @@ fn watch_mode(inputs: &[String], out_dir: Option<&Path>, opts: &BuildOptions) ->
     let mut first = true;
 
     loop {
-        let jobs = match build_jobs(inputs, out_dir) {
+        let jobs = match build_jobs(inputs, out_dir, true) {
             Ok(jobs) => jobs,
             // An input can disappear mid-edit; keep watching rather than
             // tearing the session down.
@@ -771,6 +866,269 @@ fn watch_mode(inputs: &[String], out_dir: Option<&Path>, opts: &BuildOptions) ->
         if first {
             eprintln!("rlc: watching {} file(s) — Ctrl-C to stop", jobs.len());
             first = false;
+        }
+        stamps = current;
+        thread::sleep(WATCH_INTERVAL);
+    }
+}
+
+/// Where `--types` compiles the tree before declaration emit. A fixed,
+/// inspectable location (gitignore it) rather than a temp dir: when the
+/// pipeline fails, the intermediate files are right there.
+const BUILD_DIR: &str = ".rl-build";
+
+/// Default `-o` of `--types` — where the sidecars land.
+const TYPES_DIR: &str = ".rl-types";
+
+/// Everything the `--types` pipeline needs beyond the file list.
+struct TypesOptions {
+    /// Where the sidecars are written (mirrors the input layout).
+    out_dir: PathBuf,
+    /// Explicit tsc binary (`--tsc`); otherwise `node_modules/.bin/tsc`,
+    /// then `tsc` on PATH.
+    tsc: Option<PathBuf>,
+    verify: bool,
+}
+
+/// The compiler options tsc runs with for declaration emit. `rootDir` is
+/// pinned to the cache tree so tsc cannot promote a common root above it
+/// and nest the output paths. The cache keeps the sources' own specifiers
+/// (`"./x.rl"`, `"@rl/std"`) — declaration emit preserves specifiers, and
+/// these are exactly the ones that resolve in the consumer's merged view —
+/// so resolution is supplied on the side: `allowArbitraryExtensions` picks
+/// up a `<name>.d.rl.ts` shim per compiled module, and `paths` maps the
+/// standard library onto its materialized file.
+const TYPES_TSCONFIG: &str = r#"{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "allowArbitraryExtensions": true,
+    "paths": { "@rl/std": ["./rl.ts"] },
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "rootDir": ".",
+    "outDir": "types"
+  },
+  "exclude": ["types"]
+}
+"#;
+
+/// `--types`: one pass of the unified type pipeline.
+///
+/// Compiles the tree into [`BUILD_DIR`] (imports rewritten to `.ts`, which
+/// `allowImportingTsExtensions` resolves), runs tsc's declaration emit over
+/// it, and turns the declarations of every `.rl` input into an editor
+/// sidecar under the output directory. `Ok(failed)` reports a round that
+/// ran; `Err` is fatal (bad inputs, no tsc) and ends a watch session too.
+fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> {
+    let build_root = Path::new(BUILD_DIR);
+    // Stale outputs from renamed or deleted sources would feed tsc a tree
+    // that no longer exists; the cache is rebuilt from scratch every pass.
+    let _ = fs::remove_dir_all(build_root);
+
+    let jobs = build_jobs(inputs, Some(build_root), true)?;
+    if jobs.is_empty() {
+        eprintln!("rlc: no sources found");
+        return Err(ExitCode::FAILURE);
+    }
+
+    let build = BuildOptions {
+        banner: false,
+        print: false,
+        check: false,
+        verify: opts.verify,
+        // The declarations must carry the specifiers the *consumer*
+        // resolves — the original ones. See TYPES_TSCONFIG for how the
+        // cache itself resolves them.
+        rewrite_imports: ImportRewrite::Off,
+        out_dir: Some(build_root.to_path_buf()),
+    };
+    if compile_jobs(&jobs, &build) {
+        return Ok(true);
+    }
+
+    // `import "./x.rl"` inside the cache resolves through a declaration
+    // shim (`allowArbitraryExtensions` looks for `x.d.rl.ts`) that
+    // re-exports the compiled module's types.
+    for job in &jobs {
+        if job.file.extension().is_none_or(|e| e != "rl") {
+            continue;
+        }
+        let Some(stem) = job.out_path.file_stem().map(|s| s.to_string_lossy()) else {
+            continue;
+        };
+        let shim_path = job.out_path.with_file_name(format!("{stem}.d.rl.ts"));
+        let shim = format!("export * from \"./{stem}.ts\";\n");
+        if let Err(e) = fs::write(&shim_path, shim) {
+            eprintln!("rlc: {}: {e}", shim_path.display());
+            return Err(ExitCode::FAILURE);
+        }
+    }
+
+    let tsconfig = build_root.join("tsconfig.json");
+    if let Err(e) = fs::write(&tsconfig, TYPES_TSCONFIG) {
+        eprintln!("rlc: {}: {e}", tsconfig.display());
+        return Err(ExitCode::FAILURE);
+    }
+
+    let output = run_tsc(opts.tsc.as_deref(), build_root)?;
+    let mut failed = !output.status.success();
+    if failed {
+        // tsc still emits declarations alongside its errors (it does not
+        // stop on type errors), so the sidecars below stay fresh; the
+        // errors are the user's to fix and the exit code says so.
+        eprintln!("rlc: tsc reported errors:");
+        eprint!("{}", String::from_utf8_lossy(&output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let decl_root = build_root.join("types");
+    for job in &jobs {
+        if job.file.extension().is_none_or(|e| e != "rl") {
+            continue;
+        }
+        let rel = job
+            .out_path
+            .strip_prefix(build_root)
+            .unwrap_or(&job.out_path);
+        let decl_path = decl_root.join(rel.with_extension("d.ts"));
+        let source = match fs::read_to_string(&job.file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("rlc: {}: {e}", job.file.display());
+                failed = true;
+                continue;
+            }
+        };
+        let declarations = match fs::read_to_string(&decl_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("rlc: {}: {e}", decl_path.display());
+                failed = true;
+                continue;
+            }
+        };
+
+        let file_name = job.file.file_name().unwrap_or_default().to_string_lossy();
+        let sidecar_path = opts
+            .out_dir
+            .join(rel)
+            .with_file_name(format!("{file_name}.d.ts"));
+        let map_path = sidecar_path.with_extension("ts.map");
+        let dir = sidecar_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        if let Err(e) = fs::create_dir_all(&dir) {
+            eprintln!("rlc: {}: {e}", dir.display());
+            failed = true;
+            continue;
+        }
+        let sidecar = rlc::build_sidecar(&source, &declarations, &relative_path(&dir, &job.file));
+        let written = fs::write(&sidecar_path, &sidecar.declarations)
+            .and_then(|()| fs::write(&map_path, &sidecar.map));
+        match written {
+            Ok(()) => eprintln!("rlc: {} → {}", job.file.display(), sidecar_path.display()),
+            Err(e) => {
+                eprintln!("rlc: {}: {e}", sidecar_path.display());
+                failed = true;
+            }
+        }
+    }
+
+    // The standard library's declarations ride along whenever the build
+    // materialized it, so `@rl/std` can be mapped in the consumer's
+    // tsconfig `paths`.
+    if std_placement(&jobs, Some(build_root)).is_some() {
+        let from = decl_root.join("rl.d.ts");
+        let to = opts.out_dir.join("rl.d.ts");
+        match fs::read(&from).and_then(|bytes| fs::write(&to, bytes)) {
+            Ok(()) => eprintln!("rlc: std types → {}", to.display()),
+            Err(e) => {
+                eprintln!("rlc: {}: {e}", from.display());
+                failed = true;
+            }
+        }
+    }
+
+    Ok(failed)
+}
+
+/// Runs tsc's declaration emit over the cache tree. The project-local
+/// binary wins — it is the TypeScript version the project pinned; PATH is
+/// the fallback. `Err` means no candidate could be spawned at all.
+fn run_tsc(explicit: Option<&Path>, build_root: &Path) -> Result<std::process::Output, ExitCode> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    match explicit {
+        Some(path) => candidates.push(path.to_path_buf()),
+        None => {
+            candidates.push(PathBuf::from("node_modules/.bin/tsc"));
+            #[cfg(windows)]
+            candidates.push(PathBuf::from("node_modules/.bin/tsc.cmd"));
+            candidates.push(PathBuf::from("tsc"));
+        }
+    }
+
+    for candidate in &candidates {
+        // A missing project-local binary is expected; only fall through
+        // when the candidate cannot be spawned at all.
+        if candidate.components().count() > 1 && !candidate.exists() {
+            continue;
+        }
+        match Command::new(candidate).arg("-p").arg(build_root).output() {
+            Ok(output) => return Ok(output),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                eprintln!("rlc: {}: {e}", candidate.display());
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    }
+    eprintln!("rlc: tsc not found — install TypeScript (npm i -D typescript) or pass --tsc <path>");
+    Err(ExitCode::FAILURE)
+}
+
+/// `--types -w`: rerun the whole pipeline whenever a source changes.
+/// Declaration emit is a whole-program pass, so there is no per-file
+/// increment to exploit yet — a full rerun keeps the sidecars coherent.
+fn types_watch(inputs: &[String], opts: &TypesOptions) -> ExitCode {
+    let mut stamps: HashMap<PathBuf, SystemTime> = HashMap::new();
+    let mut first = true;
+
+    loop {
+        let jobs = match build_jobs(inputs, Some(Path::new(BUILD_DIR)), true) {
+            Ok(jobs) => jobs,
+            Err(_) => {
+                thread::sleep(WATCH_INTERVAL);
+                continue;
+            }
+        };
+        let current: HashMap<PathBuf, SystemTime> = jobs
+            .iter()
+            .map(|job| {
+                let stamp = fs::metadata(&job.file)
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                (job.file.clone(), stamp)
+            })
+            .collect();
+
+        if first || current != stamps {
+            match types_once(inputs, opts) {
+                Ok(failed) => eprintln!(
+                    "rlc: types {} — watching",
+                    if failed { "failed" } else { "ok" }
+                ),
+                Err(code) => return code,
+            }
+            if first {
+                eprintln!("rlc: watching {} file(s) — Ctrl-C to stop", jobs.len());
+                first = false;
+            }
         }
         stamps = current;
         thread::sleep(WATCH_INTERVAL);

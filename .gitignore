@@ -2,6 +2,9 @@ node_modules/
 *.tsbuildinfo
 *.log
 
+# rlc caches and sidecar output (rlc --types)
+.rl-build/
+.rl-types/
 
 # Added by cargo
 

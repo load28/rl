@@ -47,15 +47,18 @@ Rollup(+ TypeScript 플러그인)에서 같은 코드로 동작합니다.
 | `compiler` | `"rlc"` | rlc 실행 파일 경로 |
 | `verify` | `true` | `false`면 `--no-verify`를 넘겨 방출물 자가 검사를 생략합니다 |
 
-## 타입은 별도입니다
+## 타입은 같은 명령으로
 
 번들러 플러그인은 **런타임만** 해결합니다. `.ts` 파일이 `.rl`을 import할 때
-타입 검사와 정의 이동이 동작하려면 사이드카가 필요합니다.
+타입 검사와 정의 이동이 동작하려면 타입 사이드카가 필요한데, 단독(tsc)
+파이프라인과 똑같이 한 명령이면 됩니다:
 
 ```sh
-rlc --sidecar <선언 디렉터리> -o .rl-types src/x.rl
+rlc --types src        # → .rl-types/<이름>.rl.d.ts (+ .map, rl.d.ts)
 ```
 
-자세한 내용은 [`docs/reference/cli.md`](../../docs/reference/cli.md)의
-"에디터 사이드카" 절과 [VSCode 확장](../../editors/vscode/README.md)을
-참조하세요. 확장은 저장할 때마다 사이드카를 갱신합니다.
+소비 측 `tsconfig.json`에 `rootDirs`(사이드카 병합)와 `paths`(`@rl/std`
+매핑)만 선언하면 `tsc --noEmit`과 에디터가 그대로 동작합니다 — 자세한
+내용은 [`docs/reference/cli.md`](../../docs/reference/cli.md)의 "타입 생성"
+절 참조. [VSCode 확장](../../editors/vscode/README.md)은 저장할 때마다
+사이드카를 갱신합니다.

@@ -28,8 +28,9 @@ import { Option, Result } from "@rl/std";
 "paths": { "@rl/std": ["./build/rl.ts"] }
 ```
 
-파일이 직접 필요하면(vendoring, npm을 쓰지 않는 환경) 여전히
-`rlc --emit-std <파일>`로 뽑을 수 있고, `-`를 주면 stdout으로 나옵니다.
+모듈 본문이 직접 필요하면(번들러 플러그인의 가상 모듈, vendoring)
+`rlc --emit-std`가 stdout으로 출력합니다 — 빌드에서는 자동 방출이
+대신하므로 파일로 뽑아 둘 일은 없습니다.
 
 ### 값의 형태 계약
 
