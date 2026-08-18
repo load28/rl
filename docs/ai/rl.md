@@ -109,22 +109,31 @@ import { Option, Result } from "@rl/std";
 - Exhaustiveness sees exported enums from DIRECT (1-hop) relative `.rl` imports (named/aliased/`* as ns`); re-export chains & package paths NOT collected → those matches compile unchecked.
 - Dynamic `import()` specifiers not rewritten.
 
-## Build
+## Install
 
-```sh
-npm i -D rl-lang   # prebuilt rlc; run via npx
-```
+- `npm i -D rl-lang typescript` → prebuilt `rlc` binary (linux-x64/arm64, darwin-x64/arm64, win32-x64), run via `npx rlc`. typescript 5 or 6 required for `--types` (TS7 has no JS compiler API — `npm i -D typescript@6` if only 7 resolves).
+- Other platforms / no npm: `cargo install --git https://github.com/load28/rl`; to keep using the npm launcher, set env `RLC_BINARY=/path/to/rlc`.
+- Update: `npm i -D rl-lang@latest` (binary follows package version); verify `npx rlc -v`; then re-run `npx rlc --types src` and rebuild.
+- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, diagnostics, go-to-def).
+
+## Setup
+
+New project: `npm init -y && npm i -D rl-lang typescript`; sources in `src/**/*.rl` (hand-written `.ts` alongside is fine); gitignore `.rl-types/` and the out dir.
 ```jsonc
-// package.json (tsc setup)
-"build": "rlc -o build src && tsc", "types": "rlc --types src", "check": "rlc --check src && tsc --noEmit"
+// package.json
+"scripts": { "build": "rlc -o build src && tsc", "types": "rlc --types src", "check": "rlc --check src && tsc --noEmit" }
 // tsconfig.json — resolve "./x.rl" and "@rl/std":
-"rootDirs": ["./src", "./.rl-types"], "paths": { "@rl/std": ["./.rl-types/rl.d.ts"] }
+"compilerOptions": { "rootDirs": ["./src", "./.rl-types"], "paths": { "@rl/std": ["./.rl-types/rl.d.ts"] } }
 ```
-- `rlc <dir>`: `.rl`→`.ts`, hand-written `.ts` passthrough; `-o <dir>` for separate tree (in-place overwrite refused). `@rl/std` auto-materialized into output when imported.
-- `rlc --types src` → `.rl-types/` declaration sidecar (gitignore it; needs typescript 5/6 — TS7 has no JS API). Re-run after `.rl` changes, or keep `rlc --types -w src` running.
-- `rlc -w` watches, also recompiles importers of changed files.
-- Bundler: `unplugin-rl` (`import rl from "unplugin-rl/vite"`) reads `.rl` directly; types still via `rlc --types`.
-- Emitted `.ts` starts with `// @generated` — NEVER edit output; edit `.rl` source.
+Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/rollup` `/webpack` `/esbuild`) — bundler reads `.rl` directly, no rlc build step; types still via `rlc --types`.
+
+## Workflow
+
+- Edit loop: change `.rl` → `npx rlc --check src` (fast rl-level: syntax, exhaustiveness) → `npx tsc --noEmit` (types). Keep `npx rlc --types -w src` running so editor/tsc resolve `./x.rl` + `@rl/std`; if not watching, re-run `--types` after enum changes.
+- Build: `npm run build` (rlc emits TS tree then tsc) or bundler build. CI: `rlc --check src && tsc --noEmit` + tests.
+- `rlc <dir>`: `.rl`→`.ts`, hand-written `.ts` passthrough; `-o <dir>` separate tree (in-place overwrite refused); `@rl/std` auto-materialized when imported. `rlc -w` watches and also recompiles importers of changed files (cross-file exhaustiveness).
+- Emitted `.ts` starts with `// @generated` — NEVER edit output or `.rl-types/`; edit the `.rl` source.
+- Offline docs: `npx rlc help` lists topics; `npx rlc help <topic>` (e.g. `match`, `try`, `install`) prints that section of this guide; `npx rlc help all` prints it whole. `npx rlc -h` = CLI options.
 
 ## Errors
 

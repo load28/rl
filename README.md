@@ -92,6 +92,7 @@ npm install --save-dev rl-lang    # rlc 컴파일러 (프리빌트 바이너리)
 npx rlc -o build src/             # 소스 트리 → TypeScript 트리
 npx rlc --check src/              # 컴파일하지 않고 검사만
 npx rlc --types src/              # 에디터·tsc용 타입 선언
+npx rlc help match                # 내장 언어·워크플로 가이드 (주제별)
 ```
 
 프리빌트 지원 플랫폼은 linux-x64 / linux-arm64 / darwin-x64 / darwin-arm64 /

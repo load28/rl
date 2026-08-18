@@ -29,6 +29,12 @@ curl -o docs/rl-ai-guide.md \
 `npm install rl-lang`을 쓰는 프로젝트라면 설치된 패키지 대신 위처럼 저장소의
 최신 문서를 받아 두고, rl 버전을 올릴 때 함께 갱신하는 것을 권장합니다.
 
+**같은 가이드가 컴파일러에도 임베드되어 있습니다** — 설치된 rlc에서
+`npx rlc help`(주제 목록), `npx rlc help match`(주제별),
+`npx rlc help all`(전체)로 꺼낼 수 있어, AI가 작업 중 네트워크 없이 문법을
+찾아보거나 컨텍스트 파일 없이도 스스로 가이드를 조회할 수 있습니다
+([`cli.md`](../reference/cli.md) 참조).
+
 ## 이 문서가 다루는 것
 
 - **통과 계약**: 유효한 TS는 그대로 유효한 `.rl`이고, 어긋난 rl 구문은

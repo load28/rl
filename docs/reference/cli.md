@@ -9,6 +9,7 @@
 
 ```
 rlc [options] <file | dir> ...
+rlc help [topic]
 ```
 
 ## 설치
@@ -53,6 +54,41 @@ GitHub Release 업로드까지 수행합니다.
 
 옵션과 입력은 순서 무관하게 섞을 수 있습니다. `-`로 시작하는 알 수 없는 인자는
 에러이고, `--`(옵션 종료)와 짧은 옵션 병합(`-po`)은 지원하지 않습니다.
+
+## 주제별 헬프 (`rlc help`)
+
+바이너리에 임베드된 언어·워크플로 가이드([`docs/ai/rl.md`](../ai/rl.md), 빌드
+시점에 포함)를 주제별로 stdout에 출력합니다. 네트워크나 저장소 없이 문법을
+찾아볼 수 있어 AI 코딩 도구가 자기 서비스로 쓰기에 적합합니다.
+
+```sh
+rlc help              # 주제 목록
+rlc help match        # 해당 섹션만 출력
+rlc help all          # 가이드 전체 (별칭: guide)
+```
+
+| 주제 | 별칭 |
+|------|------|
+| `overview` | `contracts`, `intro` |
+| `enum` | `enums` |
+| `match` | `tuple`, `patterns` |
+| `try` | — |
+| `let-else` | `letelse` |
+| `if-let` | `iflet` |
+| `pipe` | `pipeline`, `\|>` |
+| `std` | `option`, `result` |
+| `modules` | `imports` |
+| `install` | `update` |
+| `setup` | `init` |
+| `workflow` | `dev`, `build` |
+| `errors` | — |
+| `checklist` | — |
+
+- 주제는 대소문자 무관, 한 번에 하나만 받습니다 (둘 이상은 에러).
+- `help`는 **첫 번째 인자일 때만** 서브커맨드입니다 — `help`라는 이름의
+  파일은 `./help`처럼 경로로 넘기면 입력으로 처리됩니다.
+- 알 수 없는 주제는 stderr 에러와 종료 코드 1입니다
+  ([`errors.md`](./errors.md)).
 
 ## 입력 수집
 
@@ -249,7 +285,7 @@ rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
 - 쓴 파일마다 stderr에 진행 로그(`rlc: src/a.rl → src/a.ts`). `-p`/`--check`는
   로그 없음.
 - 에러는 stderr에 `rlc: 파일:행:열: 메시지` ([`errors.md`](./errors.md)).
-- stdout은 `-p`·`--emit-std`·`--symbols`·`--emit-map`·`-h`·`-v` 전용이라 파이프로 안전합니다.
+- stdout은 `-p`·`--emit-std`·`--symbols`·`--emit-map`·`help`·`-h`·`-v` 전용이라 파이프로 안전합니다.
 - 기본적으로 출력 첫 줄에 `// @generated from <파일> by rlc — do not edit
   directly.`가 붙습니다 (`--no-banner`로 생략).
 
