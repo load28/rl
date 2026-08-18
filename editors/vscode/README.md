@@ -78,6 +78,10 @@ head와 맞지 않아 콤비네이터 파라미터가 `unknown`으로 추론되�
 - **매핑되지 않는 스팬은 버립니다.** 컴파일러가 쓴 글루(switch IIFE,
   구조분해, `$rl_ap` 헬퍼)에 걸린 진단은 사용자 코드가 아니므로 표시하지
   않습니다 — 방출물 때문에 tsc 에러가 나면 그건 rlc의 버그입니다.
+- **타입 환경이 온전할 때만** 검사합니다. TypeScript의 `lib.*.d.ts`를
+  찾지 못하면 전역 타입이 통째로 없는 프로그램이 되어 멀쩡한 코드에
+  엉뚱한 에러(예: 튜플 구조 분해에 `TS2488`)가 붙으므로, 그 상태에서는
+  타입 진단을 전부 끄고 출력 채널에 사유를 한 번 기록합니다.
 
 ## 요구사항
 
@@ -170,8 +174,25 @@ npm test           # 서버 분석 로직 단위 테스트 (node --test)
 VSCode에서 `editors/vscode` 폴더를 열고 **F5** (Launch Extension)를 누르면
 확장 개발 호스트가 뜹니다. `.rl` 파일을 열어 확인하세요.
 
-패키징(vsix)은 [`@vscode/vsce`](https://github.com/microsoft/vscode-vsce)로:
+### 패키징
+
+[`@vscode/vsce`](https://github.com/microsoft/vscode-vsce)로 vsix를 만듭니다.
+client/·server/가 각자 `package.json`을 갖는 레이아웃이라 `--no-dependencies`
+로 패키징합니다 (`.vscodeignore`가 담을 것을 그대로 결정합니다):
 
 ```sh
-npx @vscode/vsce package
+npm ci && npx tsc -b
+npx @vscode/vsce package --no-dependencies
+```
+
+**패키징 후 반드시 확인할 것** — 언어 서버는 런타임에 TypeScript로 타입을
+검사하므로 TypeScript의 `lib*.d.ts`가 vsix 안에 들어가야 합니다.
+`.vscodeignore`의 `**/*.ts`가 선언 파일까지 걸러내기 때문에, 뒤쪽의
+`!server/node_modules/typescript/lib/lib*.d.ts` 한 줄이 그것들을 되살립니다.
+이게 빠지면 확장은 **뜨긴 하지만 전역 타입이 하나도 없는 채로** 검사해
+멀쩡한 코드에 거짓 에러(예: 튜플 구조 분해에 `TS2488`)를 답니다:
+
+```sh
+npx @vscode/vsce ls --no-dependencies | grep -c "typescript/lib/lib"
+# → 100 (0이면 lib이 빠진 것 — 그 vsix는 배포하면 안 됩니다)
 ```

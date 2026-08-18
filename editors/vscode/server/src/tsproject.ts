@@ -99,8 +99,44 @@ const COMPILER_OPTIONS: ts.CompilerOptions = {
   moduleResolution: ts.ModuleResolutionKind.Bundler,
 };
 
+/** The `lib.*.d.ts` these options are checked against (`lib.esnext.full.d.ts`). */
+const DEFAULT_LIB_NAME = ts.getDefaultLibFileName(COMPILER_OPTIONS);
+
+/**
+ * TypeScript's default library file, or null when it is not on disk.
+ *
+ * `ts.getDefaultLibFilePath` only computes a path — it assumes the
+ * `lib*.d.ts` files sit next to the `typescript` module that is executing,
+ * which a packaging accident can break (TASK-059: `.vscodeignore`'s
+ * blanket `.ts` rule took the declaration files out of the vsix while
+ * leaving `typescript.js` in). Losing them is silent and does not look
+ * like a missing file: the program still type-checks, only with no global
+ * types at all, so a `[number, number]` has no `Array[Symbol.iterator]`
+ * and TypeScript reports `TS2488` on ordinary tuple destructuring the user
+ * wrote. Worse, the errors that would give the cause away (`Cannot find
+ * name 'Error'`, `'JSON'`) land in rlc's generated glue and are dropped by
+ * the span mapping, so a single unexplainable error on correct code is all
+ * that reaches the editor.
+ *
+ * So the path is checked before it is used, and when it is not there the
+ * caller disables type diagnostics rather than reporting invented ones.
+ */
+function findDefaultLib(): string | null {
+  let file: string;
+  try {
+    file = ts.getDefaultLibFilePath(COMPILER_OPTIONS);
+  } catch {
+    return null; // Not consumed as a node module.
+  }
+  return fs.existsSync(file) ? file : null;
+}
+
 export class TsProject {
   private readonly service: ts.LanguageService;
+
+  /** The default library the program checks against — null when none was
+   * found, which is what [`typeEnvironmentError`] reports. */
+  private readonly defaultLib: string | null;
 
   constructor(
     /** The text the server serves for a file, if it serves one — an open
@@ -111,7 +147,11 @@ export class TsProject {
     /** Path of the standard library module to fall back to when the project
      * does not resolve `"@rl/std"` itself. Null disables the fallback. */
     private readonly getStdModule: () => string | null = () => null,
+    /** Overrides the default library: a path to use, or null to run without
+     * one (tests of the broken-environment guard). */
+    defaultLib?: string | null,
   ) {
+    this.defaultLib = defaultLib === undefined ? findDefaultLib() : defaultLib;
     const readFile = (fileName: string): string | undefined => {
       const open = this.getOpenDoc(fileName);
       if (open) return open.text;
@@ -153,7 +193,9 @@ export class TsProject {
         return ts.ScriptKind.TS; // .ts, .rl
       },
       getCurrentDirectory: () => rootDir,
-      getDefaultLibFileName: (options) => ts.getDefaultLibFilePath(options),
+      // A verified path, or a bare name no host can resolve — in which case
+      // `diagnosticsFor` stays silent instead of checking against nothing.
+      getDefaultLibFileName: () => this.defaultLib ?? DEFAULT_LIB_NAME,
       fileExists,
       readFile,
       resolveModuleNameLiterals: (literals, containingFile, _, options) =>
@@ -204,6 +246,44 @@ export class TsProject {
     };
 
     this.service = ts.createLanguageService(host, ts.createDocumentRegistry());
+  }
+
+  /**
+   * Null when the type environment is sound; otherwise why it is not — a
+   * message the server logs once before falling silent.
+   *
+   * Only a complete environment may produce user-facing diagnostics. A
+   * program without global types reports `TS2488` on a plain tuple
+   * destructuring and `TS2304` on `Error`/`JSON`, none of which is a real
+   * error in the user's code — reporting them would break the error-layer
+   * contract just as surely as reporting an error from generated code.
+   */
+  typeEnvironmentError(): string | null {
+    if (this.defaultLib === null) {
+      return (
+        `TypeScript's default library (${DEFAULT_LIB_NAME}) was not found — ` +
+        "type diagnostics are disabled. Reinstall the extension's " +
+        "dependencies, or install `typescript` in the workspace."
+      );
+    }
+    // Asked of the program rather than compared by path: `getSourceFile`
+    // would answer on path form (separators, casing) as much as on whether
+    // a library is there, and a mismatch would disable diagnostics on a
+    // sound install.
+    let loaded = false;
+    try {
+      const program = this.service.getProgram();
+      loaded =
+        program
+          ?.getSourceFiles()
+          .some((f) => program.isSourceFileDefaultLibrary(f)) ?? false;
+    } catch {
+      loaded = false;
+    }
+    return loaded
+      ? null
+      : `TypeScript's default library (${this.defaultLib}) could not be ` +
+          "loaded — type diagnostics are disabled.";
   }
 
   /** The text the service currently sees for a file (open doc or disk). */
@@ -266,9 +346,11 @@ export class TsProject {
    * service is not the pure TypeScript this is meant to check (a buffer
    * whose rl syntax did not compile, so the emitted text still carries it),
    * and every type error it would report from there is noise — the whole
-   * file is dropped instead.
+   * file is dropped instead. A program missing its default library is
+   * dropped for the same reason (see [`typeEnvironmentError`]).
    */
   diagnosticsFor(fileName: string): TsDiagnostic[] {
+    if (this.typeEnvironmentError() !== null) return [];
     let diagnostics: ts.Diagnostic[];
     try {
       if (this.service.getSyntacticDiagnostics(fileName).length > 0) return [];
