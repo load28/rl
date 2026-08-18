@@ -114,7 +114,7 @@ import { Option, Result } from "@rl/std";
 - `npm i -D rl-lang typescript` → prebuilt `rlc` binary (linux-x64/arm64, darwin-x64/arm64, win32-x64), run via `npx rlc`. typescript 5 or 6 required for `--types` (TS7 has no JS compiler API — `npm i -D typescript@6` if only 7 resolves).
 - Other platforms / no npm: `cargo install --git https://github.com/load28/rl`; to keep using the npm launcher, set env `RLC_BINARY=/path/to/rlc`.
 - Update: `npm i -D rl-lang@latest` (binary follows package version); verify `npx rlc -v`; then re-run `npx rlc --types src` and rebuild.
-- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, rl + type diagnostics, go-to-def).
+- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, rl + type diagnostics, completion incl. std combinators, signature help, go-to-def).
 
 ## Setup
 

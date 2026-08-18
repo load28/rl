@@ -19,8 +19,11 @@ import {
   InsertTextFormat,
   Location,
   MarkupKind,
+  ParameterInformation,
   ProposedFeatures,
   Range,
+  SignatureHelp,
+  SignatureInformation,
   SymbolKind,
   TextDocuments,
   TextDocumentSyncKind,
@@ -34,6 +37,7 @@ import * as rlc from "./rlc";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import * as probe from "./probe";
 import * as sidecar from "./sidecar";
 import * as tsproject from "./tsproject";
 import * as virtual from "./virtual";
@@ -63,7 +67,16 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
         // disk by then, so the notification does not need to carry it.
         save: { includeText: false },
       },
-      completionProvider: { triggerCharacters: [".", "(", "|"] },
+      completionProvider: {
+        triggerCharacters: [".", "(", "|"],
+        // Signatures and documentation are fetched per entry, when the
+        // editor asks for the one the user highlighted (onCompletionResolve).
+        resolveProvider: true,
+      },
+      signatureHelpProvider: {
+        triggerCharacters: ["(", ","],
+        retriggerCharacters: [")"],
+      },
       hoverProvider: true,
       definitionProvider: true,
       referencesProvider: true,
@@ -357,6 +370,12 @@ let tsProjectInstance: tsproject.TsProject | null = null;
 function getTsProject(): tsproject.TsProject {
   tsProjectInstance ??= new tsproject.TsProject(
     (fileName) => {
+      // A probe stands in for the buffer while one is installed — the
+      // completion path below serves the emitted TypeScript of a source
+      // the user has not finished typing (see `probeFor`).
+      if (installedProbe && installedProbe.fsPath === fileName) {
+        return { text: installedProbe.code, version: installedProbe.version };
+      }
       for (const doc of documents.all()) {
         const uri = URI.parse(doc.uri);
         if (uri.scheme === "file" && uri.fsPath === fileName) {
@@ -383,6 +402,82 @@ function getTsProject(): tsproject.TsProject {
     () => rlc.stdModulePath(currentCompiler()),
   );
   return tsProjectInstance;
+}
+
+/* ------------------------------------------------------------- probes --
+ *
+ * Completion at a trailing `.` needs a type for what precedes it, and inside
+ * an rl construct those types exist only over the emitted TypeScript — a
+ * `|>` pipeline or a `match` arm binding is nothing the TS parser can make
+ * sense of in the raw source. But at that exact moment the buffer is not a
+ * member access the compiler can emit either: `x |> .` has no member yet, so
+ * the file passes through unchanged, the service is handed raw rl text, and
+ * it offers nothing at all. That is the whole of the reported symptom — and
+ * since the editor caches the list it got when `.` was typed, the members do
+ * not appear later either.
+ *
+ * probe.ts builds the mended source (`x |> .$rl_probe`) and locates the
+ * placeholder in the emitted output; here it is compiled and installed —
+ * around the synchronous language-service call that reads it, and never any
+ * longer, so no diagnostic can be computed from text the user did not write.
+ * ---------------------------------------------------------------------- */
+
+interface InstalledProbe extends probe.Probe {
+  fsPath: string;
+  /** Snapshot version, unique per probe so the service re-reads the text. */
+  version: string;
+}
+
+/** Non-null only inside [`withProbe`]. */
+let installedProbe: InstalledProbe | null = null;
+let probeCount = 0;
+
+/** The probe the last completion list was answered from, kept so resolving
+ * one of its items can install it again — an item's detail has to come from
+ * the same text and position the item was listed from. */
+let lastProbe: InstalledProbe | null = null;
+
+/**
+ * A probe for the cursor, or null when there is nothing to mend: the cursor
+ * is not at a member access without a member, or the compiler cannot emit
+ * from the probe source either.
+ *
+ * Note what does *not* gate this: whether a virtual document exists. An
+ * unfinished pipeline is not an emit error — `--emit-map` passes the file
+ * through unchanged — so the buffer does have a virtual document, one whose
+ * text is the raw source. That is exactly the case the probe is for.
+ */
+async function probeFor(
+  doc: TextDocument,
+  offset: number,
+): Promise<InstalledProbe | null> {
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return null;
+
+  const version = doc.version;
+  const built = await probe.buildProbe(doc.getText(), offset, (source) =>
+    // A doc name of its own: `runEmitMap` derives the temp file it compiles
+    // from this, and sharing it with the buffer's own runs would let the
+    // two overwrite each other.
+    rlc.runEmitMap(currentCompiler(), source, `${uri.fsPath}.probe`),
+  );
+  if (!built) return null;
+  // The buffer may have moved on while rlc ran; its offsets rule.
+  const current = documents.get(doc.uri);
+  if (!current || current.version !== version) return null;
+
+  return { ...built, fsPath: uri.fsPath, version: `probe-${++probeCount}` };
+}
+
+/** Runs `query` with `p` standing in for its buffer. Synchronous by
+ * construction — nothing but `query` may see the probe's text. */
+function withProbe<T>(p: InstalledProbe, query: () => T): T {
+  installedProbe = p;
+  try {
+    return query();
+  } finally {
+    installedProbe = null;
+  }
 }
 
 function tsDefinitions(doc: TextDocument, offset: number): Location[] | null {
@@ -429,20 +524,87 @@ const TS_COMPLETION_KINDS: Record<string, CompletionItemKind> = {
   string: CompletionItemKind.Constant,
 };
 
+/** What a TS-delegated completion item carries so its signature and
+ * documentation can be fetched when the editor asks for that one entry
+ * (`completionItem/resolve`). Positions are in source coordinates and
+ * re-mapped at resolve time — the buffer may have moved on since. */
+interface TsCompletionData {
+  uri: string;
+  offset: number;
+  name: string;
+  source?: string;
+  entry?: unknown;
+  /** Version of the probe the entry was listed from, when it came from one
+   * — the detail must be fetched against that same text. */
+  probe?: string;
+}
+
 /** TS completions, sorted after the rl-specific items (`2` prefix; rl
- * items use `0`/`1`). */
-function tsCompletions(doc: TextDocument, offset: number): CompletionItem[] {
+ * items use `0`/`1`). Signature and docs are left to the resolve step:
+ * TypeScript computes them per entry, so asking eagerly would type-check
+ * every member of the type on every keystroke. */
+function tsCompletions(
+  doc: TextDocument,
+  offset: number,
+  activeProbe: InstalledProbe | null = null,
+): { items: CompletionItem[]; member: boolean } {
   const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return [];
-  const at = toServiceOffset(uri.fsPath, doc, offset);
-  if (at === null) return [];
-  return getTsProject()
-    .completionsAt(uri.fsPath, at)
-    .map((entry) => ({
+  if (uri.scheme !== "file") return { items: [], member: false };
+
+  let list: tsproject.TsCompletionList;
+  if (activeProbe) {
+    list = withProbe(activeProbe, () =>
+      getTsProject().completionsAt(activeProbe.fsPath, activeProbe.offset),
+    );
+    lastProbe = activeProbe;
+  } else {
+    const at = toServiceOffset(uri.fsPath, doc, offset);
+    if (at === null) return { items: [], member: false };
+    list = getTsProject().completionsAt(uri.fsPath, at);
+  }
+
+  return {
+    member: list.member,
+    items: list.entries.map((entry) => ({
       label: entry.name,
       kind: TS_COMPLETION_KINDS[entry.kind] ?? CompletionItemKind.Text,
       sortText: `2${entry.sortText}`,
-    }));
+      data: {
+        uri: doc.uri,
+        offset,
+        name: entry.name,
+        source: entry.source,
+        entry: entry.data,
+        probe: activeProbe?.version,
+      } satisfies TsCompletionData,
+    })),
+  };
+}
+
+/**
+ * TS completions, with a probe behind them when the cursor is at a member
+ * access (`atMember`) that the ordinary path cannot answer.
+ *
+ * "Cannot answer" is not just an empty list. Recovering from rl syntax,
+ * TypeScript may lose the dot and answer with the *global scope* instead —
+ * `x |> n.` offers every name in scope, the compiler's own `$rl_ap` helper
+ * among them. At a member access only a member answer means anything, so a
+ * non-member one is discarded rather than shown, whether it came from the
+ * buffer or from the probe.
+ */
+async function tsCompletionsProbed(
+  doc: TextDocument,
+  offset: number,
+  atMember: boolean,
+): Promise<CompletionItem[]> {
+  const plain = tsCompletions(doc, offset);
+  if (!atMember) return plain.items;
+  if (plain.member && plain.items.length > 0) return plain.items;
+
+  const built = await probeFor(doc, offset);
+  if (!built) return plain.member ? plain.items : [];
+  const probed = tsCompletions(doc, offset, built);
+  return probed.member ? probed.items : [];
 }
 
 function tsHover(doc: TextDocument, offset: number) {
@@ -833,13 +995,29 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const offset = doc.offsetAt(params.position);
   const visible = analysis.visibleEnums(enums, await importedEnums(doc));
 
-  // `Enum.` member access → constructors of that enum; any other member
-  // access (`obj.`) is TypeScript's to complete.
+  // `Enum.` member access → the enum's case constructors, then everything
+  // else TypeScript offers on that same object. Both halves are needed:
+  // the constructors are rl's (case signature, field snippet, tags an
+  // unimported built-in still has), while the rest of a standard-library
+  // namespace — `Result.map`, `Option.unwrapOrElse`, the `*P` pipeline
+  // variants — is ordinary TypeScript the service already types. Returning
+  // only the constructors hid every combinator behind `Result.`/`Option.`
+  // (TASK-062). Any other member access (`obj.`) is TypeScript's alone.
   const base = analysis.memberAccessAt(masked, offset);
   if (base !== null) {
     const e = visible.find((x) => x.name === base);
-    if (!e) return tsCompletions(doc, offset);
-    return e.cases.map((c) => constructorItem(e, c));
+    const members = await tsCompletionsProbed(doc, offset, true);
+    if (!e) return members;
+    const items = e.cases.map((c) => constructorItem(e, c));
+    const tags = new Set(items.map((i) => i.label));
+    return items.concat(members.filter((i) => !tags.has(i.label)));
+  }
+
+  // A `.` with no identifier in front of it is a member access all the same
+  // (`x |> .`, `f().`, `(a + b).`): members belong there, and nothing else —
+  // no enum names, no keyword snippets.
+  if (probe.atMemberAccess(masked, offset)) {
+    return tsCompletionsProbed(doc, offset, true);
   }
 
   const ctx = analysis.armContextAt(masked, matches, offset);
@@ -919,8 +1097,108 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const rlItems = items.concat(KEYWORD_SNIPPETS);
   const seen = new Set(rlItems.map((i) => i.label));
   return rlItems.concat(
-    tsCompletions(doc, offset).filter((i) => !seen.has(i.label)),
+    (await tsCompletionsProbed(doc, offset, false)).filter(
+      (i) => !seen.has(i.label),
+    ),
   );
+});
+
+/**
+ * The signature and documentation of a delegated completion entry, fetched
+ * when the editor asks about the one entry the user is looking at. This is
+ * what puts a type on `Result.map` in the completion list; rl's own items
+ * carry their signature in `detail` from the start and pass through here
+ * untouched.
+ */
+connection.onCompletionResolve(
+  async (item: CompletionItem): Promise<CompletionItem> => {
+    const data = item.data as TsCompletionData | undefined;
+    if (!data || typeof data.uri !== "string") return item;
+    const doc = documents.get(data.uri);
+    if (!doc) return item;
+    const uri = URI.parse(doc.uri);
+    if (uri.scheme !== "file") return item;
+    // An entry listed from a probe must be resolved against that probe:
+    // the buffer it was computed from is the one with the placeholder.
+    const from =
+      data.probe && lastProbe?.version === data.probe ? lastProbe : null;
+    let detail: tsproject.TsCompletionDetail | null;
+    if (from) {
+      detail = withProbe(from, () =>
+        getTsProject().completionDetail(
+          from.fsPath,
+          from.offset,
+          data.name,
+          data.source,
+          data.entry,
+        ),
+      );
+    } else if (data.probe) {
+      return item; // its probe is gone; the buffer has moved on
+    } else {
+      await ensureVirtual(doc);
+      const at = toServiceOffset(uri.fsPath, doc, data.offset);
+      if (at === null) return item;
+      detail = getTsProject().completionDetail(
+        uri.fsPath,
+        at,
+        data.name,
+        data.source,
+        data.entry,
+      );
+    }
+    if (!detail) return item;
+    if (detail.signature !== "") item.detail = detail.signature;
+    if (detail.documentation !== "") {
+      item.documentation = {
+        kind: MarkupKind.Markdown,
+        value: detail.documentation,
+      };
+    }
+    return item;
+  },
+);
+
+// ---------------------------------------------------------- signature help
+
+/**
+ * Parameter hints while a call is being written, delegated wholesale to
+ * TypeScript over the virtual document — so the arguments of a standard
+ * library combinator (`Result.andThen(r, f)`) are typed as they are typed,
+ * including inside a `match` arm or a `|>` pipeline, where the raw text is
+ * not TypeScript at all. rl syntax that has no call at the cursor simply
+ * yields nothing.
+ */
+connection.onSignatureHelp(async (params): Promise<SignatureHelp | null> => {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return null;
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return null;
+  await ensureVirtual(doc);
+  const at = toServiceOffset(uri.fsPath, doc, doc.offsetAt(params.position));
+  if (at === null) return null;
+  const help = getTsProject().signatureHelpAt(uri.fsPath, at);
+  if (!help || help.signatures.length === 0) return null;
+  return {
+    signatures: help.signatures.map(
+      (sig): SignatureInformation => ({
+        label: sig.label,
+        documentation: sig.documentation
+          ? { kind: MarkupKind.Markdown, value: sig.documentation }
+          : undefined,
+        parameters: sig.parameters.map(
+          (p): ParameterInformation => ({
+            label: p.label,
+            documentation: p.documentation
+              ? { kind: MarkupKind.Markdown, value: p.documentation }
+              : undefined,
+          }),
+        ),
+      }),
+    ),
+    activeSignature: help.activeSignature,
+    activeParameter: help.activeParameter,
+  };
 });
 
 /**
