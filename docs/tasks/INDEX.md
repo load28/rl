@@ -73,7 +73,8 @@
 | TASK-063 | `flow` — 함수 합성 (포인트프리 파이프라인) | 완료 | 2026-08-18 | 2026-08-18 | [TASK-063](./TASK-063-flow-composition.md) |
 | TASK-064 | `result` 계산 블록 — Result 바인딩 `<-` | 완료 | 2026-08-18 | 2026-08-18 | [TASK-064](./TASK-064-result-computation-block.md) |
 | TASK-065 | `Result` 타입 모델 개선 — `Ok<T>` / `Err<E>` 변종 타입 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-065](./TASK-065-result-variant-types.md) |
+| TASK-066 | `Result` 에러 타입 합성 — `andThen`/`andThenP`의 유니언 누적 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-066](./TASK-066-result-error-union-composition.md) |
 
 ## 다음 태스크 번호
 
-**TASK-066**
+**TASK-067**

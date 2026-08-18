@@ -43,10 +43,16 @@ match 바인딩은 이름 기준이므로 `Some(value)`·`Err(error)` 또는 별
 export type Ok<T> = { kind: "Ok"; value: T };
 export type Err<E> = { kind: "Err"; error: E };
 export type Result<T, E> = Ok<T> | Err<E>;
+export type ErrorOf<R> = R extends Err<infer E> ? E : never;
 
 Result.Ok(123)     // Ok<number>
 Result.Err("bad")  // Err<string>
 ```
+
+`ErrorOf<R>`는 결과 타입에서 **에러 쪽만** 뽑아냅니다 —
+`ErrorOf<Result<T, E>>`는 `E`, `ErrorOf<Ok<T> | Err<E1> | Err<E2>>`는
+`E1 | E2`입니다. `andThen`이 자기 실패를 여기에 얹는 데 씁니다
+([§에러 타입 누적](#에러-타입-누적-andthen)).
 
 `Result<T, E>`가 곧 `Ok<T> | Err<E>`이므로 개별 변종은 `Result`가 필요한 자리에
 그대로 들어갑니다.
@@ -87,6 +93,36 @@ Rust처럼 하나의 에러 타입으로 `From` 변환을 강요하지 않고, �
 유니언으로 유지합니다. rlc는 에러 타입을 모으거나 유니언을 만들지 않습니다 —
 lowering은 평범한 TypeScript 반환문이고, 추론은 tsc가 합니다.
 
+### 에러 타입 누적 (`andThen`)
+
+`andThen`은 **이어 붙이는 함수가 새로 실패할 수 있다**는 사실을 타입에
+반영합니다. 앞의 에러 타입과 뒤의 에러 타입이 같을 필요가 없고, 결과는 둘의
+유니언입니다.
+
+```
+Result<T, E>  +  (T) => Result<U, F>   →   Result<U, E | F>
+```
+
+```rl
+declare const first: Result<User, UserError>;
+
+const view = Result.andThen(first, (user) => getCompany(user));
+// getCompany: (User) => Result<Company, CompanyError>
+// view: Result<Company, UserError | CompanyError>
+```
+
+`map`은 새 실패 가능성을 만들지 않으므로 에러 타입을 그대로 둡니다
+(`Result<T, E>` + `(T) => U` → `Result<U, E>`). 즉 `andThen`만 에러를 더하고,
+`map`은 나릅니다.
+
+입력 쪽 에러는 `ErrorOf<R>`로 읽습니다. 위의 `try` 예처럼 **에러 하나당 `Err`
+암 하나**로 흩어져 추론된 값(`Ok<T> | Err<E1> | Err<E2>`)도 그대로 받아
+`E1 | E2`를 유지하기 때문입니다 — `Result<T, E>` 하나로 받으면 tsc가 `E`의
+후보 중 하나만 고르고 나머지를 버립니다. `try`·`result` 블록·파이프라인이 모두
+그 흩어진 형태를 만들므로, 이 한 줄짜리 조건부 타입이 그 형태를 이어 붙이는
+값입니다. 조건부 타입은 표준 라이브러리 안에만 있고, rlc가 방출하는 코드에는
+없습니다.
+
 ## `Option<T>`
 
 | 함수 | 시그니처 | 설명 |
@@ -120,7 +156,7 @@ lowering은 평범한 TypeScript 반환문이고, 추론은 tsc가 합니다.
 | `isErr` | `(r: Result<T, E>) => r is Err<E>` | `Err`이면 true (타입 내로잉 가드) |
 | `map` | `(r, f: (T) => U) => Result<U, E>` | `Ok` 값에 `f` 적용 |
 | `mapErr` | `(r, f: (E) => F) => Result<T, F>` | `Err` 에러에 `f` 적용 |
-| `andThen` | `(r, f: (T) => Result<U, E>) => Result<U, E>` | `Result`를 반환하는 계산 연결 |
+| `andThen` | `(r, f: (T) => Result<U, F>) => Result<U, E \| F>` | `Result`를 반환하는 계산 연결 (에러 타입은 유니언으로 누적) |
 | `orElse` | `(r, f: (E) => Result<T, F>) => Result<T, F>` | `Err`에서 복구 |
 | `unwrapOr` | `(r, fallback: T) => T` | `Ok` 값 또는 기본값 |
 | `unwrapOrElse` | `(r, f: (E) => T) => T` | `Ok` 값 또는 `f(error)` |
@@ -133,8 +169,8 @@ lowering은 평범한 TypeScript 반환문이고, 추론은 tsc가 합니다.
 | `transpose` | `(r: Result<Option<T>, E>) => Option<Result<T, E>>` | 층 교환: `Ok(None)`→`None`, `Err(e)`→`Some(Err(e))` |
 | `collect` | `(items: readonly Result<T, E>[]) => Result<T[], E>` | 전부 `Ok`이면 값 배열, 아니면 첫 `Err` |
 
-생성자 외의 콤비네이터는 전부 `Result<T, E>`를 그대로 쓰므로 변종 타입을
-의식할 일이 없습니다. 전체 `Result` 타입이 필요하면 주변 문맥(변수 주석,
+생성자와 `andThen` 외의 콤비네이터는 전부 `Result<T, E>`를 그대로 쓰므로 변종
+타입을 의식할 일이 없습니다. 전체 `Result` 타입이 필요하면 주변 문맥(변수 주석,
 함수 반환 타입)에서 지정하세요 — `Result.Ok<number, string>(1)`처럼 두 개의
 타입 인자를 넘기는 형태는 더 이상 없습니다 (`Result.Ok<number>(1)`).
 
@@ -165,6 +201,30 @@ const view = result {
 
 이미 단항인 멤버는 변형 없이 그대로 파이프에 들어갑니다:
 `r |> Result.ok |> Option.toNullable`.
+
+`Result.andThenP`도 data-first `andThen`과 같은 규칙이라 스텝마다 에러 타입이
+쌓입니다.
+
+```rl
+const profile = loadUser()                  // Result<User, ConfigError | TokenError>
+  |> Result.andThenP(fetchProfile)          // (User) => Result<Profile, FetchError>
+  |> Result.andThenP(validateProfile);      // (Profile) => Result<Profile, ValidationError>
+// Result<Profile, ConfigError | TokenError | FetchError | ValidationError>
+```
+
+`mapP`는 에러 타입을 그대로 나르므로 중간에 섞어 써도 누적된 유니언이
+유지됩니다. `flow` 합성에 넣어도 같습니다 — 합성된 함수는 입력 쪽 에러 타입에
+대해 열려 있어서, 나중에 흘려보내는 값의 에러가 결과에 그대로 더해집니다.
+
+**인라인 콜백에는 매개변수 주석이 필요합니다.** 커링 변형은 값이 아니라
+**넘겨준 함수**에서 입력 타입을 읽으므로, 이름 붙은 함수를 넘기면 아무것도 적을
+필요가 없지만 그 자리에서 화살표 함수를 쓰면 매개변수 타입이 `unknown`이 됩니다.
+
+```rl
+r |> Result.andThenP(fetchProfile);              // OK — 이름 붙은 함수
+r |> Result.andThenP((u: User) => fetch(u));     // OK — 주석
+r |> Result.andThenP((u) => fetch(u));           // u가 unknown (tsc 에러)
+```
 
 ```rl
 const label = half(4)

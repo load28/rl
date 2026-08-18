@@ -105,7 +105,7 @@ const data = result {
   { user, company, name }                 // LAST expr, NO `;` — wrapped in Ok
 };
 ```
-- Flat replacement for nested `Result.andThenP(user => ... )` callbacks; every earlier binding stays in scope.
+- Flat replacement for nested `Result.andThen(r, user => ... )` callbacks; every earlier binding stays in scope.
 - `result` is contextual: block is claimed ONLY if it has ≥1 `<-` binding, else plain identifier + block statement (passthrough). Write `<-` with no space.
 - Binding = `const|let|var <name|destructuring|: type> <- expr;` — `;` MANDATORY on bindings, FORBIDDEN on the final value expr (else located compile error). A top-level `>` in the bound expr needs parens (generic-type-argument ambiguity).
 - Result only (no Option/Promise do-notation, no `<-` outside a result block).
@@ -120,7 +120,9 @@ const data = result {
 import { Option, Result } from "@rl/std";
 ```
 - `Option<T>` = `Some(value: T) | None`; `Result<T, E>` = `Ok<T> | Err<E>` (`Ok<T>` = `{kind:"Ok";value:T}`, `Err<E>` = `{kind:"Err";error:E}`, both exported as TYPES). Field names: `value` (Some/Ok), `error` (Err) → arms `Some(value)`, `Ok(value)`, `Err(error)`, alias `Some(value: v)`.
-- Constructors take only their own variant's type: `Result.Ok(1)` → `Ok<number>`, `Result.Err("bad")` → `Err<string>` (NOT `Result.Ok<number, string>(1)` — one type arg each). Both fit any `Result<T, E>` slot; annotate the variable/return type when you need the full Result. Combinators still take/return `Result<T, E>`.
+- Constructors take only their own variant's type: `Result.Ok(1)` → `Ok<number>`, `Result.Err("bad")` → `Err<string>` (NOT `Result.Ok<number, string>(1)` — one type arg each). Both fit any `Result<T, E>` slot; annotate the variable/return type when you need the full Result. Combinators take/return `Result<T, E>`.
+- `andThen`/`andThenP` UNION the error types: `Result<T, E>` + `(T) => Result<U, F>` → `Result<U, E | F>`, so a pipeline of steps that each fail differently ends up with every error type (also works on the scattered `Ok<T> | Err<E1> | Err<E2>` a `try`/`result` value infers as; `ErrorOf<R>` is exported for reading the error side out). `map`/`mapP` add no failure → error type unchanged.
+- `andThenP` reads its input type off the function you pass: named function → nothing to write; inline arrow → ANNOTATE the parameter (`Result.andThenP((u: User) => f(u))`), else it is `unknown`.
 - Both are BUILT-IN enums: `_`-less match on their tags is exhaustiveness-checked even without import. Built-ins give checking only — import (or declare) to construct values.
 - Combinators = data-first static fns; `*P` = data-last curried for pipelines.
   - Option: map andThen orElse filter unwrapOr unwrapOrElse expect okOr fromNullable toNullable isSome isNone zip flatten transpose collect (+P: map andThen orElse filter unwrapOr unwrapOrElse expect okOr)

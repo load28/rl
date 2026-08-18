@@ -22,6 +22,14 @@ export type Result<T, E> =
   | Ok<T>
   | Err<E>;
 
+/**
+ * The error type carried by a result type — every `Err` arm of it, unioned:
+ * `ErrorOf<Result<T, E>>` is `E`, and `ErrorOf<Ok<T> | Err<E1> | Err<E2>>`
+ * (what a function with two `try`s infers) is `E1 | E2`. `andThen` uses it to
+ * add its own failure to whatever came in. See docs/reference/std.md.
+ */
+export type ErrorOf<R> = R extends Err<infer E> ? E : never;
+
 /** Constructors and combinators for `Option`. */
 export const Option = {
   Some: <T>(value: T): Option<T> => ({ kind: "Some", value }),
@@ -159,11 +167,21 @@ export const Result = {
   /** Applies `f` to the `Err` error; leaves `Ok` untouched. */
   mapErr: <T, E, F>(r: Result<T, E>, f: (error: E) => F): Result<T, F> =>
     r.kind === "Err" ? { kind: "Err", error: f(r.error) } : r,
-  /** Chains a computation that itself returns a `Result`. */
-  andThen: <T, E, U>(
-    r: Result<T, E>,
-    f: (value: T) => Result<U, E>,
-  ): Result<U, E> => (r.kind === "Ok" ? f(r.value) : r),
+  /**
+   * Chains a computation that itself returns a `Result`. The chained
+   * function may fail its own way, so the incoming error type and `F` are
+   * kept as a union instead of having to agree: `Result<T, E>` plus
+   * `(T) => Result<U, F>` gives `Result<U, E | F>`.
+   *
+   * The `Err` branch returns `r` untouched; the cast only tells tsc what
+   * `ErrorOf<R>` already says — that a narrowed `Err` out of `R` carries
+   * one of `R`'s error types.
+   */
+  andThen: <T, U, F, R extends Result<T, unknown>>(
+    r: R & Result<T, unknown>,
+    f: (value: T) => Result<U, F>,
+  ): Result<U, ErrorOf<R> | F> =>
+    r.kind === "Ok" ? f(r.value) : (r as Err<ErrorOf<R>>),
   /** Recovers from `Err` with a computation returning a `Result`. */
   orElse: <T, E, F>(
     r: Result<T, E>,
@@ -236,11 +254,20 @@ export const Result = {
     <T, E, F>(f: (error: E) => F) =>
     (r: Result<T, E>): Result<T, F> =>
       r.kind === "Err" ? { kind: "Err", error: f(r.error) } : r,
-  /** Curried `andThen` for pipelines. */
+  /**
+   * Curried `andThen` for pipelines. The incoming result type stays a type
+   * parameter of the *returned* function, so every step adds its own `F` to
+   * what came before: `Result<A, E1>` piped through `andThenP(f2)` and
+   * `andThenP(f3)` ends up `Result<C, E1 | E2 | E3>`.
+   *
+   * The chained function is what fixes `T`, so an inline callback needs its
+   * parameter annotated (`Result.andThenP((u: User) => ...)`) — passing a
+   * named function needs nothing. See docs/reference/std.md.
+   */
   andThenP:
-    <T, E, U>(f: (value: T) => Result<U, E>) =>
-    (r: Result<T, E>): Result<U, E> =>
-      r.kind === "Ok" ? f(r.value) : r,
+    <T, U, F>(f: (value: T) => Result<U, F>) =>
+    <R extends Result<T, unknown>>(r: R): Result<U, ErrorOf<R> | F> =>
+      r.kind === "Ok" ? f(r.value) : (r as Err<ErrorOf<R>>),
   /** Curried `orElse` for pipelines. */
   orElseP:
     <T, E, F>(f: (error: E) => Result<T, F>) =>

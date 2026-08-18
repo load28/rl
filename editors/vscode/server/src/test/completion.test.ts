@@ -113,7 +113,7 @@ test("a completion entry resolves to its type", { skip }, async () => {
   const detail = ts.completionDetail(file, at(dot)!, "andThen");
   assert.ok(detail, "expected details for andThen");
   assert.ok(
-    detail!.signature.includes("Result<U, E>"),
+    detail!.signature.includes("Result<U, ErrorOf<R> | F>"),
     `signature was: ${detail!.signature}`,
   );
   assert.ok(
