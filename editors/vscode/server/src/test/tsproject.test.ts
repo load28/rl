@@ -96,8 +96,9 @@ test("completions include an imported function and object members", () => {
   const { main, ts } = project();
   // General position at end of file.
   const general = ts.completionsAt(main, MAIN_RL.length);
-  assert.ok(general.some((c) => c.name === "add"), "missing `add`");
-  assert.ok(general.some((c) => c.name === "local"), "missing `local`");
+  assert.equal(general.member, false);
+  assert.ok(general.entries.some((c) => c.name === "add"), "missing `add`");
+  assert.ok(general.entries.some((c) => c.name === "local"), "missing `local`");
 
   // Member position: after `console.` the members of console appear.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-tsproject-"));
@@ -106,7 +107,8 @@ test("completions include an imported function and object members", () => {
   fs.writeFileSync(file, src);
   const p = new TsProject(() => null, () => [file], dir);
   const members = p.completionsAt(file, src.indexOf(".") + 1);
-  assert.ok(members.some((c) => c.name === "log"), "missing console.log");
+  assert.equal(members.member, true, "expected a member completion");
+  assert.ok(members.entries.some((c) => c.name === "log"), "missing console.log");
 });
 
 test("references cross the .rl import in both directions", () => {

@@ -51,11 +51,52 @@ export interface TsQuickInfo {
 
 /** One completion entry. `kind` is TypeScript's ScriptElementKind string
  * (e.g. "function", "const", "property") — mapped to an LSP kind by the
- * server so this module stays the only place importing `typescript`. */
+ * server so this module stays the only place importing `typescript`.
+ * `source`/`data` are TypeScript's own opaque handles for the entry; they
+ * are carried back to [`TsProject.completionDetail`] unread. */
 export interface TsCompletion {
   name: string;
   kind: string;
   sortText: string;
+  source?: string;
+  data?: unknown;
+}
+
+/** A completion answer: the entries, and whether TypeScript answered as a
+ * *member* completion. The flag is what tells an answer at `x |> n.` — where
+ * the TS parser lost the dot recovering from `|>` and offered the whole
+ * global scope — from a real member list. */
+export interface TsCompletionList {
+  entries: TsCompletion[];
+  member: boolean;
+}
+
+/** The type signature and documentation behind one completion entry —
+ * what makes `Result.map` in the list show its parameters and return type
+ * instead of a bare name. */
+export interface TsCompletionDetail {
+  /** The declaration as TypeScript displays it, e.g.
+   * `(property) map: <T, E, U>(r: Result<T, E>, f: (value: T) => U) => Result<U, E>`. */
+  signature: string;
+  /** The entry's JSDoc, empty when it has none. */
+  documentation: string;
+}
+
+/** One overload in a signature help response. Parameter labels are
+ * `[start, end)` offsets into `label` (the LSP form that highlights the
+ * active parameter inside the rendered signature). */
+export interface TsSignature {
+  label: string;
+  parameters: { label: [number, number]; documentation: string }[];
+  documentation: string;
+}
+
+/** Signature help at a call site: the overloads plus which of them and
+ * which parameter the cursor is in. */
+export interface TsSignatureHelp {
+  signatures: TsSignature[];
+  activeSignature: number;
+  activeParameter: number;
 }
 
 /** One type error, in the coordinates of the text the service was given
@@ -321,7 +362,7 @@ export class TsProject {
   }
 
   /** TypeScript's completions at a UTF-16 offset. */
-  completionsAt(fileName: string, offset: number): TsCompletion[] {
+  completionsAt(fileName: string, offset: number): TsCompletionList {
     let completions: ts.CompletionInfo | undefined;
     try {
       completions = this.service.getCompletionsAtPosition(
@@ -330,13 +371,96 @@ export class TsProject {
         undefined,
       );
     } catch {
-      return [];
+      return { entries: [], member: false };
     }
-    return (completions?.entries ?? []).map((e) => ({
-      name: e.name,
-      kind: e.kind,
-      sortText: e.sortText,
-    }));
+    return {
+      entries: (completions?.entries ?? []).map((e) => ({
+        name: e.name,
+        kind: e.kind,
+        sortText: e.sortText,
+        source: e.source,
+        data: e.data,
+      })),
+      member: completions?.isMemberCompletion ?? false,
+    };
+  }
+
+  /**
+   * The signature and documentation of one completion entry, resolved
+   * lazily — TypeScript computes these per entry, so asking for all of
+   * them up front would type-check every member of the type at every
+   * keystroke. `source`/`data` come from the [`TsCompletion`] the entry
+   * was listed as. Null when the service has nothing (a stale offset
+   * after further typing, or an entry it no longer offers).
+   */
+  completionDetail(
+    fileName: string,
+    offset: number,
+    name: string,
+    source?: string,
+    data?: unknown,
+  ): TsCompletionDetail | null {
+    let details: ts.CompletionEntryDetails | undefined;
+    try {
+      details = this.service.getCompletionEntryDetails(
+        fileName,
+        offset,
+        name,
+        undefined,
+        source,
+        undefined,
+        data as ts.CompletionEntryData | undefined,
+      );
+    } catch {
+      return null;
+    }
+    if (!details) return null;
+    return {
+      signature: ts.displayPartsToString(details.displayParts),
+      documentation: ts.displayPartsToString(details.documentation),
+    };
+  }
+
+  /**
+   * TypeScript's signature help at a UTF-16 offset — the parameter list of
+   * the call being written, which is how the types of a standard-library
+   * combinator's arguments reach the editor while they are typed.
+   */
+  signatureHelpAt(fileName: string, offset: number): TsSignatureHelp | null {
+    let items: ts.SignatureHelpItems | undefined;
+    try {
+      items = this.service.getSignatureHelpItems(fileName, offset, undefined);
+    } catch {
+      return null;
+    }
+    if (!items) return null;
+
+    const signatures = items.items.map((item): TsSignature => {
+      let label = ts.displayPartsToString(item.prefixDisplayParts);
+      const separator = ts.displayPartsToString(item.separatorDisplayParts);
+      const parameters: TsSignature["parameters"] = [];
+      item.parameters.forEach((p, i) => {
+        if (i > 0) label += separator;
+        const start = label.length;
+        label += ts.displayPartsToString(p.displayParts);
+        parameters.push({
+          label: [start, label.length],
+          documentation: ts.displayPartsToString(p.documentation),
+        });
+      });
+      label += ts.displayPartsToString(item.suffixDisplayParts);
+      return {
+        label,
+        parameters,
+        documentation: ts.displayPartsToString(item.documentation),
+      };
+    });
+
+    return {
+      signatures,
+      activeSignature: items.selectedItemIndex,
+      activeParameter: items.argumentIndex,
+    };
   }
 
   /**
