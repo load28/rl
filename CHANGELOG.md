@@ -27,6 +27,31 @@
 
 ### Added
 
+- **`result` 계산 블록** — `Result`를 돌려주는 연산을 여러 단계 이을 때
+  콜백 중첩 없이 평탄한 문장으로 쓴다 (TASK-064):
+
+  ```rl
+  const data = result {
+    const user <- getUser(id);
+    const company <- getCompany(user.companyId);
+    { user, company }
+  };
+  ```
+
+  - `const|let|var <바인딩> <- <식>;`이 **Result 바인딩**이다. `Ok`면 값을
+    묶고 다음 문장으로, `Err`면 그 `Err`가 블록 전체의 값이 된다. 바인딩
+    사이에는 평범한 TypeScript·rl 문장을 쓴다. 블록의 **마지막 값 식**
+    (세미콜론 없이)이 `Ok`로 감싸진다.
+  - `result`는 **문맥 키워드**다 — 블록에 `<-` 바인딩이 하나 이상 있을 때만
+    rl 구문이므로, `result`라는 변수·클래스·속성과 뒤따르는 블록 문은 그대로
+    통과한다. 선언 키워드 뒤의 `<-`는 유효한 TypeScript일 수 없어, 바인딩이
+    있는데 파싱에 실패하면 위치를 담은 rl 에러가 된다.
+  - **에러 타입이 저절로 합쳐진다.** 블록은 이른 `return`들의 IIFE로
+    방출되므로(타입 트릭·헬퍼 없음) `Result<_, E1>`과 `Result<_, E2>`를 잇는
+    블록은 `Result<T, E1 | E2>`에 그대로 대입된다 — 타입 추론은 전부 tsc가
+    한다. `await`가 있으면 async IIFE가 된다.
+  - 블록 안의 `return`은 블록에서 빠져나가므로 `try` 문·let-else는 블록 안에
+    쓸 수 없다(위치를 담은 rl 에러) — `<-`를 쓴다. `if let`은 그대로 쓴다.
 - **함수 합성 `flow`** — 파이프라인 head 자리의 `flow`가 값을 흘려보내는 대신
   스텝 함수들을 합성해 새 함수를 만든다 (TASK-063):
   `const label = flow |> half |> Option.mapP(x => x + 1) |> .toFixed(1);`

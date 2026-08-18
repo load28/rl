@@ -33,6 +33,12 @@ pub(crate) struct Program {
     /// `if let` statement — same reporting story as [`Self::stray_pipes`]
     /// (an undotted `if` followed by `let` is never valid TypeScript).
     pub stray_if_lets: Vec<usize>,
+    /// Byte offsets of `result { ... }` blocks that hold a Result binding
+    /// (`const x <- ...;`) but could not be claimed — same reporting story
+    /// as [`Self::stray_pipes`]: a declaration keyword followed by `<-`
+    /// instead of `=` is never valid TypeScript, so the text cannot be
+    /// passed through either.
+    pub stray_results: Vec<usize>,
 }
 
 /// One top-level piece of a [`Program`], in source order.
@@ -63,6 +69,8 @@ pub(crate) enum Segment {
     Template(Template),
     /// An rl pipeline expression (`head |> step |> ...`).
     Pipe(PipeExpr),
+    /// An rl `result { ... }` computation block.
+    ResultBlock(ResultBlock),
 }
 
 /// A structurally parsed rl pipeline expression: `head ("|>" step)+`.
@@ -100,6 +108,59 @@ pub(crate) struct PipeStep {
     pub postfix: bool,
     /// The step text, recursively parsed.
     pub body: Program,
+}
+
+/// A structurally parsed rl `result { ... }` computation block: a chain of
+/// `Result` bindings written as ordinary statements, with the block's last
+/// expression as its success value.
+///
+/// Contract safety rests on the bindings: the parser only claims a block
+/// that carries at least one `const|let|var <binding> <- <expr>;` at its
+/// top level, and a declaration keyword followed by `<-` (rather than `=`)
+/// cannot occur in valid TypeScript. Without that requirement `result`
+/// followed by a block would be ambiguous with an expression statement
+/// naming a variable `result` plus a block statement on the next line.
+///
+/// Compiles to an IIFE of plain statements — each binding evaluates once
+/// and early-`return`s the `Err`, exactly like a [`TryStmt`] — so tsc
+/// narrows every step on its own and the block's type (including the union
+/// of the steps' error types) is inferred with no type-level tricks.
+#[derive(Debug)]
+pub(crate) struct ResultBlock {
+    /// Byte offset of the `result` keyword, for error reporting.
+    pub keyword_off: usize,
+    /// Raw span of the block body, braces excluded (for `await` detection).
+    pub body_span: Span,
+    /// The block's statements, in source order. Contains at least one
+    /// [`ResultItem::Bind`].
+    pub items: Vec<ResultItem>,
+    /// The trailing expression — the block's success value, recursively
+    /// parsed. Never empty.
+    pub value: Program,
+}
+
+/// One item of a [`ResultBlock`] body, in source order. Every byte of the
+/// body up to the trailing expression belongs to exactly one item — the
+/// trivia before a binding is the (possibly token-less) [`ResultItem::Stmts`]
+/// run in front of it — so emission stays byte-faithful.
+#[derive(Debug)]
+pub(crate) enum ResultItem {
+    /// A run of ordinary statements, recursively parsed.
+    Stmts(Program),
+    /// A Result binding: `const|let|var <binding> <- <expr>;`.
+    Bind(ResultBind),
+}
+
+/// See [`ResultItem::Bind`].
+#[derive(Debug)]
+pub(crate) struct ResultBind {
+    /// The declaration keyword: `const`, `let`, or `var`.
+    pub kw: String,
+    /// The verbatim text between the keyword and `<-` (identifier or
+    /// destructuring pattern, optionally type-annotated).
+    pub binding: String,
+    /// The expression after `<-`, recursively parsed.
+    pub expr: Program,
 }
 
 /// See [`Segment::RlImport`].

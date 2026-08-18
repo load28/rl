@@ -145,12 +145,26 @@ pub(super) fn dotted_at(tokens: &[Token], from: usize, k: usize) -> bool {
         )
 }
 
-/// `tokens[k]` is an undotted `match` identifier inside an expression
-/// scan: if it is followed by `( ... ) { ... }`, returns the index just
-/// past the closing brace so the scan can step over the whole shape (a
-/// match expression carries its own top-level braces; whether it really
-/// is an rl match is the recursive parse's decision).
-pub(super) fn skip_match_shape(tokens: &[Token], k: usize) -> Option<usize> {
+/// The index just past a construct that carries its own top-level braces
+/// — `match ( ... ) { ... }` or `result { ... }` — when `tokens[k]` is its
+/// undotted keyword `word`. Expression scanners step over the whole shape
+/// so their bare-`{` abort does not reject it; whether it really is an rl
+/// construct is the recursive parse's decision.
+pub(super) fn skip_braced_construct(tokens: &[Token], word: &str, k: usize) -> Option<usize> {
+    match word {
+        "match" => skip_match_shape(tokens, k),
+        "result" => {
+            if !matches!(tokens.get(k + 1)?.kind, TokenKind::Punct(b'{')) {
+                return None;
+            }
+            Some(find_close_at(tokens, k + 1)? + 1)
+        }
+        _ => None,
+    }
+}
+
+/// See [`skip_braced_construct`] — the `match ( ... ) { ... }` shape.
+fn skip_match_shape(tokens: &[Token], k: usize) -> Option<usize> {
     if !matches!(tokens.get(k + 1)?.kind, TokenKind::Punct(b'(')) {
         return None;
     }

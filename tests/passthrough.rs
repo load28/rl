@@ -311,3 +311,36 @@ fn if_statements_and_if_shaped_members_pass_through() {
     assert_passthrough("if (c) { a(); } else if (d) { b(); } else { e(); }\n");
     assert_passthrough("const o = { if: 1 };\ninterface I { if: number }\nobj.if(x);\n");
 }
+
+#[test]
+fn result_is_an_ordinary_identifier_in_typescript() {
+    // `result { ... }` is only claimed when the block carries a Result
+    // binding (`const x <- ...;`), which valid TypeScript cannot contain.
+    assert_passthrough("const result = compute();\nconsole.log(result);\n");
+    assert_passthrough("class result { }\ninterface result { a: number }\ntype result = number;\n");
+    assert_passthrough("const o = { result: 1 };\nobj.result(x);\nfoo(result, { a: 1 });\n");
+}
+
+#[test]
+fn identifier_statement_followed_by_a_block_passes_through() {
+    // The ASI shape `result` + newline + block statement is valid (dead)
+    // TypeScript — without a binding inside, nothing is claimed.
+    assert_passthrough("result\n{\n  const y = 2;\n  console.log(y);\n}\n");
+    assert_passthrough("result\n{\n  const c = a < -b;\n}\n");
+}
+
+#[test]
+fn less_than_negation_passes_through() {
+    assert_passthrough("const c = a < -b;\nif (x <-1) { f(); }\nwhile (i <-n) { g(); }\n");
+    assert_passthrough("const d = result.a < -1;\nconst e = (a) < (-b);\n");
+}
+
+#[test]
+fn negative_literal_type_arguments_pass_through() {
+    // `let x: Foo<-1>;` is the one valid-TypeScript shape that puts `<-`
+    // after a declaration keyword — its tail carries the generic's closing
+    // `>`, which an expression cannot, so it is never a Result binding.
+    assert_passthrough(
+        "type result = { ok: boolean };\nfunction f(): result {\n  let x: Foo<-1>;\n  let y: Map<-1, string>, z: number;\n  return { ok: true };\n}\n",
+    );
+}

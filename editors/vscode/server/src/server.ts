@@ -985,6 +985,18 @@ const KEYWORD_SNIPPETS: CompletionItem[] = [
     insertText: "flow |> ${1:first} |> ${0:next}",
   },
   {
+    label: "result",
+    kind: CompletionItemKind.Snippet,
+    detail: "rl result computation block",
+    documentation: {
+      kind: MarkupKind.Markdown,
+      value:
+        "`Result` 연산을 평탄하게 잇습니다. `const x <- 식;`은 `Ok` 값을 묶고 `Err`를 블록 밖으로 전파하며, 마지막 값 식(세미콜론 없이)이 `Ok`로 감싸집니다.",
+    },
+    insertTextFormat: InsertTextFormat.Snippet,
+    insertText: "result {\n\tconst ${1:value} <- ${2:expression};\n\t$0\n}",
+  },
+  {
     label: "let-else",
     kind: CompletionItemKind.Snippet,
     detail: "rl let-else statement",

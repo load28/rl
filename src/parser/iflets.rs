@@ -14,13 +14,14 @@
 //! and the semantic phase reports it, like a stray `|>`.
 //!
 //! The bound expression runs to the top-level `{` opening the then-block.
-//! `match ( ... ) { ... }` shapes inside it are skipped whole, and a `{`
+//! Brace-carrying constructs inside it (`match ( ... ) { ... }`,
+//! `result { ... }`) are skipped whole, and a `{`
 //! directly after `=>` (an unparenthesized block-bodied arrow) aborts —
 //! parenthesize the arrow. The `else` continuation is a block or another
 //! `if let`; a plain `else if (...)` is not part of the statement (v1) and
 //! fails the parse.
 
-use super::cursor::{Cursor, dotted_at, skip_match_shape};
+use super::cursor::{Cursor, dotted_at, skip_braced_construct};
 use crate::ast::{IfLetElse, IfLetStmt, Span, TagPattern};
 use crate::lexer::TokenKind;
 
@@ -159,11 +160,9 @@ fn expr_until_block(cur: &Cursor) -> Option<(usize, usize)> {
                 if super::tries::STMT_ONLY_WORDS.contains(&word) {
                     return None;
                 }
-                // Skip a whole `match ( ... ) { ... }` shape so its braces
-                // are not mistaken for the then-block.
-                if word == "match"
-                    && let Some(past) = skip_match_shape(cur.tokens, k)
-                {
+                // Skip a whole `match ( ... ) { ... }` or `result { ... }`
+                // shape so its braces are not mistaken for the then-block.
+                if let Some(past) = skip_braced_construct(cur.tokens, word, k) {
                     expr_end = cur.tokens[past - 1].span.end;
                     k = past;
                     continue;

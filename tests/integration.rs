@@ -1587,3 +1587,218 @@ function f(o: Opt, xs: number[]): string[] {
     );
     assert!(ok, "{out}");
 }
+
+/* ------------------------------------------------------------------ */
+/* result computation block                                            */
+/* ------------------------------------------------------------------ */
+
+/// rl enums in exactly the shape `@rl/std`'s `Result` has, so the block
+/// tests need no module setup.
+const RESULT_PRELUDE: &str = r#"
+enum Res<T, E> { Ok(value: T), Err(error: E) }
+enum UserError { NoUser() }
+enum CompanyError { NoCompany(id: number) }
+type User = { id: number; name: string; companyId: number };
+type Company = { id: number; name: string };
+declare function getUser(id: number): Res<User, UserError>;
+declare function getCompany(id: number): Res<Company, CompanyError>;
+"#;
+
+#[test]
+fn result_block_unions_the_error_types_of_its_bindings() {
+    require_toolchain!();
+    // The whole error-type question: two bindings with different error
+    // types must produce `Res<_, UserError | CompanyError>` with no help
+    // from rlc and no change to the combinators' signatures.
+    let (ok, out) = typecheck(&format!(
+        r#"{RESULT_PRELUDE}
+const view = (id: number): Res<string, UserError | CompanyError> => result {{
+  const user <- getUser(id);
+  const company <- getCompany(user.companyId);
+  user.name + "@" + company.name
+}};
+"#
+    ));
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn result_block_missing_an_error_type_is_a_type_error() {
+    require_toolchain!();
+    // The other half: an annotation that forgets one binding's error type
+    // is tsc's error, reported on the user's own annotation.
+    let (ok, out) = typecheck(&format!(
+        r#"{RESULT_PRELUDE}
+const view = (id: number): Res<string, UserError> => result {{
+  const user <- getUser(id);
+  const company <- getCompany(user.companyId);
+  user.name + "@" + company.name
+}};
+"#
+    ));
+    assert!(!ok, "{out}");
+}
+
+#[test]
+fn result_block_bindings_are_narrowed_success_values() {
+    require_toolchain!();
+    // No annotations anywhere: each binding must be the `Ok` payload type,
+    // and the block's value type must flow out of the block.
+    let (ok, out) = typecheck(&format!(
+        r#"{RESULT_PRELUDE}
+const view = (id: number) => result {{
+  const user <- getUser(id);
+  const company <- getCompany(user.companyId);
+  const label: string = user.name.toUpperCase() + company.name;
+  {{ user, company, label }}
+}};
+const check = (id: number): string => match (view(id)) {{
+  Ok(value) => value.label,
+  Err(error) => match (error) {{
+    NoUser => "no user",
+    NoCompany(id: missing) => "no company " + missing,
+  }},
+}};
+"#
+    ));
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn runtime_result_block_short_circuits_on_the_first_err() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Res<T, E> { Ok(value: T), Err(error: E) }
+
+const steps: string[] = [];
+const step = (name: string, ok: boolean): Res<string, string> => {
+  steps.push(name);
+  return ok ? Res.Ok(name) : Res.Err("failed:" + name);
+};
+
+const chain = (secondOk: boolean) => result {
+  const a <- step("a", true);
+  const b <- step("b", secondOk);
+  const c <- step("c", true);
+  a + b + c
+};
+
+console.log(JSON.stringify(chain(true)), steps.join(","));
+steps.length = 0;
+console.log(JSON.stringify(chain(false)), steps.join(","));
+"#);
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Ok","value":"abc"} a,b,c"#,
+            r#"{"kind":"Err","error":"failed:b"} a,b"#,
+        ]
+    );
+}
+
+#[test]
+fn runtime_result_block_with_await_resolves_to_a_result() {
+    require_toolchain!();
+    let lines = run(r#"
+enum Res<T, E> { Ok(value: T), Err(error: E) }
+
+const fetchNum = async (n: number): Promise<Res<number, string>> =>
+  n > 0 ? Res.Ok(n) : Res.Err("not positive");
+
+const total = async (a: number, b: number) => result {
+  const x <- await fetchNum(a);
+  const y <- await fetchNum(b);
+  x + y
+};
+
+total(2, 3).then((r) => console.log(JSON.stringify(r)));
+total(2, -1).then((r) => console.log(JSON.stringify(r)));
+"#);
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Ok","value":5}"#,
+            r#"{"kind":"Err","error":"not positive"}"#,
+        ]
+    );
+}
+
+#[test]
+fn runtime_result_block_replaces_nested_combinator_callbacks() {
+    require_toolchain!();
+    // The motivating shape: three dependent steps that all stay in scope,
+    // written flat, against the real standard library.
+    let dir = tmpdir();
+    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    let code = compile(
+        r#"
+import { Result } from "./rl.js";
+
+type User = { id: number; companyId: number; name: string };
+type Company = { id: number; name: string };
+
+const getUser = (id: number): Result<User, string> =>
+  id === 1 ? Result.Ok({ id, companyId: 7, name: " Ada " }) : Result.Err("no user " + id);
+const getCompany = (id: number): Result<Company, string> =>
+  Result.Ok({ id, name: "Acme" });
+const getPermission = (u: User, c: Company): Result<string, string> =>
+  Result.Ok(u.name.trim() + "@" + c.name);
+
+const view = (id: number) => result {
+  const user <- getUser(id);
+  const company <- getCompany(user.companyId);
+  const normalized = user.name |> .trim() |> .toLowerCase();
+  const permission <- getPermission(user, company);
+  { user, company, permission, normalized }
+};
+
+console.log(JSON.stringify(view(1)));
+console.log(JSON.stringify(view(2)));
+"#,
+        &Options::default(),
+    )
+    .expect("rl compile failed");
+    fs::write(dir.join("main.ts"), &code).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg(dir.join("rl.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args([
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+        ])
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---compiled---\n{code}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Ok","value":{"user":{"id":1,"companyId":7,"name":" Ada "},"company":{"id":7,"name":"Acme"},"permission":"Ada@Acme","normalized":"ada"}}"#,
+            r#"{"kind":"Err","error":"no user 2"}"#,
+        ]
+    );
+}

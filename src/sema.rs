@@ -19,9 +19,9 @@
 //!   covered by an unguarded arm (guarded arms may share tags with each
 //!   other); or-pattern alternatives all bind the same (field, name) set.
 //! - `try`: only allowed in the top-level statement stream — inside a match
-//!   expression, a template interpolation, or another try's expression its
-//!   emitted `return` would not exit the enclosing function, so it is an
-//!   error there.
+//!   expression, a `result` block, a template interpolation, or another
+//!   try's expression its emitted `return` would not exit the enclosing
+//!   function, so it is an error there.
 //! - let-else: same placement rule as `try` (it emits statements into the
 //!   enclosing scope), plus the `else` block must end with a diverging
 //!   statement (`return`/`throw`/`break`/`continue`) — otherwise the
@@ -176,6 +176,15 @@ impl Checker<'_> {
                     .to_string(),
             ));
         }
+        if let Some(&off) = program.stray_results.first() {
+            return Err(RlError::at(
+                off,
+                "`result` block could not be parsed here (every binding is \
+                 `const <binding> <- <expression>;`, and the block must end with an \
+                 expression)"
+                    .to_string(),
+            ));
+        }
         for segment in &program.segments {
             match segment {
                 Segment::Verbatim(_) | Segment::RlImport(_) => {}
@@ -185,6 +194,7 @@ impl Checker<'_> {
                 Segment::Try(stmt) => self.check_try(stmt, ctx)?,
                 Segment::LetElse(stmt) => self.check_let_else(stmt, ctx)?,
                 Segment::IfLet(stmt) => self.check_if_let(stmt, ctx)?,
+                Segment::ResultBlock(block) => self.check_result_block(block)?,
                 Segment::Pipe(pipe) => {
                     // A `flow` composition has no value to chain a method
                     // onto until its first function has produced one, so
@@ -226,8 +236,9 @@ impl Checker<'_> {
         if ctx != Ctx::Top {
             return Err(RlError::at(
                 stmt.keyword_off,
-                "`try` cannot be used inside a match expression, a template interpolation, \
-                 or another `try` — it compiles to a `return` from the enclosing function"
+                "`try` cannot be used inside a match expression, a `result` block, a \
+                 template interpolation, or another `try` — it compiles to a `return` \
+                 from the enclosing function"
                     .to_string(),
             ));
         }
@@ -238,8 +249,9 @@ impl Checker<'_> {
         if ctx != Ctx::Top {
             return Err(RlError::at(
                 stmt.keyword_off,
-                "let-else cannot be used inside a match expression, a template interpolation, \
-                 or a `try` — it compiles to statements in the enclosing function"
+                "let-else cannot be used inside a match expression, a `result` block, a \
+                 template interpolation, or a `try` — it compiles to statements in the \
+                 enclosing function"
                     .to_string(),
             ));
         }
@@ -274,6 +286,20 @@ impl Checker<'_> {
             None => {}
         }
         Ok(())
+    }
+
+    /// A `result` block is an expression, so it is allowed anywhere; its
+    /// body is the IIFE's statement stream ([`Ctx::Stmt`] — a `try` or
+    /// let-else there would return from the *block*, not the enclosing
+    /// function), and the bindings and the trailing value are expressions.
+    fn check_result_block(&mut self, block: &ResultBlock) -> Result<(), RlError> {
+        for item in &block.items {
+            match item {
+                ResultItem::Stmts(stmts) => self.visit_program(stmts, Ctx::Stmt)?,
+                ResultItem::Bind(bind) => self.visit_program(&bind.expr, Ctx::Expr)?,
+            }
+        }
+        self.visit_program(&block.value, Ctx::Expr)
     }
 
     fn check_enum(&mut self, decl: &EnumDecl) -> Result<(), RlError> {

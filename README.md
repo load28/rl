@@ -8,9 +8,9 @@
 
 ## 목표
 
-TypeScript에 **여섯 구문**만 더합니다 — 태그드 유니언 `enum`, 패턴 매칭
+TypeScript에 **일곱 구문**만 더합니다 — 태그드 유니언 `enum`, 패턴 매칭
 `match`, 에러 전파 `try`, 값 추출 `let-else`와 `if let`, 파이프라인 `|>`
-(함수 합성 `flow` 포함).
+(함수 합성 `flow` 포함), `Result` 계산 블록 `result`.
 그리고 두 가지를 지킵니다.
 
 1. **모든 유효한 TypeScript 파일은 그대로 유효한 `.rl` 파일이고, 자기
@@ -80,6 +80,17 @@ function readPort(raw: string): Result<number, string> {
   };
   return Result.Ok(value);
 }
+```
+
+`Result`를 여러 단계 잇는 코드는 `result` 블록으로 평탄하게 씁니다 — `<-`는
+성공값을 묶고, 실패는 블록 전체의 값이 됩니다.
+
+```rl
+const view = (id: number) => result {
+  const user <- getUser(id);                  // Err면 여기서 블록 종료
+  const company <- getCompany(user.companyId);
+  { user, company }                           // 마지막 식이 Ok로 감싸집니다
+};
 ```
 
 ## 설치와 사용
