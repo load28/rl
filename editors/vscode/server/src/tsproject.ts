@@ -6,8 +6,12 @@
  * is answered by the real TypeScript language service running over the rl
  * sources themselves. The TS parser's error recovery tolerates the rl
  * constructs; the passthrough region — most of the file — resolves exactly
- * as it would in a .ts file. TS *diagnostics* are never surfaced: the
- * compiler (`rlc --check`) stays the single source of truth for errors.
+ * as it would in a .ts file.
+ *
+ * TS *type* diagnostics are surfaced (TASK-057) — but only over a virtual
+ * document, where the service sees the emitted TypeScript rather than rl
+ * syntax. rl-level errors stay the compiler's (`rlc --check`): the two
+ * layers never overlap, which is the error-layer contract in CLAUDE.md.
  *
  * Relative `.rl` specifiers are resolved by a custom module resolver that
  * points them at the .rl file (served as TS content); `"@rl/std"` falls back
@@ -52,6 +56,19 @@ export interface TsCompletion {
   name: string;
   kind: string;
   sortText: string;
+}
+
+/** One type error, in the coordinates of the text the service was given
+ * (the emitted TypeScript for an `.rl` module — the caller maps it back). */
+export interface TsDiagnostic {
+  start: number;
+  length: number;
+  message: string;
+  /** TypeScript's error number, e.g. 2345. */
+  code: number;
+  /** True for `ts.DiagnosticCategory.Warning`; everything reported here is
+   * otherwise an error. */
+  warning: boolean;
 }
 
 /** One reference or rename location. */
@@ -240,6 +257,37 @@ export class TsProject {
       kind: e.kind,
       sortText: e.sortText,
     }));
+  }
+
+  /**
+   * TypeScript's type errors for a file, in that file's own coordinates.
+   *
+   * Semantic diagnostics only: a syntax error means the text handed to the
+   * service is not the pure TypeScript this is meant to check (a buffer
+   * whose rl syntax did not compile, so the emitted text still carries it),
+   * and every type error it would report from there is noise — the whole
+   * file is dropped instead.
+   */
+  diagnosticsFor(fileName: string): TsDiagnostic[] {
+    let diagnostics: ts.Diagnostic[];
+    try {
+      if (this.service.getSyntacticDiagnostics(fileName).length > 0) return [];
+      diagnostics = this.service.getSemanticDiagnostics(fileName);
+    } catch {
+      return [];
+    }
+    const out: TsDiagnostic[] = [];
+    for (const d of diagnostics) {
+      if (d.start === undefined || d.length === undefined) continue;
+      out.push({
+        start: d.start,
+        length: d.length,
+        message: ts.flattenDiagnosticMessageText(d.messageText, " "),
+        code: d.code,
+        warning: d.category === ts.DiagnosticCategory.Warning,
+      });
+    }
+    return out;
   }
 
   /** TypeScript's references for the symbol at a UTF-16 offset.

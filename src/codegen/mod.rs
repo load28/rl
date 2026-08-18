@@ -38,18 +38,9 @@ fn guard_line_comment(rope: Rope<'_>) -> Rope<'_> {
     rope
 }
 
-/// Emits a whole program back to TypeScript text.
-pub(crate) fn emit(
-    program: &Program,
-    src: &str,
-    rewrite_imports: ImportRewrite,
-    std_import: Option<&str>,
-) -> String {
-    emit_with_map(program, src, rewrite_imports, std_import).0
-}
-
-/// [`emit`], also returning the source↔output byte mappings of every chunk
-/// copied verbatim from the source (see [`crate::emit_mapped`]).
+/// Emits a whole program back to TypeScript text, together with the
+/// source↔output byte mappings of every chunk copied verbatim from the
+/// source (see [`crate::emit_mapped`]).
 pub(crate) fn emit_with_map(
     program: &Program,
     src: &str,

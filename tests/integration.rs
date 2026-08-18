@@ -1188,6 +1188,42 @@ fn cli_types_reports_type_errors_but_keeps_the_sidecars_fresh() {
 }
 
 #[test]
+fn cli_types_reports_rl_type_errors_at_the_source_position() {
+    require_toolchain!();
+    require_types_typescript!();
+    let dir = tmpdir();
+    write_consumer_tree(&dir);
+    // A type error *inside* rl syntax. The emitted TypeScript is a switch
+    // IIFE that moves the offending expression far from where it was
+    // written, and the file it lives in is never written to disk — the
+    // diagnostic has to name `bad.rl` and the source line/column anyway.
+    let bad = "import { Result } from \"@rl/std\";\n\
+               \n\
+               declare function evaluate(): Result<number, string>;\n\
+               \n\
+               export const bad = evaluate() |> Result.mapP((n) => n.length);\n";
+    fs::write(dir.join("src/bad.rl"), bad).unwrap();
+
+    let (ok, err) = run_rlc(&dir, &["--types", "src"]);
+    assert!(!ok, "expected a failing exit code:\n{err}");
+
+    let line = err
+        .lines()
+        .find(|line| line.contains("does not exist on type"))
+        .unwrap_or_else(|| panic!("no type error reported:\n{err}"));
+    // `length` sits at column 55 of line 5 of the source. The emitted code
+    // puts it elsewhere entirely, and there is no `bad.ts` to open.
+    assert!(
+        line.starts_with("rlc: src/bad.rl:5:55: "),
+        "diagnostic should point into the .rl source: {line}"
+    );
+    assert!(
+        !err.contains("bad.ts"),
+        "named a file that does not exist: {err}"
+    );
+}
+
+#[test]
 fn cli_types_without_typescript_says_so() {
     require_toolchain!();
     let dir = tmpdir();

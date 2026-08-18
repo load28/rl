@@ -260,3 +260,82 @@ test(
     );
   },
 );
+
+/* --------------------------------------------------------------------------
+ * TASK-057: type errors inside rl syntax reach the editor. The service only
+ * sees them over a virtual document — the raw text is not TypeScript — and
+ * every span has to come back through the mapping, or it would point into
+ * generated code.
+ * -------------------------------------------------------------------- */
+
+const BAD_PIPE = [
+  'import { Result } from "@rl/std";',
+  "",
+  "declare function evaluate(): Result<number, string>;",
+  "",
+  "// `n` is a number; `n.length` is not a thing.",
+  "export const bad = evaluate() |> Result.mapP((n) => n.length);",
+  "",
+].join("\n");
+
+test("a type error inside a pipeline is reported", { skip }, async () => {
+  const { file, mapped, ts } = await stdProject(BAD_PIPE);
+  const diagnostics = ts.diagnosticsFor(file);
+  assert.equal(diagnostics.length, 1, JSON.stringify(diagnostics));
+  assert.equal(diagnostics[0].code, 2339); // property does not exist
+  assert.match(diagnostics[0].message, /'length' does not exist on type/);
+
+  // The span maps back onto the source text the user wrote.
+  const start = mapped.outToSrc(diagnostics[0].start);
+  assert.notEqual(start, null, "the span must map back to the source");
+  assert.equal(BAD_PIPE.slice(start!, start! + "length".length), "length");
+});
+
+const BAD_ARM = [
+  "enum Shape {",
+  "  Circle(radius: number),",
+  "  Point,",
+  "}",
+  "",
+  "declare function getShape(): Shape;",
+  "",
+  "export const area = match (getShape()) {",
+  "  Circle(radius) => radius.toUpperCase(),",
+  "  Point => 0,",
+  "};",
+  "",
+].join("\n");
+
+test("a type error inside a match arm is reported", { skip }, async () => {
+  const { file, mapped, ts } = await stdProject(BAD_ARM);
+  const diagnostics = ts.diagnosticsFor(file);
+  assert.equal(diagnostics.length, 1, JSON.stringify(diagnostics));
+  assert.equal(diagnostics[0].code, 2339);
+  const start = mapped.outToSrc(diagnostics[0].start);
+  assert.notEqual(start, null, "the span must map back to the source");
+  assert.equal(
+    BAD_ARM.slice(start!, start! + "toUpperCase".length),
+    "toUpperCase",
+  );
+});
+
+test("clean rl syntax reports nothing", { skip }, async () => {
+  const { file, ts } = await stdProject(PIPE_SOURCE);
+  assert.deepEqual(ts.diagnosticsFor(file), []);
+});
+
+test("raw .rl text is never type-checked", { skip }, async () => {
+  // The same buffer served raw instead of emitted: TypeScript cannot parse
+  // `match`, so its recovery would invent errors all over the file. The
+  // syntactic guard drops every one of them.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-rawdiag-test-"));
+  const file = path.join(dir, "shapes.rl");
+  fs.writeFileSync(file, SOURCE);
+  const ts = new TsProject(
+    (fileName) =>
+      fileName === file ? { text: SOURCE, version: "1:raw" } : null,
+    () => [file],
+    dir,
+  );
+  assert.deepEqual(ts.diagnosticsFor(file), []);
+});

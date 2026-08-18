@@ -463,6 +463,29 @@ impl Default for Options<'_> {
 /// assert!(err.to_string().starts_with("demo.rl:2:11: "));
 /// ```
 pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> {
+    compile_mapped(source, options).map(|emit| emit.code)
+}
+
+/// [`compile`], also returning the source↔output byte mappings of every
+/// chunk copied verbatim from the source — the same mappings
+/// [`emit_mapped`] produces, but from a fully checked compilation.
+///
+/// Callers that report a tsc diagnostic over the emitted TypeScript use
+/// these to name the position in the `.rl` source instead of one in a file
+/// that was never written (`rlc --types`, `docs/reference/cli.md` §types).
+///
+/// ```
+/// use rlc::{compile_mapped, Options};
+///
+/// let emit = compile_mapped("const n = 1;\n", &Options::default()).unwrap();
+/// assert_eq!(emit.code, "const n = 1;\n");
+/// assert_eq!(emit.mappings, [rlc::EmitMapping { src: 0, out: 0, len: 13 }]);
+/// ```
+///
+/// # Errors
+///
+/// Identical to [`compile`].
+pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, CompileError> {
     let to_compile_error = |e: RlError| {
         let (line, col) = match e.offset {
             Some(off) => line_col(source, off),
@@ -482,7 +505,7 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
     // tsc) → code emission (infallible).
     let program = parser::parse(source);
     sema::check(&program, options.verify, options.extern_enums).map_err(to_compile_error)?;
-    let code = codegen::emit(
+    let (code, mappings) = codegen::emit_with_map(
         &program,
         source,
         options.rewrite_imports,
@@ -499,5 +522,5 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
             col: 0,
         });
     }
-    Ok(code)
+    Ok(MappedEmit { code, mappings })
 }
