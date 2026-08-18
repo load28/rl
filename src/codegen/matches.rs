@@ -32,7 +32,7 @@ fn arm_has_nested(arm: &Arm) -> bool {
     matches!(&arm.pattern, Pattern::Tags(alts) if alts.iter().any(alt_has_nested))
 }
 
-pub(super) fn emit_match(e: &Emitter, expr: &MatchExpr) -> Rope {
+pub(super) fn emit_match<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
     let scrutinee = e.emit_program(&expr.scrutinee);
     let is_async = contains_await(e.bytes, expr.scrutinee_span.start, expr.scrutinee_span.end)
         || expr.arms.iter().any(|a| {
@@ -144,14 +144,18 @@ fn collect_conds_binds(
 
 /// An expression body's rope plus the newline that rescues a trailing line
 /// comment from swallowing the closing paren.
-fn expr_body(e: &Emitter, arm: &Arm, indent: &str) -> (Rope, &'static str) {
+fn expr_body<'a>(e: &Emitter<'a>, arm: &Arm, indent: &str) -> (Rope<'a>, &'static str) {
     expr_body_text(e, &arm.body, indent)
 }
 
 /// See [`expr_body`] — shared with tuple arms.
-fn expr_body_text(e: &Emitter, body: &crate::ast::Program, indent: &str) -> (Rope, &'static str) {
+fn expr_body_text<'a>(
+    e: &Emitter<'a>,
+    body: &crate::ast::Program,
+    indent: &str,
+) -> (Rope<'a>, &'static str) {
     let body = e.emit_program(body).trim();
-    let nl = if body.text().rsplit('\n').next().unwrap_or("").contains("//") {
+    let nl = if body.last_line_has_line_comment() {
         match indent {
             "    " => "\n    ",
             _ => "\n  ",
@@ -162,7 +166,7 @@ fn expr_body_text(e: &Emitter, body: &crate::ast::Program, indent: &str) -> (Rop
     (body, nl)
 }
 
-fn emit_switch(e: &Emitter, expr: &MatchExpr) -> Rope {
+fn emit_switch<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
     let mut cases = Rope::new();
     let mut has_wildcard = false;
     for arm in &expr.arms {
@@ -219,7 +223,7 @@ fn emit_switch(e: &Emitter, expr: &MatchExpr) -> Rope {
 /// which is what "guard failed / tuple mismatched, try the next arm" needs.
 /// tsc narrows each temporary through its own `kind` comparison, so the
 /// per-element destructurings need no type tricks.
-pub(super) fn emit_tuple_match(e: &Emitter, expr: &TupleMatchExpr) -> Rope {
+pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Rope<'a> {
     let is_async = expr
         .scrutinees
         .iter()
@@ -325,13 +329,13 @@ pub(super) fn emit_tuple_match(e: &Emitter, expr: &TupleMatchExpr) -> Rope {
 
 /// How a selected arm produces the match's value and stops the chain —
 /// shared by the if-chain and tuple emissions, guard wrapping included.
-fn arm_exit(
-    e: &Emitter,
+fn arm_exit<'a>(
+    e: &Emitter<'a>,
     body: &crate::ast::Program,
     block: bool,
     guard: &Option<crate::ast::GuardExpr>,
     indent: &str,
-) -> Rope {
+) -> Rope<'a> {
     let mut exit = Rope::new();
     if block {
         let body = e.emit_program(body).trim();
@@ -348,7 +352,7 @@ fn arm_exit(
     match guard {
         Some(guard) => {
             let g = e.emit_program(&guard.expr).trim();
-            let g_nl = if g.text().rsplit('\n').next().unwrap_or("").contains("//") {
+            let g_nl = if g.last_line_has_line_comment() {
                 "\n  "
             } else {
                 ""
@@ -364,7 +368,7 @@ fn arm_exit(
     }
 }
 
-fn emit_if_chain(e: &Emitter, expr: &MatchExpr) -> Rope {
+fn emit_if_chain<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
     // `break $rl_b` is only needed by block bodies; skip the label otherwise
     let needs_label = expr.arms.iter().any(|a| a.block);
     let mut out = Rope::new();

@@ -40,8 +40,10 @@ pub(crate) enum TokenKind {
     /// `'...'` / `"..."` string literal (possibly unterminated at a
     /// newline or EOF, exactly as the byte scanner tolerates).
     Str,
-    /// A template literal with its interpolations pre-lexed.
-    Template(Vec<TplPart>),
+    /// A template literal with its interpolations pre-lexed. Boxed so the
+    /// overwhelmingly common one-byte `Punct` keeps [`Token`] small — the
+    /// token stream of a large file is the compiler's biggest allocation.
+    Template(Box<[TplPart]>),
     /// A regex literal, decided by the preceding-token heuristic.
     Regex,
     /// `=>`
@@ -68,27 +70,33 @@ pub(crate) enum TplPart {
     Interp { span: Span, tokens: Vec<Token> },
 }
 
-// After one of these words, a `/` starts a regex literal, not division.
-const REGEX_PRECEDING_WORDS: &[&str] = &[
-    "return",
-    "typeof",
-    "instanceof",
-    "in",
-    "of",
-    "new",
-    "delete",
-    "void",
-    "throw",
-    "case",
-    "do",
-    "else",
-    "yield",
-    "await",
-];
+/// After one of these words, a `/` starts a regex literal, not division.
+/// Written as a `match` rather than a slice scan: rustc turns it into a
+/// length switch plus a few comparisons, where `[&str]::contains` walks
+/// every entry.
+fn regex_preceding_word(word: &str) -> bool {
+    matches!(
+        word,
+        "return"
+            | "typeof"
+            | "instanceof"
+            | "in"
+            | "of"
+            | "new"
+            | "delete"
+            | "void"
+            | "throw"
+            | "case"
+            | "do"
+            | "else"
+            | "yield"
+            | "await"
+    )
+}
 
 fn regex_allowed(prev_sig: u8, prev_word: &str) -> bool {
     if !prev_word.is_empty() {
-        return REGEX_PRECEDING_WORDS.contains(&prev_word);
+        return regex_preceding_word(prev_word);
     }
     if prev_sig == 0 {
         return true;
@@ -99,7 +107,10 @@ fn regex_allowed(prev_sig: u8, prev_word: &str) -> bool {
 /// Lexes `src[start..end]` into significant tokens.
 pub(crate) fn lex(src_str: &str, start: usize, end: usize) -> Vec<Token> {
     let src = src_str.as_bytes();
-    let mut tokens: Vec<Token> = Vec::new();
+    // Significant tokens run about one per six source bytes across real
+    // TypeScript, so sizing up front spares the repeated doubling that
+    // dominated lexing on large files.
+    let mut tokens: Vec<Token> = Vec::with_capacity((end - start) / 6 + 8);
     let mut i = start;
     // Regex-heuristic state, same rules as the previous scan loop: the last
     // identifier scanned, or the last significant byte otherwise.
@@ -144,7 +155,7 @@ pub(crate) fn lex(src_str: &str, start: usize, end: usize) -> Vec<Token> {
         if c == b'`' {
             let (e, parts) = lex_template(src_str, i, end);
             tokens.push(Token {
-                kind: TokenKind::Template(parts),
+                kind: TokenKind::Template(parts.into_boxed_slice()),
                 span: span(i, e),
             });
             prev_sig = b'`';

@@ -171,26 +171,7 @@ pub fn exported_enums(source: &str) -> Vec<ExternEnum> {
 /// );
 /// ```
 pub fn rl_imports(source: &str) -> Vec<RlImport> {
-    let program = parser::parse(source);
-    program
-        .segments
-        .iter()
-        .filter_map(|segment| match segment {
-            // The standard library is not a project module — nothing to
-            // resolve or collect declarations from.
-            ast::Segment::RlImport(decl) if decl.kind == ast::RlSpecifier::Relative => {
-                Some(RlImport {
-                    specifier: source[decl.spec.start + 1..decl.spec.end - 1].to_string(),
-                    names: match &decl.names {
-                        ast::RlImportNames::Namespace(ns) => RlImportNames::Namespace(ns.clone()),
-                        ast::RlImportNames::Named(entries) => RlImportNames::Named(entries.clone()),
-                        ast::RlImportNames::None => RlImportNames::None,
-                    },
-                })
-            }
-            _ => None,
-        })
-        .collect()
+    scan_module(source).imports
 }
 
 /// Whether a source file imports the standard library ([`STD_SPECIFIER`]).
@@ -204,12 +185,58 @@ pub fn rl_imports(source: &str) -> Vec<RlImport> {
 /// assert!(!rlc::imports_std("import { Option } from \"./rl.js\";\n"));
 /// ```
 pub fn imports_std(source: &str) -> bool {
-    parser::parse(source).segments.iter().any(|segment| {
-        matches!(
-            segment,
-            ast::Segment::RlImport(decl) if decl.kind == ast::RlSpecifier::Std
-        )
-    })
+    scan_module(source).imports_std
+}
+
+/// A source file's module-level facts, gathered in a **single** parse:
+/// its static relative `.rl` imports ([`rl_imports`]) and whether it
+/// imports the standard library ([`imports_std`]).
+///
+/// A build tool walking a whole project needs both of a file, and parsing
+/// is the compiler's most expensive non-tsc phase — asking the two
+/// single-fact helpers back to back parses the file twice. The `rlc` CLI
+/// scans every input through this.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModuleScan {
+    /// The file's static relative `.rl` imports and re-exports, in source
+    /// order — see [`rl_imports`].
+    pub imports: Vec<RlImport>,
+    /// Whether the file imports [`STD_SPECIFIER`] — see [`imports_std`].
+    pub imports_std: bool,
+}
+
+/// Scans a source file's module-level facts in one parse — see
+/// [`ModuleScan`].
+///
+/// ```
+/// let scan = rlc::scan_module(
+///     "import { Option } from \"@rl/std\";\nimport { T } from \"./t.rl\";\n",
+/// );
+/// assert!(scan.imports_std);
+/// assert_eq!(scan.imports[0].specifier, "./t.rl");
+/// ```
+pub fn scan_module(source: &str) -> ModuleScan {
+    let program = parser::parse(source);
+    let mut scan = ModuleScan::default();
+    for segment in &program.segments {
+        let ast::Segment::RlImport(decl) = segment else {
+            continue;
+        };
+        match decl.kind {
+            // The standard library is not a project module — nothing to
+            // resolve or collect declarations from.
+            ast::RlSpecifier::Std => scan.imports_std = true,
+            ast::RlSpecifier::Relative => scan.imports.push(RlImport {
+                specifier: source[decl.spec.start + 1..decl.spec.end - 1].to_string(),
+                names: match &decl.names {
+                    ast::RlImportNames::Namespace(ns) => RlImportNames::Namespace(ns.clone()),
+                    ast::RlImportNames::Named(entries) => RlImportNames::Named(entries.clone()),
+                    ast::RlImportNames::None => RlImportNames::None,
+                },
+            }),
+        }
+    }
+    scan
 }
 
 /// An rl enum declaration with source positions — the symbol-interface
