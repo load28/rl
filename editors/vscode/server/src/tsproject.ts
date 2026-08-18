@@ -103,46 +103,32 @@ const COMPILER_OPTIONS: ts.CompilerOptions = {
 const DEFAULT_LIB_NAME = ts.getDefaultLibFileName(COMPILER_OPTIONS);
 
 /**
- * TypeScript's default library file, or null when it cannot be found.
+ * TypeScript's default library file, or null when it is not on disk.
  *
  * `ts.getDefaultLibFilePath` only computes a path — it assumes the
- * `lib.*.d.ts` files sit next to the `typescript` module that is executing,
- * which a packaging or install accident can break. Losing them is silent
- * and does not look like a missing file: the program still type-checks,
- * only with no global types at all, so a `[number, number]` has no
- * `Array.prototype[Symbol.iterator]` and TypeScript reports `TS2488` on
- * ordinary tuple destructuring the user wrote. Worse, the errors that would
- * give the cause away (`Cannot find name 'Error'`, `'JSON'`) land in rlc's
- * generated glue and are dropped by the span mapping, so a single
- * unexplainable error on correct code is all that reaches the editor.
+ * `lib*.d.ts` files sit next to the `typescript` module that is executing,
+ * which a packaging accident can break (TASK-059: `.vscodeignore`'s
+ * blanket `.ts` rule took the declaration files out of the vsix while
+ * leaving `typescript.js` in). Losing them is silent and does not look
+ * like a missing file: the program still type-checks, only with no global
+ * types at all, so a `[number, number]` has no `Array[Symbol.iterator]`
+ * and TypeScript reports `TS2488` on ordinary tuple destructuring the user
+ * wrote. Worse, the errors that would give the cause away (`Cannot find
+ * name 'Error'`, `'JSON'`) land in rlc's generated glue and are dropped by
+ * the span mapping, so a single unexplainable error on correct code is all
+ * that reaches the editor.
  *
- * So every candidate is verified on disk, and when none is, the caller
- * disables type diagnostics rather than reporting invented ones.
+ * So the path is checked before it is used, and when it is not there the
+ * caller disables type diagnostics rather than reporting invented ones.
  */
-function findDefaultLib(rootDir: string): string | null {
-  const candidates: string[] = [];
-  const add = (dir: string): void => {
-    candidates.push(path.join(dir, DEFAULT_LIB_NAME));
-  };
-  // Where the TypeScript this server loaded keeps its libraries.
+function findDefaultLib(): string | null {
+  let file: string;
   try {
-    candidates.push(ts.getDefaultLibFilePath(COMPILER_OPTIONS));
+    file = ts.getDefaultLibFilePath(COMPILER_OPTIONS);
   } catch {
-    // Not consumed as a node module — the other candidates still apply.
+    return null; // Not consumed as a node module.
   }
-  try {
-    add(path.dirname(require.resolve("typescript")));
-  } catch {
-    // No resolvable `typescript` package from here.
-  }
-  // The project's own install, walking up from the workspace root.
-  for (let dir = path.resolve(rootDir); ; ) {
-    add(path.join(dir, "node_modules", "typescript", "lib"));
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return candidates.find((file) => fs.existsSync(file)) ?? null;
+  return fs.existsSync(file) ? file : null;
 }
 
 export class TsProject {
@@ -161,12 +147,11 @@ export class TsProject {
     /** Path of the standard library module to fall back to when the project
      * does not resolve `"@rl/std"` itself. Null disables the fallback. */
     private readonly getStdModule: () => string | null = () => null,
-    /** Overrides the default-library search: a path to use, or null to run
-     * without one (tests of the broken-environment guard). */
+    /** Overrides the default library: a path to use, or null to run without
+     * one (tests of the broken-environment guard). */
     defaultLib?: string | null,
   ) {
-    this.defaultLib =
-      defaultLib === undefined ? findDefaultLib(rootDir) : defaultLib;
+    this.defaultLib = defaultLib === undefined ? findDefaultLib() : defaultLib;
     const readFile = (fileName: string): string | undefined => {
       const open = this.getOpenDoc(fileName);
       if (open) return open.text;

@@ -50,6 +50,53 @@ jobs:
           tsc --version
           node --version
 
+  extension:
+    name: vscode extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # The server tests drive the real compiler; without it on PATH they
+      # skip, and the guard below would pass on nothing.
+      - name: Build rlc
+        run: cargo build
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: Build
+        working-directory: editors/vscode
+        run: npx tsc -b
+
+      - name: Test
+        working-directory: editors/vscode
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/debug:$PATH"
+          node --test "server/out/test/*.test.js"
+
+      # TASK-059: the vsix must carry TypeScript's own lib*.d.ts. Without
+      # them the language server still starts and type-checks against no
+      # globals at all, reporting invented errors on correct code — a
+      # failure no unit test sees, because it lives in the packaging.
+      - name: Guard — packaged vsix carries TypeScript's libraries
+        working-directory: editors/vscode
+        run: |
+          count=$(npx @vscode/vsce@3 ls --no-dependencies | grep -c "typescript/lib/lib" || true)
+          echo "lib*.d.ts in the package: $count"
+          test "$count" -ge 90
+
   msrv:
     name: build on MSRV
     runs-on: ubuntu-latest
