@@ -35,6 +35,7 @@ mod enums;
 mod iflets;
 mod imports;
 mod lets;
+mod literals;
 mod matches;
 mod pipes;
 mod results;

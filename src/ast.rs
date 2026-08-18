@@ -407,6 +407,81 @@ pub(crate) enum Pattern {
     /// alternative binds the same (field, name) set, so codegen can emit one
     /// shared destructuring from the first alternative.
     Tags(Vec<TagPattern>),
+    /// One or more `|`-separated literal alternatives: `"north"`,
+    /// `200 | 201`, `true`. Non-empty, same as [`Pattern::Tags`]. Literal
+    /// and tag patterns never mix in one match (the emitted discriminant
+    /// differs: `$rl_m` vs `$rl_m.kind`) — that is a semantic check.
+    Literals(Vec<LiteralPattern>),
+}
+
+/// One literal alternative inside a pattern.
+#[derive(Debug)]
+pub(crate) struct LiteralPattern {
+    /// Byte span of the literal as written — emitted verbatim as the
+    /// `case` label, so the source representation of a number (`0xff`,
+    /// `1_000`, `1e3`) is preserved instead of round-tripped.
+    pub span: Span,
+    /// The literal's value, for duplicate detection and the typed
+    /// exhaustiveness probe.
+    pub value: LiteralValue,
+}
+
+/// A [`LiteralPattern`]'s value, normalized so that two spellings of the
+/// same JavaScript value (`"a"` / `'a'`, `200` / `0xc8`) compare equal —
+/// `switch` compares with `===`, so those really are the same case.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LiteralValue {
+    /// A string literal, with its escapes decoded.
+    Str(String),
+    /// A number literal, as the `f64` JavaScript would see (`-0` normalized
+    /// to `0`, which is how `===` compares it).
+    Num(f64),
+    /// A BigInt literal (`1n`), as its decimal digits — never equal to a
+    /// [`LiteralValue::Num`], exactly like `1n === 1` being `false`.
+    BigInt(String),
+    /// `true` / `false`.
+    Bool(bool),
+}
+
+impl LiteralValue {
+    /// The kind name used in diagnostics — or-pattern alternatives must all
+    /// be of one kind.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            LiteralValue::Str(_) => "string",
+            LiteralValue::Num(_) => "number",
+            LiteralValue::BigInt(_) => "bigint",
+            LiteralValue::Bool(_) => "boolean",
+        }
+    }
+
+    /// The value as it appears in a diagnostic — canonical, not the
+    /// spelling used in the source (`0xc8` renders as `200`, which is what
+    /// makes a duplicate report legible).
+    pub fn render(&self) -> String {
+        match self {
+            LiteralValue::Str(s) => {
+                let mut out = String::with_capacity(s.len() + 2);
+                out.push('"');
+                for ch in s.chars() {
+                    match ch {
+                        '"' => out.push_str("\\\""),
+                        '\\' => out.push_str("\\\\"),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                        c => out.push(c),
+                    }
+                }
+                out.push('"');
+                out
+            }
+            LiteralValue::Num(n) => format!("{n}"),
+            LiteralValue::BigInt(d) => format!("{d}n"),
+            LiteralValue::Bool(b) => b.to_string(),
+        }
+    }
 }
 
 /// One tag alternative inside a pattern.

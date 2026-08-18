@@ -8,6 +8,7 @@
 
 use super::cursor::Cursor;
 use super::is_reserved;
+use super::literals::{at_literal, parse_literal_alternatives};
 use crate::ast::{
     Arm, Binding, GuardExpr, MatchExpr, Pattern, Span, TagPattern, TupleArm, TupleMatchExpr,
     TuplePattern,
@@ -154,13 +155,14 @@ fn parse_arms(mut cur: Cursor) -> Option<Vec<Arm>> {
                 cur.bump();
                 Pattern::Wildcard
             }
+            _ if at_literal(&cur) => Pattern::Literals(parse_literal_alternatives(&mut cur)?),
             TokenKind::Ident => Pattern::Tags(parse_tag_alternatives(&mut cur)?),
             _ => return None,
         };
 
-        // Only tag patterns take a guard — `_ if` never parses, so it
-        // passes through.
-        let allow_guard = matches!(pattern, Pattern::Tags(_));
+        // Only tag and literal patterns take a guard — `_ if` never parses,
+        // so it passes through.
+        let allow_guard = !matches!(pattern, Pattern::Wildcard);
         let (guard, body_span, body, block) = parse_arm_tail(&mut cur, allow_guard)?;
 
         arms.push(Arm {

@@ -344,3 +344,51 @@ fn negative_literal_type_arguments_pass_through() {
         "type result = { ok: boolean };\nfunction f(): result {\n  let x: Foo<-1>;\n  let y: Map<-1, string>, z: number;\n  return { ok: true };\n}\n",
     );
 }
+
+/* ------------------------------------------------------------------ */
+/* literal patterns must not claim ordinary TypeScript                 */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn switch_over_string_literals() {
+    assert_passthrough(
+        r#"
+function short(dir: "north" | "south") {
+  switch (dir) {
+    case "north":
+      return "N";
+    case "south":
+      return "S";
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn call_named_match_followed_by_a_block() {
+    assert_passthrough("match(x)\n{ 1 }\n");
+}
+
+#[test]
+fn object_literal_with_numeric_and_string_keys() {
+    assert_passthrough("const table = { 200: \"ok\", \"404\": \"missing\", true: 1 };\n");
+}
+
+#[test]
+fn arrow_functions_returning_literals() {
+    assert_passthrough("const f = (x: number) => 1;\nconst g = () => \"a\";\n");
+}
+
+#[test]
+fn numeric_literals_of_every_form() {
+    assert_passthrough(
+        "const a = 0xff;\nconst b = 1_000;\nconst c = 1.5e2;\nconst d = 0b1010;\n\
+         const e = 0o17;\nconst f = 10n;\nconst g = -1;\nconst h = .5;\n",
+    );
+}
+
+#[test]
+fn boolean_literals_in_ordinary_positions() {
+    assert_passthrough("const t = true;\nconst f = false;\nconst u = { a: true };\n");
+}

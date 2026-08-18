@@ -18,6 +18,13 @@
 //! - `match`: the wildcard `_` arm is last; no arm repeats a tag already
 //!   covered by an unguarded arm (guarded arms may share tags with each
 //!   other); or-pattern alternatives all bind the same (field, name) set.
+//! - `match` literal patterns: tag and literal patterns never mix in one
+//!   match (their emitted discriminants differ); or-pattern alternatives
+//!   are all the same kind of literal; no unguarded arm repeats a literal
+//!   *value* another already covers (`200` and `0xc8` are one case).
+//!   Whether a literal match is exhaustive is a question about the
+//!   scrutinee's TypeScript type and is deliberately left to the
+//!   `--types` pipeline ([`crate::literal_matches`]).
 //! - `try`: only allowed in the top-level statement stream — inside a match
 //!   expression, a `result` block, a template interpolation, or another
 //!   try's expression its emitted `return` would not exit the enclosing
@@ -358,10 +365,35 @@ impl Checker<'_> {
     }
 
     fn check_match(&mut self, expr: &MatchExpr) -> Result<(), RlError> {
+        // Literal and tag patterns discriminate on different things
+        // (`$rl_m` vs `$rl_m.kind`), so one match cannot hold both.
+        let arm_kind = |arm: &Arm| match &arm.pattern {
+            Pattern::Wildcard => None,
+            Pattern::Tags(_) => Some("tag"),
+            Pattern::Literals(_) => Some("literal"),
+        };
+        if let Some(first) = expr.arms.iter().find_map(arm_kind)
+            && let Some(other) = expr
+                .arms
+                .iter()
+                .find(|a| arm_kind(a).is_some_and(|k| k != first))
+        {
+            return Err(RlError::at(
+                other.pattern_off,
+                format!(
+                    "match: cannot mix tag patterns and literal patterns in the same match \
+                     (this match starts with {first} patterns) — the two compare different \
+                     things (`$rl_m.kind` vs `$rl_m`); split them into two matches"
+                ),
+            ));
+        }
+
         // Tags covered by an unguarded arm. Any later arm repeating one of
         // these is unreachable (duplicate); a guarded arm covers nothing, so
         // guarded arms may repeat each other's tags.
         let mut covered: Vec<&str> = Vec::new();
+        // The same, for literal patterns.
+        let mut covered_literals: Vec<&LiteralValue> = Vec::new();
         for (idx, arm) in expr.arms.iter().enumerate() {
             match &arm.pattern {
                 Pattern::Wildcard => {
@@ -370,6 +402,34 @@ impl Checker<'_> {
                             arm.pattern_off,
                             "match: the wildcard arm `_` must be the last arm".to_string(),
                         ));
+                    }
+                }
+                Pattern::Literals(alts) => {
+                    let mut arm_values: Vec<&LiteralValue> = Vec::new();
+                    for alt in alts {
+                        if alt.value.kind() != alts[0].value.kind() {
+                            return Err(RlError::at(
+                                alt.span.start,
+                                format!(
+                                    "match: or-pattern alternatives must all be the same kind of \
+                                     literal (found {} after {})",
+                                    alt.value.kind(),
+                                    alts[0].value.kind()
+                                ),
+                            ));
+                        }
+                        if covered_literals.contains(&&alt.value)
+                            || arm_values.contains(&&alt.value)
+                        {
+                            return Err(RlError::at(
+                                alt.span.start,
+                                format!("match: duplicate arm {}", alt.value.render()),
+                            ));
+                        }
+                        arm_values.push(&alt.value);
+                    }
+                    if arm.guard.is_none() {
+                        covered_literals.append(&mut arm_values);
                     }
                 }
                 Pattern::Tags(alts) => {
@@ -432,15 +492,21 @@ impl Checker<'_> {
                         Pattern::Tags(alts) => {
                             alts.iter().map(|t| t.tag.clone()).collect::<Vec<_>>()
                         }
-                        Pattern::Wildcard => Vec::new(),
+                        Pattern::Wildcard | Pattern::Literals(_) => Vec::new(),
                     })
                     .collect::<Vec<_>>()
             };
-            self.match_checks.push(MatchCheck {
-                offset: expr.keyword_off,
-                tags: arm_tags(false),
-                covered: arm_tags(true),
-            });
+            let tags = arm_tags(false);
+            // A literal match has no tags to resolve an enum from; its
+            // exhaustiveness needs the scrutinee's TypeScript type, which
+            // only the `--types` path has (`docs/reference/cli.md` §types).
+            if !tags.is_empty() {
+                self.match_checks.push(MatchCheck {
+                    offset: expr.keyword_off,
+                    tags,
+                    covered: arm_tags(true),
+                });
+            }
         }
 
         // children, in source order: scrutinee first, then guards and bodies
@@ -533,6 +599,10 @@ impl Checker<'_> {
                 for (p, elem) in elems.iter().enumerate() {
                     match elem {
                         Pattern::Wildcard => row.push(None),
+                        // Tuple elements are tag patterns or `_` (the
+                        // parser accepts nothing else there); a literal
+                        // element would cover no combination.
+                        Pattern::Literals(_) => row.push(Some(Vec::new())),
                         Pattern::Tags(alts) => {
                             let tags: Vec<String> = alts.iter().map(|t| t.tag.clone()).collect();
                             for tag in &tags {

@@ -16,10 +16,20 @@
  *
  *   { cwd, compilerOptions, modules: [{ path, text }], std: { path, text } | null,
  *     sources: ["<hand-written>.ts"],
- *     rlModules: { "<source>.rl": "<virtual>.ts" } }
+ *     rlModules: { "<source>.rl": "<virtual>.ts" },
+ *     literalChecks: [{ module, start, end, covered: [...] }] }
  *
  *   { declarations: [{ path, text }],
- *     diagnostics: [{ file, line, col, code, message }] }
+ *     diagnostics: [{ file, line, col, code, message }],
+ *     literalMissing: [{ index, missing }] }
+ *
+ * `literalChecks` is the typed half of rl's literal `match`: rlc names the
+ * scrutinee of every wildcard-free literal match (as a UTF-16 range in the
+ * emitted module) and the literals its arms cover; the checker here resolves
+ * the scrutinee's type and, *only* when that type is a finite union of
+ * string/number/boolean literals, reports what the arms miss. Anything less
+ * definite (`string`, a type parameter, `"a" | string`) is left alone — a
+ * missed diagnostic beats a false one.
  *
  * Exit codes: 0 = ran (type errors, if any, are in `diagnostics`),
  * 2 = TypeScript not installed, 3 = malformed job, 4 = the only resolvable
@@ -122,7 +132,87 @@ for (const module of [...job.modules, ...(job.std ? [job.std] : [])]) {
 }
 
 const diagnostics = ts.getPreEmitDiagnostics(program).map(plain);
-process.stdout.write(JSON.stringify({ declarations, diagnostics }));
+const literalMissing = checkLiteralMatches(program, job.literalChecks ?? []);
+process.stdout.write(JSON.stringify({ declarations, diagnostics, literalMissing }));
+
+/**
+ * Typed exhaustiveness for literal matches — see the protocol note above.
+ * A check the checker cannot answer definitely is silently skipped.
+ */
+function checkLiteralMatches(program, checks) {
+  if (checks.length === 0) return [];
+  const checker = program.getTypeChecker();
+  const out = [];
+  for (const [index, check] of checks.entries()) {
+    const file = program.getSourceFile(absolute(check.module));
+    if (file === undefined) continue;
+    const node = widestNodeIn(file, check.start, check.end);
+    if (node === null) continue;
+    const members = finiteLiterals(checker.getTypeAtLocation(node));
+    if (members === null || members.length === 0) continue;
+    const covered = new Set(check.covered.map(literalKey));
+    const missing = members.filter((m) => !covered.has(literalKey(m)));
+    if (missing.length > 0) {
+      out.push({ index, missing: missing.map(display).join(", ") });
+    }
+  }
+  return out;
+}
+
+/**
+ * The widest node fully inside `[start, end)` — the scrutinee expression.
+ * Asking for the node *at* `start` would answer about `obj` in `obj.field`;
+ * the emitted scrutinee occupies exactly this range, so the widest node in
+ * it is the whole expression.
+ */
+function widestNodeIn(file, start, end) {
+  let best = null;
+  const visit = (node) => {
+    const from = node.getStart(file);
+    const to = node.getEnd();
+    if (to <= start || from >= end) return;
+    if (from >= start && to <= end) {
+      if (best === null || to - from > best.getEnd() - best.getStart(file)) best = node;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(file, visit);
+  return best;
+}
+
+/**
+ * The type as a finite set of string/number/boolean literals, or null when
+ * it is anything else. `boolean` qualifies: TypeScript models it as the
+ * union `true | false`, which is finite. Enum member types do not — their
+ * members are written `E.A`, not as literal patterns, so reporting one
+ * missing would be a false positive.
+ */
+function finiteLiterals(type) {
+  const parts = type.isUnion() ? type.types : [type];
+  const out = [];
+  for (const part of parts) {
+    if (part.flags & ts.TypeFlags.EnumLike) return null;
+    if (part.flags & ts.TypeFlags.StringLiteral) out.push({ kind: "string", value: part.value });
+    else if (part.flags & ts.TypeFlags.NumberLiteral) out.push({ kind: "number", value: part.value });
+    else if (part.flags & ts.TypeFlags.BooleanLiteral) {
+      out.push({ kind: "boolean", value: part.intrinsicName === "true" });
+    } else return null;
+  }
+  return out;
+}
+
+/** A literal's comparison key — kind included, so `1` is not `"1"`. */
+function literalKey(literal) {
+  if (literal !== null && typeof literal === "object") {
+    return `${literal.kind}:${String(literal.value)}`;
+  }
+  return `${typeof literal}:${String(literal)}`;
+}
+
+/** A missing literal as it appears in the rl diagnostic. */
+function display(literal) {
+  return literal.kind === "string" ? JSON.stringify(literal.value) : String(literal.value);
+}
 
 /** A diagnostic reduced to what rlc reports. */
 function plain(diagnostic) {

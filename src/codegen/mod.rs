@@ -103,7 +103,7 @@ pub(super) struct Emitter<'a> {
 impl<'a> Emitter<'a> {
     /// The source slice of a byte range, with its offset — the unit of
     /// verbatim copying.
-    fn src_slice(&self, start: usize, end: usize) -> (&'a str, usize) {
+    pub(super) fn src_slice(&self, start: usize, end: usize) -> (&'a str, usize) {
         (&self.src[start..end], start)
     }
 

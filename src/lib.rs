@@ -3,7 +3,7 @@
 //! Every valid TypeScript file is a valid `.rl` file and compiles to itself
 //! byte for byte; the compiler only rewrites the six constructs rl adds —
 //! Rust-style `enum` declarations (plain TypeScript enums pass through
-//! untouched), `match` expressions (tuple matches and nested patterns
+//! untouched), `match` expressions (literal, tuple and nested patterns
 //! included), `try` statements (Rust-`?`-style error propagation over
 //! `Result`), let-else and `if let` statements, and the pipeline operator
 //! `|>` — plus relative `.rl` import specifiers, which are rewritten to a
@@ -54,6 +54,7 @@ mod codegen;
 mod error;
 mod lexer;
 mod parser;
+mod probe;
 mod scanner;
 mod sema;
 mod sidecar;
@@ -61,6 +62,7 @@ mod stdlib;
 mod verify;
 
 pub use error::CompileError;
+pub use probe::{Literal, LiteralMatch, literal_matches};
 pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
 

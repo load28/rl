@@ -2015,3 +2015,169 @@ console.log(JSON.stringify(view(2)));
         ]
     );
 }
+
+/* ------------------------------------------------------------------ */
+/* literal match patterns                                              */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn runtime_literal_string_match() {
+    require_toolchain!();
+    let lines = run(r#"
+type Direction = "north" | "south" | "east" | "west";
+
+function short(dir: Direction) {
+  return match (dir) {
+    "north" => "N",
+    "south" => "S",
+    "east" => "E",
+    "west" => "W",
+  };
+}
+
+console.log(short("north"), short("south"), short("east"), short("west"));
+"#);
+    assert_eq!(lines, ["N S E W"]);
+}
+
+#[test]
+fn runtime_literal_number_match_with_or_patterns() {
+    require_toolchain!();
+    let lines = run(r#"
+function status(code: 200 | 201 | 404 | 500) {
+  return match (code) {
+    200 | 201 => "success",
+    404 => "not found",
+    500 => "server error",
+  };
+}
+
+console.log(status(200), status(201), status(404), status(500));
+"#);
+    assert_eq!(lines, ["success success not found server error"]);
+}
+
+#[test]
+fn runtime_literal_boolean_match() {
+    require_toolchain!();
+    let lines = run(r#"
+function label(flag: boolean) {
+  return match (flag) {
+    true => "yes",
+    false => "no",
+  };
+}
+
+console.log(label(true), label(false));
+"#);
+    assert_eq!(lines, ["yes no"]);
+}
+
+#[test]
+fn runtime_literal_match_keeps_number_spellings() {
+    require_toolchain!();
+    let lines = run(r#"
+function pick(n: number) {
+  return match (n) {
+    0xff => "hex",
+    1_000 => "sep",
+    1.5e2 => "exp",
+    -1 => "neg",
+    _ => "other",
+  };
+}
+
+console.log(pick(255), pick(1000), pick(150), pick(-1), pick(0));
+"#);
+    assert_eq!(lines, ["hex sep exp neg other"]);
+}
+
+#[test]
+fn runtime_literal_match_evaluates_the_scrutinee_once() {
+    require_toolchain!();
+    let lines = run(r#"
+let calls = 0;
+function getValue(): string {
+  calls += 1;
+  return "b";
+}
+
+const picked = match (getValue()) {
+  "a" => 1,
+  "b" => 2,
+  _ => 3,
+};
+console.log(picked, calls);
+"#);
+    assert_eq!(lines, ["2 1"]);
+}
+
+#[test]
+fn runtime_literal_match_runtime_guard_throws() {
+    require_toolchain!();
+    let lines = run(r#"
+function label(dir: string) {
+  return match (dir as "a" | "b") {
+    "a" => 1,
+    "b" => 2,
+  };
+}
+
+try {
+  label("zzz");
+  console.log("no throw");
+} catch (e) {
+  console.log((e as Error).message);
+}
+"#);
+    assert_eq!(lines, [r#"rl match: unexpected literal "zzz""#]);
+}
+
+#[test]
+fn runtime_literal_match_with_guard() {
+    require_toolchain!();
+    let lines = run(r#"
+function classify(code: number, retry: boolean) {
+  return match (code) {
+    500 if retry => "retrying",
+    500 => "failed",
+    _ => "ok",
+  };
+}
+
+console.log(classify(500, true), classify(500, false), classify(200, true));
+"#);
+    assert_eq!(lines, ["retrying failed ok"]);
+}
+
+#[test]
+fn typecheck_literal_match_narrows_each_arm() {
+    require_toolchain!();
+    // The switch discriminates on the value itself, so tsc narrows the
+    // scrutinee inside each arm with no type tricks.
+    let (ok, out) = typecheck(
+        r#"
+type Size = "sm" | "md" | "lg";
+const px: number = match ("sm" as Size) {
+  "sm" => 12,
+  "md" => 16,
+  "lg" => 20,
+};
+"#,
+    );
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn typecheck_literal_match_block_bodies() {
+    require_toolchain!();
+    let (ok, out) = typecheck(
+        r#"
+const label: string = match ("a" as "a" | "b") {
+  "a" => { return "first"; },
+  "b" => { return "second"; },
+};
+"#,
+    );
+    assert!(ok, "{out}");
+}

@@ -39,6 +39,34 @@ enum E { A(x: number]) }
 | `match: nested patterns cannot be combined with or-patterns` | 중첩 패턴(`Tag(field: Inner(...))`)은 대안별 경로 조건이 필요해 공유 구조 분해와 양립하지 않습니다. 암을 나눕니다 |
 | `` match: binding `<이름>` is used more than once in this pattern (rename one with `field: alias`) `` | 한 패턴(중첩 포함)이 같은 이름을 두 번 바인딩 — 한 스코프에 두 번 선언됩니다. 별칭으로 바꿉니다 |
 
+### 리터럴 패턴
+
+| 메시지 | 원인과 해결 |
+|--------|-------------|
+| `match: duplicate arm <리터럴>` | 무가드 암이 이미 덮은 리터럴이 다시 나옴. **값 기준**이라 `200`/`0xc8`, `"a"`/`'\x61'`은 같은 리터럴입니다. 위치는 두 번째 리터럴. 가드 암끼리의 반복은 에러가 아닙니다 |
+| `match: cannot mix tag patterns and literal patterns in the same match ...` | 태그 match는 `$rl_m.kind`를, 리터럴 match는 `$rl_m`을 비교하므로 한 match에 섞을 수 없습니다. 두 match로 나눕니다 (`_`는 양쪽 모두 가능) |
+| `match: or-pattern alternatives must all be the same kind of literal (found <종류> after <종류>)` | `"a" \| 1`처럼 종류가 다른 리터럴을 한 or-패턴에 섞었습니다. 암을 나눕니다 |
+
+```rl
+const v = match (x) { "a" => 1, "a" => 2 };
+// rlc: file.rl:1:33: match: duplicate arm "a"
+
+const v = match (x) { Some(v) => v, "none" => 0 };
+// rlc: file.rl:1:37: match: cannot mix tag patterns and literal patterns in the same match ...
+```
+
+`_` 없는 리터럴 match의 **소진성은 기본 경로에서 검사하지 않습니다** — 런타임
+가드(`rl match: unexpected literal ...`)만 남습니다. 타입이 있는
+`rlc --types` 경로가 검사합니다:
+
+```
+rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
+     (add the missing arms or a final `_` arm)
+```
+
+스크루티니 타입이 유한 리터럴 유니언으로 확정될 때만 나옵니다
+([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)).
+
 ### 소진성
 
 ```

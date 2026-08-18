@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use rlc::{
-    EmitMapping, EnumSymbol, ExternEnum, ImportRewrite, ModuleScan, Options, RlImport,
+    EmitMapping, EnumSymbol, ExternEnum, ImportRewrite, Literal, ModuleScan, Options, RlImport,
     RlImportNames, compile, compile_mapped,
 };
 
@@ -1321,6 +1321,81 @@ struct RlOrigin<'a> {
     mappings: &'a [EmitMapping],
 }
 
+/// One wildcard-free literal match handed to the host for typed
+/// exhaustiveness ([`rlc::literal_matches`]).
+///
+/// rlc cannot answer "does `\"north\" | \"south\"` cover this scrutinee?" —
+/// that is a fact about a TypeScript type, and the design contract keeps a
+/// type system out of rlc. The checker the `--types` pipeline already runs
+/// answers it: the probe carries where the scrutinee landed in the emitted
+/// module (so the host can ask `getTypeAtLocation`) and where the `match`
+/// keyword sits in the `.rl` source (so the answer is reported there).
+struct LiteralCheck {
+    /// Virtual module path the checker sees.
+    module: String,
+    /// UTF-16 offsets of the scrutinee expression in that module.
+    start: usize,
+    end: usize,
+    /// The literals the match's unguarded arms cover.
+    covered: Vec<Literal>,
+    /// The `.rl` file, and the byte offset of its `match` keyword.
+    file: PathBuf,
+    offset: usize,
+    /// Index into the loaded sources, for the source text to position in.
+    source_index: usize,
+}
+
+/// The emitted byte offset a source byte was copied to, or None when the
+/// byte belongs to compiler-written glue rather than a verbatim chunk.
+fn output_offset(mappings: &[EmitMapping], src: usize) -> Option<usize> {
+    mappings
+        .iter()
+        .find(|m| src >= m.src && src < m.src + m.len)
+        .map(|m| m.out + (src - m.src))
+}
+
+/// Offset of `byte` in `text` counted in UTF-16 code units — TypeScript's
+/// own coordinate space.
+fn utf16_position(text: &str, byte: usize) -> usize {
+    text.get(..byte)
+        .map_or(0, |prefix| prefix.encode_utf16().count())
+}
+
+/// The probes of one compiled module, dropped when the scrutinee did not
+/// survive into the output as verbatim text (a nested rl construct) or when
+/// a covered literal is a BigInt, which no TypeScript literal union holds.
+fn literal_checks(
+    source: &str,
+    module: &str,
+    code: &str,
+    mappings: &[EmitMapping],
+    file: &Path,
+    source_index: usize,
+) -> Vec<LiteralCheck> {
+    rlc::literal_matches(source)
+        .into_iter()
+        .filter(|probe| {
+            !probe
+                .covered
+                .iter()
+                .any(|l| matches!(l, Literal::BigInt(_)))
+        })
+        .filter_map(|probe| {
+            let start = output_offset(mappings, probe.scrutinee)?;
+            let end = output_offset(mappings, probe.scrutinee_end.checked_sub(1)?)? + 1;
+            Some(LiteralCheck {
+                module: module.to_string(),
+                start: utf16_position(code, start),
+                end: utf16_position(code, end),
+                covered: probe.covered,
+                file: file.to_path_buf(),
+                offset: probe.offset,
+                source_index,
+            })
+        })
+        .collect()
+}
+
 /// `--types`: one pass of the unified type pipeline.
 ///
 /// Compiles every `.rl` in memory, has the embedded host emit declarations
@@ -1438,6 +1513,24 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
         })
         .collect();
 
+    // Typed exhaustiveness for wildcard-free literal matches: rlc supplies
+    // the questions, the checker in the host answers them.
+    let checks: Vec<LiteralCheck> = modules
+        .iter()
+        .zip(&emitted_from)
+        .flat_map(|(module, (index, mappings))| {
+            let source = loaded[*index].as_ref().map_or("", |l| l.source.as_str());
+            literal_checks(
+                source,
+                &module.path,
+                &module.text,
+                mappings,
+                &rl_jobs[*index].file,
+                *index,
+            )
+        })
+        .collect();
+
     let std_module = needs_std.then(|| VirtualModule {
         path: STD_VIRTUAL.to_string(),
         text: rlc::STD_SOURCE.to_string(),
@@ -1450,10 +1543,27 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
         std_module.as_ref(),
         &sources,
         &rl_map,
+        &checks,
     )?;
     for diagnostic in &emitted.diagnostics {
         failed = true;
         eprintln!("rlc: {}", diagnostic.render(&origins));
+    }
+    for missing in &emitted.literal_missing {
+        let Some(check) = checks.get(missing.index) else {
+            continue;
+        };
+        let source = loaded[check.source_index]
+            .as_ref()
+            .map_or("", |l| l.source.as_str());
+        let (line, col) = rlc::line_col(source, check.offset);
+        failed = true;
+        eprintln!(
+            "rlc: {}:{line}:{col}: match on literal union is not exhaustive: missing {} \
+             (add the missing arms or a final `_` arm)",
+            slash_path(&check.file),
+            missing.missing
+        );
     }
 
     for module in modules.iter().chain(std_module.as_ref()) {
@@ -1547,6 +1657,16 @@ struct EmittedTypes {
     declarations: HashMap<String, String>,
     /// Type errors the host reported, in its own coordinates.
     diagnostics: Vec<TypeDiagnostic>,
+    /// Literal matches the checker found non-exhaustive.
+    literal_missing: Vec<LiteralMissing>,
+}
+
+/// One non-exhaustive literal match, as the host reports it: the index of
+/// the [`LiteralCheck`] it answers and the missing literals, already
+/// rendered as a comma-separated list.
+struct LiteralMissing {
+    index: usize,
+    missing: String,
 }
 
 /// One tsc diagnostic as the host reports it. Positions are TypeScript's:
@@ -1635,6 +1755,7 @@ fn run_types_host(
     std_module: Option<&VirtualModule>,
     sources: &[String],
     rl_map: &[(String, String)],
+    checks: &[LiteralCheck],
 ) -> Result<EmittedTypes, ExitCode> {
     let dir = std::env::temp_dir().join(format!("rlc-types-{}", std::process::id()));
     let script = dir.join("types_host.mjs");
@@ -1644,7 +1765,7 @@ fn run_types_host(
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let job = types_job(&cwd, modules, std_module, sources, rl_map);
+    let job = types_job(&cwd, modules, std_module, sources, rl_map, checks);
     let binary = node.map_or_else(|| PathBuf::from("node"), Path::to_path_buf);
 
     let mut child = match Command::new(&binary)
@@ -1715,6 +1836,7 @@ fn types_job(
     std_module: Option<&VirtualModule>,
     sources: &[String],
     rl_map: &[(String, String)],
+    checks: &[LiteralCheck],
 ) -> String {
     let list = |items: &[&VirtualModule]| {
         items
@@ -1746,15 +1868,46 @@ fn types_job(
         .collect::<Vec<_>>()
         .join(",");
 
+    let literal_checks = checks
+        .iter()
+        .map(|c| {
+            format!(
+                "{{\"module\":{},\"start\":{},\"end\":{},\"covered\":[{}]}}",
+                json_str(&c.module),
+                c.start,
+                c.end,
+                c.covered
+                    .iter()
+                    .map(json_literal)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{{\"cwd\":{},\"compilerOptions\":{},\"modules\":[{}],\"std\":{},\"sources\":[{}],\"rlModules\":{{{}}}}}",
+        "{{\"cwd\":{},\"compilerOptions\":{},\"modules\":[{}],\"std\":{},\"sources\":[{}],\"rlModules\":{{{}}},\"literalChecks\":[{}]}}",
         json_str(&cwd.display().to_string()),
         TYPES_COMPILER_OPTIONS,
         list(&refs),
         std_json,
         source_list,
-        map
+        map,
+        literal_checks
     )
+}
+
+/// One covered literal as a JSON value the host compares against the
+/// checker's literal types.
+fn json_literal(literal: &Literal) -> String {
+    match literal {
+        Literal::String(s) => json_str(s),
+        Literal::Number(n) => format!("{n}"),
+        Literal::Boolean(b) => b.to_string(),
+        // Filtered out before a check is built — never reaches the host.
+        Literal::BigInt(d) => json_str(d),
+    }
 }
 
 /// Reads the host's reply. The shapes are fixed and produced by our own
@@ -1776,9 +1929,20 @@ fn parse_types_result(stdout: &str) -> EmittedTypes {
             message: json_field(&entry, "message").unwrap_or_default(),
         });
     }
+    let mut literal_missing = Vec::new();
+    for entry in json_objects(stdout, "\"literalMissing\":[") {
+        if let Some(missing) = json_field(&entry, "missing") {
+            literal_missing.push(LiteralMissing {
+                index: json_number(&entry, "index") as usize,
+                missing,
+            });
+        }
+    }
+
     EmittedTypes {
         declarations,
         diagnostics,
+        literal_missing,
     }
 }
 
