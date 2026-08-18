@@ -72,12 +72,18 @@ pub(crate) enum Segment {
 /// per-file two-argument apply helper (`$rl_ap`) — argument position gives
 /// each step contextual typing, which is what keeps curried combinator
 /// steps fully inferred by tsc; method steps chain as plain postfix text.
+///
+/// With the head keyword `flow` the same step chain composes *functions*
+/// instead of flowing a value ([`PipeExpr::head`] is then `None`); it
+/// compiles to nested calls of the per-file composition helper (`$rl_fl`).
 #[derive(Debug)]
 pub(crate) struct PipeExpr {
-    /// Raw span of the head expression, for error reporting.
+    /// Raw span of the head expression — the `flow` keyword for a
+    /// composition — for error reporting.
     pub head_span: Span,
-    /// The head expression, recursively parsed.
-    pub head: Program,
+    /// The head expression, recursively parsed. `None` for a `flow`
+    /// composition, which has no value head.
+    pub head: Option<Program>,
     /// The pipeline's steps, in source order. Never empty.
     pub steps: Vec<PipeStep>,
 }

@@ -5,6 +5,7 @@
   "patterns": [
     { "include": "#rl-enum" },
     { "include": "#rl-match" },
+    { "include": "#rl-flow" },
     { "include": "source.ts" }
   ],
   "repository": {
@@ -66,6 +67,10 @@
         { "match": "[A-Za-z_$][A-Za-z0-9_$]*", "name": "variable.other.enummember.rl" },
         { "match": ",", "name": "punctuation.separator.comma.rl" }
       ]
+    },
+    "rl-flow": {
+      "match": "(?<![.$\\w])(flow)(?=\\s*\\|>)",
+      "captures": { "1": { "name": "keyword.control.flow.rl" } }
     },
     "rl-match": {
       "begin": "(?<![.$\\w])(match)\\s*(?=\\()",

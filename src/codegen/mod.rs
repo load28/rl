@@ -54,6 +54,7 @@ pub(crate) fn emit_with_map(
         std_import,
         try_seq: Cell::new(0),
         used_pipe: Cell::new(false),
+        used_flow: Cell::new(false),
     };
     let (mut code, mappings) = emitter.emit_program(program).flatten();
     // The pipeline apply helper, once per file. A function declaration
@@ -64,6 +65,16 @@ pub(crate) fn emit_with_map(
             code.push('\n');
         }
         code.push_str("function $rl_ap<A, B>(v: A, f: (v: A) => B): B { return f(v); }\n");
+    }
+    // The `flow` composition helper, on the same terms. Binary and nested,
+    // so composition has no arity ceiling and every step infers concretely.
+    if emitter.used_flow.get() {
+        if !code.ends_with('\n') {
+            code.push('\n');
+        }
+        code.push_str(
+            "function $rl_fl<A extends unknown[], B, C>(f: (...a: A) => B, g: (b: B) => C): (...a: A) => C { return (...a: A) => g(f(...a)); }\n",
+        );
     }
     (code, mappings)
 }
@@ -82,6 +93,9 @@ pub(super) struct Emitter<'a> {
     /// Set when a pipeline was emitted — the file then gets the `$rl_ap`
     /// apply helper appended once.
     used_pipe: Cell<bool>,
+    /// Set when a multi-step `flow` composition was emitted — the file then
+    /// gets the `$rl_fl` composition helper appended once.
+    used_flow: Cell<bool>,
 }
 
 impl<'a> Emitter<'a> {
@@ -214,8 +228,11 @@ impl<'a> Emitter<'a> {
     /// type, so curried combinator steps infer fully (the fp-ts `pipe`
     /// mechanism — see docs/design/pipeline-operator.md §4.1).
     fn emit_pipe(&self, pipe: &PipeExpr) -> Rope<'a> {
+        let Some(head) = &pipe.head else {
+            return self.emit_flow(pipe);
+        };
         self.used_pipe.set(true);
-        let head = guard_line_comment(self.emit_program(&pipe.head).trim());
+        let head = guard_line_comment(self.emit_program(head).trim());
         let mut acc = Rope::new();
         acc.push_lit("(");
         acc.append(head);
@@ -231,6 +248,48 @@ impl<'a> Emitter<'a> {
             } else {
                 next.push_lit("$rl_ap(");
                 next.append(acc);
+                next.push_lit(", (");
+                next.append(body);
+                next.push_lit("))");
+            }
+            acc = next;
+        }
+        acc
+    }
+
+    /// Emits a `flow` composition as nested binary `$rl_fl` calls: the
+    /// first step is the composed function's input end, every later step
+    /// wraps what came before. Binary nesting means no arity ceiling, and
+    /// each helper call infers concretely from the previous step's return
+    /// type — the composed generics tsc cannot infer are the ones a
+    /// library `flow(f, g, h)` loses too, so the first step is what fixes
+    /// the input type (docs/reference/language.md §7.5).
+    ///
+    /// A method step becomes an arrow in the helper's argument position,
+    /// where the parameter type `(b: B) => C` types `$rl_v` contextually —
+    /// no annotation, and no implicit `any` from rlc-emitted code. As the
+    /// *first* step there would be nothing to infer it from, which sema
+    /// rejects.
+    fn emit_flow(&self, pipe: &PipeExpr) -> Rope<'a> {
+        let mut steps = pipe.steps.iter();
+        let first = steps
+            .next()
+            .expect("the parser never claims a pipeline without a step");
+        let mut acc = Rope::new();
+        acc.push_lit("(");
+        acc.append(guard_line_comment(self.emit_program(&first.body).trim()));
+        acc.push_lit(")");
+        for step in steps {
+            self.used_flow.set(true);
+            let body = guard_line_comment(self.emit_program(&step.body).trim());
+            let mut next = Rope::new();
+            next.push_lit("$rl_fl(");
+            next.append(acc);
+            if step.postfix {
+                next.push_lit(", (($rl_v) => ($rl_v)");
+                next.append(body);
+                next.push_lit("))");
+            } else {
                 next.push_lit(", (");
                 next.append(body);
                 next.push_lit("))");

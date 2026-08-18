@@ -186,9 +186,26 @@ impl Checker<'_> {
                 Segment::LetElse(stmt) => self.check_let_else(stmt, ctx)?,
                 Segment::IfLet(stmt) => self.check_if_let(stmt, ctx)?,
                 Segment::Pipe(pipe) => {
+                    // A `flow` composition has no value to chain a method
+                    // onto until its first function has produced one, so
+                    // its first step must be an ordinary function step.
+                    if pipe.head.is_none()
+                        && let Some(first) = pipe.steps.first()
+                        && first.postfix
+                    {
+                        return Err(RlError::at(
+                            first.span.start,
+                            "`flow`: the first step cannot be a method step — it is the \
+                             composed function's input, so it must be a function \
+                             (`flow |> ((s: string) => s.trim()) |> ...`)"
+                                .to_string(),
+                        ));
+                    }
                     // Head and steps are expressions — `try` inside them is
                     // rejected for the same reason as inside a match.
-                    self.visit_program(&pipe.head, Ctx::Expr)?;
+                    if let Some(head) = &pipe.head {
+                        self.visit_program(head, Ctx::Expr)?;
+                    }
                     for step in &pipe.steps {
                         self.visit_program(&step.body, Ctx::Expr)?;
                     }

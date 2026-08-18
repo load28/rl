@@ -9,7 +9,8 @@
 ## 목표
 
 TypeScript에 **여섯 구문**만 더합니다 — 태그드 유니언 `enum`, 패턴 매칭
-`match`, 에러 전파 `try`, 값 추출 `let-else`와 `if let`, 파이프라인 `|>`.
+`match`, 에러 전파 `try`, 값 추출 `let-else`와 `if let`, 파이프라인 `|>`
+(함수 합성 `flow` 포함).
 그리고 두 가지를 지킵니다.
 
 1. **모든 유효한 TypeScript 파일은 그대로 유효한 `.rl` 파일이고, 자기

@@ -973,6 +973,18 @@ const KEYWORD_SNIPPETS: CompletionItem[] = [
     insertText: "try ${1:expression};",
   },
   {
+    label: "flow",
+    kind: CompletionItemKind.Snippet,
+    detail: "rl flow composition (point-free pipeline)",
+    documentation: {
+      kind: MarkupKind.Markdown,
+      value:
+        "값 대신 함수를 합성해 새 함수를 만듭니다. 첫 스텝이 입력 타입을 정하며, 메서드 스텝이 될 수 없습니다.",
+    },
+    insertTextFormat: InsertTextFormat.Snippet,
+    insertText: "flow |> ${1:first} |> ${0:next}",
+  },
+  {
     label: "let-else",
     kind: CompletionItemKind.Snippet,
     detail: "rl let-else statement",

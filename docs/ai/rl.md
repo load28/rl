@@ -1,6 +1,6 @@
 # rl — AI context
 
-rl = TypeScript + 6 constructs; `rlc` compiles `.rl` → plain TS. Write normal TS everywhere; rl syntax only for: enum (tagged union), match, try, let-else, if let, `|>`.
+rl = TypeScript + 6 constructs; `rlc` compiles `.rl` → plain TS. Write normal TS everywhere; rl syntax only for: enum (tagged union), match, try, let-else, if let, `|>` (+ `flow` composition).
 
 CONTRACTS:
 - Every valid TS file is a valid `.rl` file. rlc transforms only text parsing COMPLETELY as an rl construct; all else passes through byte-for-byte.
@@ -90,6 +90,9 @@ const label = half(4) |> Option.mapP(x => x + 1) |> Option.unwrapOrP(0) |> .toFi
 - PARENTHESIZE ternaries & arrows at head/step top level: `(c ? a : b) |> f`, `x |> (n => n+1)` — else compile error.
 - No `?.`-starting step; no empty step; no try STATEMENT inside head/step (pipeline inside a try expr is fine: `const a = try readCfg() |> normalize;`).
 - Malformed `|>` = located compile error. Ambiguous head (no-semicolon style, `in`/`instanceof`) → parenthesize head.
+- `flow` head = compose FUNCTIONS instead of piping a value: `const label = flow |> half |> Option.mapP(x => x + 1) |> .toFixed(1);` then `label(4)`. Same step rules; nothing runs until the composed fn is called.
+- `flow` is contextual — only a head that is exactly `flow`; a `flow` VARIABLE pipes when parenthesized (`(flow) |> f`). `flow |> f` (one step) = `f`.
+- flow's FIRST step fixes the input type and cannot be a method step (compile error). Generic/curried first step → `unknown`; give type args (`flow |> wrap<number> |> ...`, `flow |> Option.mapP((x: number) => x + 1) |> ...`). Later steps infer from the previous step.
 
 ## @rl/std
 
