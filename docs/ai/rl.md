@@ -114,7 +114,7 @@ import { Option, Result } from "@rl/std";
 - `npm i -D rl-lang typescript` → prebuilt `rlc` binary (linux-x64/arm64, darwin-x64/arm64, win32-x64), run via `npx rlc`. typescript 5 or 6 required for `--types` (TS7 has no JS compiler API — `npm i -D typescript@6` if only 7 resolves).
 - Other platforms / no npm: `cargo install --git https://github.com/load28/rl`; to keep using the npm launcher, set env `RLC_BINARY=/path/to/rlc`.
 - Update: `npm i -D rl-lang@latest` (binary follows package version); verify `npx rlc -v`; then re-run `npx rlc --types src` and rebuild.
-- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, diagnostics, go-to-def).
+- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, rl + type diagnostics, go-to-def).
 
 ## Setup
 
@@ -138,6 +138,8 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 ## Errors
 
 - `rlc: file:line:col: msg` — e.g. `match on enum X is not exhaustive: missing "Y"` (add arms or `_`), `duplicate arm`, `or-pattern alternatives must bind the same fields`, else-block-must-diverge, try-position-restriction (extract helper).
+- Type errors come from tsc, reported at the **`.rl` source** position — `rlc --types` prints `rlc: src/x.rl:12:31: <tsc message>` (exit 1, sidecars still written), and the VSCode extension shows them inline (`source: ts`, `rl.typeDiagnostics` to disable). Applies inside `match` arms and `|>` pipelines too.
+- A `|>` step's combinator inferring `unknown` (e.g. `Result.mapP((n) => n)` with `n: unknown`) means the pipeline **head** has no usable type — it is not a `Result`, or the head is an unannotated parameter. Fix the head, not the step.
 - tsc errors on output containing literal `match`/`try` → silent passthrough; recheck semicolons/parens/reserved words.
 - `generated TypeScript failed to parse` → pass-through source was invalid TS, or rlc bug.
 

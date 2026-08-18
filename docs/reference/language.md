@@ -553,6 +553,22 @@ function $rl_ap<A, B>(v: A, f: (v: A) => B): B { return f(v); }
 - 인자 평가 규칙에 따라 head → step 순서(좌→우)로 평가됩니다.
 - step이 단항 함수가 아니면 그 텍스트 위치에서 tsc가 표준 에러로 보고합니다.
 
+문맥 추론은 `$rl_ap`의 `A`, 즉 **head의 타입에서 출발합니다**. head의 타입이
+정해지지 않으면(타입 주석 없는 파라미터 등) 스텝의 화살표 인자도 추론되지
+않고, head의 타입이 스텝과 맞지 않으면 커링 콤비네이터의 타입 인자가 `unknown`
+으로 떨어집니다.
+
+```rl
+const a = (v: number) => v |> Result.mapP((n) => n);
+// n: unknown — head가 number라 Result<T, E>에 붙지 않습니다.
+// rlc: file.rl:1:26: Argument of type 'number' is not assignable to
+//      parameter of type 'Result<unknown, unknown>'.
+```
+
+`unknown`은 증상이고, 진짜 문제는 head입니다 — head를 고칩니다
+(`Result.Ok(v) |> ...`). 이 에러는 `rlc --types`와 에디터 양쪽에서
+원본 위치로 보고됩니다 ([`errors.md`](./errors.md#타입-에러-tsc)).
+
 ### 7.4 구조 규칙
 
 | 규칙 | 내용 |

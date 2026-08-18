@@ -177,6 +177,17 @@ rlc --types -w src/       # 감시하며 갱신
   없으면 `rlc: the resolved typescript has no JS compiler API ...
   (npm i -D typescript@6)`로 안내합니다.
 - 타입 에러가 있어도 선언은 방출되므로 사이드카는 갱신되고 종료 코드만 1입니다.
+- **타입 에러는 `.rl` 원본 위치로 보고됩니다.** tsc가 보는 것은 각 `.rl`이
+  컴파일된 TypeScript지만, 그 파일은 디스크에 없습니다 — 방출 매핑을 거꾸로
+  타 원본의 행·열로 옮겨 냅니다. 손으로 쓴 `.ts`의 에러는 원래 위치 그대로.
+
+  ```
+  rlc: src/eval.rl:12:31: Property 'length' does not exist on type 'number'.
+  ```
+
+  글루(switch IIFE, `$rl_ap` 헬퍼 등)에 걸린 진단은 원본 대응이 없으므로
+  바로 뒤따르는 원본 조각의 위치로 보고됩니다. 애초에 방출물 때문에 tsc
+  에러가 나면 그건 rlc의 버그입니다 (`docs/reference/errors.md` 에러 계층).
 
 소비 측 `tsconfig.json`은 두 가지만 선언하면 됩니다.
 

@@ -22,7 +22,8 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use rlc::{
-    EnumSymbol, ExternEnum, ImportRewrite, ModuleScan, Options, RlImport, RlImportNames, compile,
+    EmitMapping, EnumSymbol, ExternEnum, ImportRewrite, ModuleScan, Options, RlImport,
+    RlImportNames, compile, compile_mapped,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1304,6 +1305,21 @@ struct VirtualModule {
     source: Option<PathBuf>,
 }
 
+/// Where a virtual module came from, kept so a tsc diagnostic over the
+/// emitted TypeScript can be reported at the position in the `.rl` source
+/// the offending code was written at. The virtual module has no file on
+/// disk, so its own coordinates would name a file the user cannot open.
+struct RlOrigin<'a> {
+    /// The `.rl` file.
+    file: &'a Path,
+    /// Its text — the coordinate space diagnostics are reported in.
+    source: &'a str,
+    /// The emitted TypeScript the host type-checked.
+    code: &'a str,
+    /// Source↔output mappings of every verbatim-copied chunk, by output.
+    mappings: &'a [EmitMapping],
+}
+
 /// `--types`: one pass of the unified type pipeline.
 ///
 /// Compiles every `.rl` in memory, has the embedded host emit declarations
@@ -1373,20 +1389,25 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
                 extern_enums: &extern_enums,
                 std_import: None,
             };
-            compile(&loaded.source, &options).map_err(|e| format!("rlc: {e}"))
+            compile_mapped(&loaded.source, &options).map_err(|e| format!("rlc: {e}"))
         },
     );
 
-    for (job, text) in rl_jobs.iter().zip(compiled) {
-        match text {
-            Ok(text) => {
+    // Kept in lockstep with `modules`: the job each one came from, and the
+    // mappings that put a diagnostic back on the `.rl` source.
+    let mut emitted_from: Vec<(usize, Vec<EmitMapping>)> = Vec::new();
+
+    for (index, (job, emit)) in rl_jobs.iter().zip(compiled).enumerate() {
+        match emit {
+            Ok(emit) => {
                 let path = slash_path(&job.out_path);
                 rl_map.push((slash_path(&job.file), path.clone()));
                 modules.push(VirtualModule {
                     path,
-                    text,
+                    text: emit.code,
                     source: Some(job.file.clone()),
                 });
+                emitted_from.push((index, emit.mappings));
             }
             Err(message) => {
                 eprintln!("{message}");
@@ -1398,6 +1419,23 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
     if modules.is_empty() {
         return Ok(failed);
     }
+
+    let origins: HashMap<&str, RlOrigin<'_>> = modules
+        .iter()
+        .zip(&emitted_from)
+        .map(|(module, (index, mappings))| {
+            let source = loaded[*index].as_ref().map_or("", |l| l.source.as_str());
+            (
+                module.path.as_str(),
+                RlOrigin {
+                    file: rl_jobs[*index].file.as_path(),
+                    source,
+                    code: module.text.as_str(),
+                    mappings,
+                },
+            )
+        })
+        .collect();
 
     let std_module = needs_std.then(|| VirtualModule {
         path: STD_VIRTUAL.to_string(),
@@ -1414,7 +1452,7 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
     )?;
     for diagnostic in &emitted.diagnostics {
         failed = true;
-        eprintln!("rlc: {diagnostic}");
+        eprintln!("rlc: {}", diagnostic.render(&origins));
     }
 
     for module in modules.iter().chain(std_module.as_ref()) {
@@ -1506,8 +1544,86 @@ fn input_relative(file: &Path, inputs: &[String]) -> PathBuf {
 struct EmittedTypes {
     /// Virtual module path → declaration text.
     declarations: HashMap<String, String>,
-    /// Already formatted `file:line:col: message` diagnostics.
-    diagnostics: Vec<String>,
+    /// Type errors the host reported, in its own coordinates.
+    diagnostics: Vec<TypeDiagnostic>,
+}
+
+/// One tsc diagnostic as the host reports it. Positions are TypeScript's:
+/// 1-based line, 1-based column counted in UTF-16 code units, over the file
+/// the checker saw — which for a `.rl` module is the emitted TypeScript,
+/// not the source. [`TypeDiagnostic::render`] translates that back.
+struct TypeDiagnostic {
+    /// Path relative to the working directory, or `None` for a diagnostic
+    /// with no file (a bad compiler option, say).
+    file: Option<String>,
+    line: usize,
+    col: usize,
+    message: String,
+}
+
+impl TypeDiagnostic {
+    /// The `file:line:col: message` line rlc prints. A diagnostic over a
+    /// virtual module is moved onto the `.rl` file it was compiled from;
+    /// a hand-written `.ts` file already has real coordinates and is left
+    /// alone.
+    fn render(&self, origins: &HashMap<&str, RlOrigin<'_>>) -> String {
+        let Some(file) = &self.file else {
+            return self.message.clone();
+        };
+        let key = file.replace('\\', "/");
+        let Some(origin) = origins.get(key.as_str()) else {
+            return format!("{file}:{}:{}: {}", self.line, self.col, self.message);
+        };
+        let out = utf16_offset(origin.code, self.line, self.col);
+        let src = source_offset(origin.mappings, out);
+        let (line, col) = rlc::line_col(origin.source, src);
+        format!("{}:{line}:{col}: {}", slash_path(origin.file), self.message)
+    }
+}
+
+/// Byte offset in `text` of a 1-based `(line, col)` whose column counts
+/// UTF-16 code units — TypeScript's coordinates. Positions past the end of
+/// a line, or of the text, clamp to it.
+fn utf16_offset(text: &str, line: usize, col: usize) -> usize {
+    let mut at = 0;
+    for _ in 1..line.max(1) {
+        match text[at..].find('\n') {
+            Some(newline) => at += newline + 1,
+            None => return text.len(),
+        }
+    }
+    let rest = &text[at..];
+    let line_text = &rest[..rest.find('\n').unwrap_or(rest.len())];
+    let mut units = 0;
+    for (offset, ch) in line_text.char_indices() {
+        if units >= col.saturating_sub(1) {
+            return at + offset;
+        }
+        units += ch.len_utf16();
+    }
+    at + line_text.len()
+}
+
+/// The source byte offset an emitted byte offset came from, given the
+/// mappings of the verbatim-copied chunks (ordered by output offset).
+///
+/// A position inside compiler-written glue has no source counterpart. That
+/// only happens when tsc flags generated code, which the error-layer
+/// contract says it should not; rather than drop the diagnostic, the next
+/// verbatim chunk stands in, so the report still lands near the construct
+/// that produced the glue.
+fn source_offset(mappings: &[EmitMapping], out: usize) -> usize {
+    let after = mappings.partition_point(|m| m.out <= out);
+    if let Some(m) = after.checked_sub(1).map(|i| &mappings[i])
+        && out < m.out + m.len
+    {
+        return m.src + (out - m.out);
+    }
+    mappings
+        .get(after)
+        .map(|m| m.src)
+        .or_else(|| mappings.last().map(|m| m.src + m.len))
+        .unwrap_or(0)
 }
 
 /// Runs the embedded host with `node`, handing it the compiled modules on
@@ -1652,15 +1768,12 @@ fn parse_types_result(stdout: &str) -> EmittedTypes {
         }
     }
     for entry in json_objects(stdout, "\"diagnostics\":[") {
-        let message = json_field(&entry, "message").unwrap_or_default();
-        match json_field(&entry, "file") {
-            Some(file) => {
-                let line = json_number(&entry, "line");
-                let col = json_number(&entry, "col");
-                diagnostics.push(format!("{file}:{line}:{col}: {message}"));
-            }
-            None => diagnostics.push(message),
-        }
+        diagnostics.push(TypeDiagnostic {
+            file: json_field(&entry, "file"),
+            line: json_number(&entry, "line") as usize,
+            col: json_number(&entry, "col") as usize,
+            message: json_field(&entry, "message").unwrap_or_default(),
+        });
     }
     EmittedTypes {
         declarations,
@@ -1886,5 +1999,147 @@ mod help_tests {
             }
         }
         assert!(!seen.contains("all") && !seen.contains("guide"));
+    }
+}
+
+#[cfg(test)]
+mod type_diagnostic_tests {
+    use super::*;
+
+    fn origin<'a>(
+        file: &'a Path,
+        source: &'a str,
+        code: &'a str,
+        mappings: &'a [EmitMapping],
+    ) -> HashMap<&'a str, RlOrigin<'a>> {
+        HashMap::from([(
+            "src/calc.ts",
+            RlOrigin {
+                file,
+                source,
+                code,
+                mappings,
+            },
+        )])
+    }
+
+    #[test]
+    fn utf16_offset_counts_lines_and_utf16_columns() {
+        let text = "const a = 1;\nconst b = 2;\n";
+        assert_eq!(utf16_offset(text, 1, 1), 0);
+        assert_eq!(utf16_offset(text, 2, 7), 19);
+        // An astral character is two UTF-16 units but four bytes: `const t`
+        // starts at UTF-16 column 17 and at byte 18.
+        let astral = "const s = \"🎉\"; const t = 1;\n";
+        assert_eq!(astral.find("const t"), Some(18));
+        assert_eq!(utf16_offset(astral, 1, 17), 18);
+        // Past the end of a line, and past the end of the text.
+        assert_eq!(utf16_offset(text, 1, 999), 12);
+        assert_eq!(utf16_offset(text, 99, 1), text.len());
+    }
+
+    #[test]
+    fn source_offset_walks_the_verbatim_chunks() {
+        // Two source chunks with glue between them in the output.
+        let mappings = [
+            EmitMapping {
+                src: 0,
+                out: 0,
+                len: 10,
+            },
+            EmitMapping {
+                src: 20,
+                out: 30,
+                len: 5,
+            },
+        ];
+        assert_eq!(source_offset(&mappings, 0), 0);
+        assert_eq!(source_offset(&mappings, 7), 7);
+        // Glue: the next verbatim chunk stands in.
+        assert_eq!(source_offset(&mappings, 15), 20);
+        assert_eq!(source_offset(&mappings, 32), 22);
+        // Past the last chunk: its end.
+        assert_eq!(source_offset(&mappings, 99), 25);
+        assert_eq!(source_offset(&[], 5), 0);
+    }
+
+    #[test]
+    fn a_diagnostic_over_a_virtual_module_names_the_rl_source() {
+        let source = "const a = 1;\nconst b: string = a;\n";
+        let options = Options {
+            rewrite_imports: ImportRewrite::Off,
+            ..Options::default()
+        };
+        let emit = compile_mapped(source, &options).unwrap();
+        assert_eq!(emit.code, source, "this source passes through verbatim");
+
+        let file = PathBuf::from("src/calc.rl");
+        let origins = origin(&file, source, &emit.code, &emit.mappings);
+        let diagnostic = TypeDiagnostic {
+            file: Some("src/calc.ts".to_string()),
+            line: 2,
+            col: 7,
+            message: "Type 'number' is not assignable to type 'string'.".to_string(),
+        };
+        assert_eq!(
+            diagnostic.render(&origins),
+            "src/calc.rl:2:7: Type 'number' is not assignable to type 'string'."
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_inside_rl_syntax_lands_on_the_source_position() {
+        let source = "const n = 1 |> f;\n";
+        let options = Options {
+            rewrite_imports: ImportRewrite::Off,
+            ..Options::default()
+        };
+        let emit = compile_mapped(source, &options).unwrap();
+        // The emitted call moves `f` well past its source column.
+        let at = emit.code.find('f').unwrap();
+        assert_ne!(at, source.find("f").unwrap());
+
+        let file = PathBuf::from("calc.rl");
+        let origins = origin(&file, source, &emit.code, &emit.mappings);
+        let diagnostic = TypeDiagnostic {
+            file: Some("src/calc.ts".to_string()),
+            line: 1,
+            col: at + 1,
+            message: "Cannot find name 'f'.".to_string(),
+        };
+        assert_eq!(
+            diagnostic.render(&origins),
+            "calc.rl:1:16: Cannot find name 'f'."
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_over_a_real_file_keeps_its_own_position() {
+        let origins: HashMap<&str, RlOrigin<'_>> = HashMap::new();
+        let diagnostic = TypeDiagnostic {
+            file: Some("src/hand-written.ts".to_string()),
+            line: 4,
+            col: 9,
+            message: "Cannot find name 'x'.".to_string(),
+        };
+        assert_eq!(
+            diagnostic.render(&origins),
+            "src/hand-written.ts:4:9: Cannot find name 'x'."
+        );
+    }
+
+    #[test]
+    fn a_positionless_diagnostic_is_just_its_message() {
+        let origins: HashMap<&str, RlOrigin<'_>> = HashMap::new();
+        let diagnostic = TypeDiagnostic {
+            file: None,
+            line: 0,
+            col: 0,
+            message: "Unknown compiler option 'nope'.".to_string(),
+        };
+        assert_eq!(
+            diagnostic.render(&origins),
+            "Unknown compiler option 'nope'."
+        );
     }
 }

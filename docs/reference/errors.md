@@ -132,6 +132,30 @@ source or an rlc bug; use --no-verify to bypass.
 메시지 안에 표기되고, 에러 자체는 위치 없이 보고됩니다. 소스가 유효한데도
 발생하면 rlc 버그이므로 제보해 주세요.
 
+## 타입 에러 (tsc)
+
+타입 에러는 rlc가 내는 에러가 아닙니다 — tsc가 냅니다. 다만 `.rl`은 tsc가
+읽는 파일이 아니므로, rlc가 그 진단을 **원본 `.rl`의 행·열로 옮겨** 전달합니다.
+
+| 어디서 | 형식 | 비고 |
+|--------|------|------|
+| `rlc --types` | `rlc: <파일>.rl:<행>:<열>: <메시지>` | 타입 에러가 있어도 사이드카는 방출되고 종료 코드만 1 ([`cli.md`](./cli.md#타입-생성---types)) |
+| VSCode 확장 | 진단 `source: ts`, `code`는 TS 에러 번호 | `rl.typeDiagnostics`로 끌 수 있음 |
+
+두 경로 모두 `match` 암·`|>` 파이프라인·`try`/let-else/`if let` **안쪽**의
+타입 에러까지 잡습니다. 방출물은 순수 TypeScript이므로 rl 구문이 타입 추론을
+가리지 않습니다.
+
+```rl
+const bad = evaluate() |> Result.mapP((n) => n.length);
+// rlc: eval.rl:1:48: Property 'length' does not exist on type 'number'.
+```
+
+계층은 그대로입니다: 위의 rl 수준 에러는 **전부 rlc가**, 타입 에러는
+**전부 tsc가** 냅니다. 겹치지 않습니다. rlc가 방출한 코드(switch IIFE,
+`$rl_ap` 헬퍼, 구조 분해) 때문에 tsc 에러가 나면 그것은 rlc의 버그이며,
+그런 진단은 원본 대응이 없어 에디터에서는 표시되지 않습니다.
+
 ## CLI
 
 컴파일 이전 단계의 에러입니다. 전부 stderr로 나가고 종료 코드 1입니다.

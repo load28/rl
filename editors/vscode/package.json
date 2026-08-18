@@ -73,6 +73,12 @@
           "default": true,
           "markdownDescription": "Run rlc's field-type validation and output self-check. When disabled, `--no-verify` is passed to `rlc --check`."
         },
+        "rl.typeDiagnostics": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Report TypeScript type errors in `.rl` files. The language server type-checks the TypeScript each buffer compiles to and maps the errors back onto the source, so a type error inside a `match` arm or a `|>` pipeline is reported where you wrote it. rl-level errors always come from `rlc` and are unaffected."
+        },
         "rl.sidecar": {
           "scope": "resource",
           "type": "string",

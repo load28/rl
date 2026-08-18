@@ -64,7 +64,8 @@
 | TASK-054 | AI 가이드 확장(설치·업데이트·워크플로)과 `rlc help` 주제별 헬프 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-054](./TASK-054-ai-guide-full-and-cli-help.md) |
 | TASK-055 | 에디터에서 `Option`/`Result`·파이프라인이 `any`로 추론되는 문제 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-055](./TASK-055-editor-any-inference-fix.md) |
 | TASK-056 | 대규모 코드베이스 대비 컴파일러 성능 개선 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-056](./TASK-056-large-codebase-performance.md) |
+| TASK-057 | 타입 에러를 `.rl` 원본 위치로 — `--types` 위치 매핑과 에디터 TS 진단 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-057](./TASK-057-type-errors-at-source.md) |
 
 ## 다음 태스크 번호
 
-**TASK-057**
+**TASK-058**

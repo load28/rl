@@ -83,6 +83,7 @@ connection.onInitialized(() => {
 interface RlSettings {
   compilerPath: string;
   verify: boolean;
+  typeDiagnostics: boolean;
   sidecar: sidecar.SidecarMode;
   sidecarDir: string;
 }
@@ -90,6 +91,7 @@ interface RlSettings {
 const DEFAULT_SETTINGS: RlSettings = {
   compilerPath: "",
   verify: true,
+  typeDiagnostics: true,
   sidecar: "refresh",
   sidecarDir: "",
 };
@@ -103,6 +105,7 @@ async function getSettings(uri: string): Promise<RlSettings> {
   return {
     compilerPath: conf?.compilerPath ?? DEFAULT_SETTINGS.compilerPath,
     verify: conf?.verify ?? DEFAULT_SETTINGS.verify,
+    typeDiagnostics: conf?.typeDiagnostics ?? DEFAULT_SETTINGS.typeDiagnostics,
     sidecar: conf?.sidecar ?? DEFAULT_SETTINGS.sidecar,
     sidecarDir: conf?.sidecarDir ?? DEFAULT_SETTINGS.sidecarDir,
   };
@@ -346,8 +349,8 @@ function fromServiceSpan(
  * analysis does not own — variables, functions, types, imported values —
  * are answered by the real TypeScript language service (tsproject.ts) over
  * the virtual documents above (or the raw sources while one lags). Used as
- * the fallback for definitions and hover; TS diagnostics are never
- * surfaced. */
+ * the fallback for definitions and hover, and — over a virtual document
+ * only — for the type diagnostics `validate` merges into rlc's own. */
 
 let tsProjectInstance: tsproject.TsProject | null = null;
 
@@ -574,9 +577,11 @@ async function validate(doc: TextDocument): Promise<void> {
   const docName = uri.scheme === "file" ? uri.fsPath : uri.path;
 
   // The virtual document rides the same debounce; it degrades to raw-text
-  // serving on its own when the compiler is missing.
+  // serving on its own when the compiler is missing. Kept as a promise:
+  // the type diagnostics below need the emitted text, and awaiting the run
+  // already in flight beats starting a second one.
   servedCompiler = compiler;
-  void refreshVirtual(doc, compiler);
+  const virtualReady = refreshVirtual(doc, compiler);
 
   const result = await rlc.runCheck(
     compiler,
@@ -611,10 +616,52 @@ async function validate(doc: TextDocument): Promise<void> {
     return;
   }
 
-  const diagnostics = result.diagnostics.map((d) =>
-    toDiagnostic(current, d),
-  );
+  const diagnostics = result.diagnostics.map((d) => toDiagnostic(current, d));
+
+  if (settings.typeDiagnostics) {
+    await virtualReady;
+    // Awaiting gave the buffer another chance to move on.
+    const fresh = documents.get(doc.uri);
+    if (!fresh || fresh.version !== doc.version) return;
+    diagnostics.push(...typeDiagnostics(fresh, docName));
+  }
+
   void connection.sendDiagnostics({ uri: doc.uri, diagnostics });
+}
+
+/**
+ * TypeScript's type errors for a buffer, moved onto the `.rl` source.
+ *
+ * Only over a virtual document: the service must be seeing the emitted
+ * TypeScript, because rl syntax in the raw text is not TypeScript and every
+ * error TS recovers from there would be a lie. Spans that map to compiler
+ * glue are dropped for the same reason — rlc's emissions are the compiler's
+ * responsibility, never something to report at the user (CLAUDE.md, error
+ * layers).
+ */
+function typeDiagnostics(doc: TextDocument, fsPath: string): Diagnostic[] {
+  const mapped = activeVirtual(fsPath, doc.version);
+  if (!mapped) return [];
+
+  const text = doc.getText();
+  const out: Diagnostic[] = [];
+  for (const d of getTsProject().diagnosticsFor(fsPath)) {
+    const span = fromServiceSpan(fsPath, mapped.code, d.start, d.length);
+    if (!span || span.text !== text) continue;
+    // An empty span (an error at a position, not over one) would render as
+    // an invisible squiggle; give it the character it points at.
+    const end = span.end > span.start ? span.end : span.start + 1;
+    out.push({
+      severity: d.warning
+        ? DiagnosticSeverity.Warning
+        : DiagnosticSeverity.Error,
+      range: { start: doc.positionAt(span.start), end: doc.positionAt(end) },
+      message: d.message,
+      code: d.code,
+      source: "ts",
+    });
+  }
+  return out;
 }
 
 function toDiagnostic(doc: TextDocument, d: rlc.RlcDiagnostic): Diagnostic {
