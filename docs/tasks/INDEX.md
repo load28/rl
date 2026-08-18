@@ -60,7 +60,8 @@
 | TASK-050 | 방출 매핑 기반 TS 위임 — 컴파일 출력을 가상 문서로 | 완료 | 2026-08-17 | 2026-08-17 | [TASK-050](./TASK-050-emit-map-virtual-ts.md) |
 | TASK-051 | TypeScript 7 릴리스로 인한 CI 복구 — `--types` 진단과 게이트 고정 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-051](./TASK-051-typescript-7-ci-fix.md) |
 | TASK-052 | AI 코딩 도구용 rl 사용 가이드 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-052](./TASK-052-ai-usage-guide.md) |
+| TASK-053 | AI 가이드 압축 — 파일 사이즈 최소화 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-053](./TASK-053-ai-guide-compression.md) |
 
 ## 다음 태스크 번호
 
-**TASK-053**
+**TASK-054**
