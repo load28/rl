@@ -174,8 +174,25 @@ npm test           # 서버 분석 로직 단위 테스트 (node --test)
 VSCode에서 `editors/vscode` 폴더를 열고 **F5** (Launch Extension)를 누르면
 확장 개발 호스트가 뜹니다. `.rl` 파일을 열어 확인하세요.
 
-패키징(vsix)은 [`@vscode/vsce`](https://github.com/microsoft/vscode-vsce)로:
+### 패키징
+
+[`@vscode/vsce`](https://github.com/microsoft/vscode-vsce)로 vsix를 만듭니다.
+client/·server/가 각자 `package.json`을 갖는 레이아웃이라 `--no-dependencies`
+로 패키징합니다 (`.vscodeignore`가 담을 것을 그대로 결정합니다):
 
 ```sh
-npx @vscode/vsce package
+npm ci && npx tsc -b
+npx @vscode/vsce package --no-dependencies
+```
+
+**패키징 후 반드시 확인할 것** — 언어 서버는 런타임에 TypeScript로 타입을
+검사하므로 TypeScript의 `lib*.d.ts`가 vsix 안에 들어가야 합니다.
+`.vscodeignore`의 `**/*.ts`가 선언 파일까지 걸러내기 때문에, 뒤쪽의
+`!server/node_modules/typescript/lib/lib*.d.ts` 한 줄이 그것들을 되살립니다.
+이게 빠지면 확장은 **뜨긴 하지만 전역 타입이 하나도 없는 채로** 검사해
+멀쩡한 코드에 거짓 에러(예: 튜플 구조 분해에 `TS2488`)를 답니다:
+
+```sh
+npx @vscode/vsce ls --no-dependencies | grep -c "typescript/lib/lib"
+# → 100 (0이면 lib이 빠진 것 — 그 vsix는 배포하면 안 됩니다)
 ```

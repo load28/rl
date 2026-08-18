@@ -66,7 +66,9 @@
 | TASK-056 | 대규모 코드베이스 대비 컴파일러 성능 개선 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-056](./TASK-056-large-codebase-performance.md) |
 | TASK-057 | 타입 에러를 `.rl` 원본 위치로 — `--types` 위치 매핑과 에디터 TS 진단 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-057](./TASK-057-type-errors-at-source.md) |
 | TASK-058 | 에디터 타입 진단 오탐 — lib.d.ts 없는 프로그램이 지어낸 `TS2488` | 완료 | 2026-08-18 | 2026-08-18 | [TASK-058](./TASK-058-editor-type-environment-guard.md) |
+| TASK-059 | VSIX 패키징 검증 — TypeScript `lib*.d.ts` 누락 확정과 절차 문서화 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-059](./TASK-059-vsix-lib-packaging.md) |
+| TASK-060 | 에디터 타입 진단이 워크스페이스 `tsconfig.json`을 반영할지 검토 | 대기 | — | — | [TASK-060](./TASK-060-editor-tsconfig-adoption.md) |
 
 ## 다음 태스크 번호
 
-**TASK-059**
+**TASK-061**

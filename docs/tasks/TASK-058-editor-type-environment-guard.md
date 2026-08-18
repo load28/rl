@@ -147,6 +147,12 @@ CLAUDE.md의 에러 계층 계약("rlc가 방출한 코드 때문에 tsc 에러�
 - **선택과 근거**: (B). `tsc.js`/`tsserver.js`/`typingsInstaller.js` 등
   패키지 용량의 대부분은 확장이 쓰지 않는다. `.vscodeignore`는 뒤에 오는
   패턴이 이기므로 `**/*.ts` 뒤에 둔 `!...lib.*.d.ts`가 정상 동작한다.
+- **정정(TASK-059)**: 이 근거는 실측으로 틀린 것이 확인됐다. `node_modules/**`
+  는 **루트** `node_modules`만 매칭하므로 `server/node_modules/*`는 처음부터
+  제외된 적이 없다 — `tsc.js`/`tsserver.js`도 원래 들어가 있었고, `package.json`
+  과 `lib/typescript.js` 부정 패턴은 no-op이었다. 실제로 lib을 걷어내던 것은
+  `**/*.ts`이며, 패턴도 `lib.*.d.ts`가 아니라 `lib*.d.ts`여야 한다
+  (`lib.d.ts` 누락). [TASK-059](./TASK-059-vsix-lib-packaging.md)에서 교정.
 
 ## 작업 내역
 
