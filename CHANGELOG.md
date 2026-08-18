@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- TypeScript 7(네이티브 컴파일러)만 해석되는 환경에서 `rlc --types`가
+  원인 불명의 `TypeError` 스택 대신 명확한 안내를 낸다 — TS 7 패키지에는
+  JS 컴파일러 API가 없어 `--types`가 구동할 수 없으므로, API 없는 설치는
+  건너뛰고(프로젝트에 7, 전역에 6이 있으면 6으로 동작) 끝내 없으면
+  `typescript@6` 설치를 안내한다. CI 게이트는 `typescript@6`으로 고정.
+  (TASK-051)
+
 ### Added
 
 - 방출 매핑 기반 TS 위임: `rlc --emit-map`(신규, 공개 API `emit_mapped()`)이

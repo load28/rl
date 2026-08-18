@@ -116,8 +116,14 @@ rlc --types -w src/       # 감시하며 갱신
 **어떤 소스도 복사되지 않고 중간 트리도 만들지 않습니다.** 그 `.ts` 파일들도
 프로그램에 참여하므로 그쪽 타입 에러도 함께 보고됩니다.
 
-- TypeScript는 프로젝트의 `node_modules`에서 해석합니다. 없으면
+- TypeScript는 프로젝트의 `node_modules`에서 해석합니다 (없으면 PATH의
+  `tsc`가 속한 패키지). 없으면
   `rlc: typescript not found — install it (npm i -D typescript)`.
+- **TypeScript 5·6이 필요합니다.** TypeScript 7은 네이티브(Go) 컴파일러라
+  npm 패키지에 JS 컴파일러 API가 없어 `--types`가 구동할 수 없습니다 —
+  7만 해석되는 환경에서는 API가 있는 버전을 찾을 때까지 건너뛰고, 끝내
+  없으면 `rlc: the resolved typescript has no JS compiler API ...
+  (npm i -D typescript@6)`로 안내합니다.
 - 타입 에러가 있어도 선언은 방출되므로 사이드카는 갱신되고 종료 코드만 1입니다.
 
 소비 측 `tsconfig.json`은 두 가지만 선언하면 됩니다.

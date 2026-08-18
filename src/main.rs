@@ -1226,6 +1226,14 @@ fn run_types_host(
         let detail = detail.trim();
         if output.status.code() == Some(2) {
             eprintln!("rlc: typescript not found — install it (npm i -D typescript)");
+        } else if output.status.code() == Some(4) {
+            // TypeScript 7 is the native compiler: `require("typescript")`
+            // exposes no JS compiler API, which --types drives directly.
+            eprintln!(
+                "rlc: the resolved typescript has no JS compiler API \
+                 (TypeScript 7's native compiler) — --types needs \
+                 typescript 5 or 6 (npm i -D typescript@6)"
+            );
         } else {
             eprintln!("rlc: declaration emit failed: {detail}");
         }

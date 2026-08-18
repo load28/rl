@@ -29,8 +29,12 @@ jobs:
         with:
           node-version: "22"
 
+      # Pinned to major 6: TypeScript 7 is the native compiler whose npm
+      # package has no JS compiler API, which `rlc --types` drives directly
+      # (types_host.mjs). The gate must exercise the supported majors — the
+      # TS 7 situation is covered by a clear rlc diagnostic + test skips.
       - name: Install TypeScript
-        run: npm install -g typescript
+        run: npm install -g typescript@6
 
       - name: Check formatting
         run: cargo fmt --check

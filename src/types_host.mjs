@@ -22,7 +22,8 @@
  *     diagnostics: [{ file, line, col, code, message }] }
  *
  * Exit codes: 0 = ran (type errors, if any, are in `diagnostics`),
- * 2 = TypeScript not installed, 3 = malformed job.
+ * 2 = TypeScript not installed, 3 = malformed job, 4 = the only resolvable
+ * TypeScript has no JS compiler API (the TypeScript 7 native compiler).
  * ----------------------------------------------------------------------- */
 import { createRequire } from "node:module";
 import * as fs from "node:fs";
@@ -151,15 +152,32 @@ async function readStdin() {
  * Falls back to the package that owns a `tsc` on PATH, which is how a
  * globally installed TypeScript is found — the same setups the previous
  * tsc-binary lookup supported.
+ *
+ * TypeScript 7 is the native (Go) compiler: its npm package exposes no JS
+ * compiler API (`require("typescript")` exports only `version`), so this
+ * host cannot drive it. Such a package is skipped in favor of a usable one
+ * further down the list; if nothing usable exists, exit 4 tells rlc to
+ * explain the situation instead of crashing on a missing function.
  */
 function resolveTypescript() {
   const bases = [path.join(job.cwd, "index.js"), ...globalTypescriptBases()];
+  let apiless = null;
   for (const base of bases) {
     try {
-      return createRequire(base)("typescript");
+      const mod = createRequire(base)("typescript");
+      if (typeof mod.convertCompilerOptionsFromJson === "function") {
+        return mod;
+      }
+      apiless ??= mod?.version ?? "unknown version";
     } catch {
       // try the next base
     }
+  }
+  if (apiless !== null) {
+    process.stderr.write(
+      `types_host: typescript ${apiless} has no JS compiler API\n`,
+    );
+    process.exit(4);
   }
   return null;
 }
