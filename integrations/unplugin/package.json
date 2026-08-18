@@ -6,24 +6,56 @@
   "type": "module",
   "main": "./index.js",
   "exports": {
-    ".": "./index.js",
-    "./vite": "./vite.js",
-    "./rollup": "./rollup.js",
-    "./rolldown": "./rolldown.js",
-    "./webpack": "./webpack.js",
-    "./rspack": "./rspack.js",
-    "./esbuild": "./esbuild.js",
-    "./farm": "./farm.js"
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./vite": {
+      "types": "./vite.d.ts",
+      "default": "./vite.js"
+    },
+    "./rollup": {
+      "types": "./rollup.d.ts",
+      "default": "./rollup.js"
+    },
+    "./rolldown": {
+      "types": "./rolldown.d.ts",
+      "default": "./rolldown.js"
+    },
+    "./webpack": {
+      "types": "./webpack.d.ts",
+      "default": "./webpack.js"
+    },
+    "./rspack": {
+      "types": "./rspack.d.ts",
+      "default": "./rspack.js"
+    },
+    "./esbuild": {
+      "types": "./esbuild.d.ts",
+      "default": "./esbuild.js"
+    },
+    "./farm": {
+      "types": "./farm.d.ts",
+      "default": "./farm.js"
+    }
   },
   "files": [
     "index.js",
+    "index.d.ts",
     "vite.js",
+    "vite.d.ts",
     "rollup.js",
+    "rollup.d.ts",
     "rolldown.js",
+    "rolldown.d.ts",
     "webpack.js",
+    "webpack.d.ts",
     "rspack.js",
+    "rspack.d.ts",
     "esbuild.js",
+    "esbuild.d.ts",
     "farm.js",
+    "farm.d.ts",
     "README.md"
   ],
   "repository": {
@@ -31,11 +63,20 @@
     "url": "https://github.com/load28/rl",
     "directory": "integrations/unplugin"
   },
-  "keywords": ["unplugin", "vite-plugin", "rollup-plugin", "webpack-plugin", "esbuild-plugin", "rl", "typescript"],
+  "keywords": [
+    "unplugin",
+    "vite-plugin",
+    "rollup-plugin",
+    "webpack-plugin",
+    "esbuild-plugin",
+    "rl",
+    "typescript"
+  ],
   "dependencies": {
     "unplugin": "^2.1.0"
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "types": "./index.d.ts"
 }

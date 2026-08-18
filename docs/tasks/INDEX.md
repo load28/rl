@@ -74,7 +74,8 @@
 | TASK-064 | `result` 계산 블록 — Result 바인딩 `<-` | 완료 | 2026-08-18 | 2026-08-18 | [TASK-064](./TASK-064-result-computation-block.md) |
 | TASK-065 | `Result` 타입 모델 개선 — `Ok<T>` / `Err<E>` 변종 타입 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-065](./TASK-065-result-variant-types.md) |
 | TASK-066 | `Result` 에러 타입 합성 — `andThen`/`andThenP`의 유니언 누적 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-066](./TASK-066-result-error-union-composition.md) |
+| TASK-067 | unplugin-rl 타입 선언 — 소비자의 `vite.config.ts` 타입 검사 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-067](./TASK-067-unplugin-type-declarations.md) |
 
 ## 다음 태스크 번호
 
-**TASK-067**
+**TASK-068**

@@ -64,6 +64,9 @@ id에 `.ts`를 붙이는 이유는 **호스트의 TypeScript 처리에 그대로
 | `compiler` | 설치된 `rl-lang`의 바이너리, 없으면 `"rlc"` | rlc 실행 파일 경로 |
 | `verify` | `true` | `false`면 `--no-verify`를 넘겨 방출물 자가 검사를 생략합니다 |
 
+타입 선언(`index.d.ts`와 서브패스별 `.d.ts`)을 함께 싣습니다 — 소비자가
+`vite.config.ts`를 타입 검사에 넣어도 `rl()`의 옵션이 그대로 검사됩니다.
+
 ## 타입은 별도입니다
 
 번들러 플러그인은 **런타임만** 해결합니다. `.ts` 파일이 `.rl`을 import할 때
