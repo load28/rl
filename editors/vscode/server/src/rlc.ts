@@ -3,7 +3,11 @@
  * file and `rlc --check` is run on it, so editor errors are byte-for-byte
  * the compiler's own (`file:line:col: message` — docs/reference/errors.md).
  * ----------------------------------------------------------------------- */
-import { execFile } from "child_process";
+import {
+  execFile,
+  execFileSync,
+  ExecFileSyncOptionsWithStringEncoding,
+} from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
@@ -269,4 +273,81 @@ export function parseStderr(stderr: string, file: string): RlcDiagnostic[] {
     if (m) diagnostics.push({ line: 0, col: 0, message: m[1] });
   }
   return diagnostics;
+}
+
+/* --------------------------------------------------------------------------
+ * Synchronous compiler calls for the TypeScript language-service host
+ * (TASK-055). The host's `readFile`/`fileExists` are synchronous, so the two
+ * things it needs from the compiler — the standard library module and the
+ * emitted TypeScript of an imported `.rl` file — are produced with
+ * `execFileSync` and cached. Both are keyed so a call happens at most once
+ * per compiler path (std) or per file mtime (modules).
+ * -------------------------------------------------------------------- */
+
+const EXEC_SYNC_OPTIONS: ExecFileSyncOptionsWithStringEncoding = {
+  encoding: "utf8",
+  timeout: 15000,
+  maxBuffer: 64 * 1024 * 1024,
+  // stderr stays out of the server's own stderr; only stdout is read.
+  stdio: ["ignore", "pipe", "ignore"],
+};
+
+const stdModules = new Map<string, string | null>();
+
+/**
+ * The standard library module (`rlc --emit-std`) materialized in the temp
+ * directory, so `"@rl/std"` resolves to a real file even in a project that
+ * has never run `rlc --types`. Null when the compiler is missing or
+ * predates `--emit-std` — the caller then leaves the specifier unresolved.
+ */
+export function stdModulePath(compiler: string): string | null {
+  const cached = stdModules.get(compiler);
+  if (cached !== undefined) return cached;
+
+  let resolved: string | null = null;
+  try {
+    const code = String(
+      execFileSync(compiler, ["--emit-std"], EXEC_SYNC_OPTIONS),
+    );
+    if (code.trim() !== "") {
+      const hash = crypto.createHash("sha1").update(compiler).digest("hex");
+      const file = path.join(tempDir(), `std-${hash.slice(0, 8)}.ts`);
+      fs.writeFileSync(file, code);
+      resolved = file;
+    }
+  } catch {
+    resolved = null;
+  }
+  stdModules.set(compiler, resolved);
+  return resolved;
+}
+
+/**
+ * `rlc --emit-map` for an `.rl` file on disk — an imported module the editor
+ * does not have open. Serving its emitted TypeScript (instead of the raw
+ * source, which TypeScript can only error-recover through) is what makes an
+ * imported rl enum a tagged union rather than a misparsed TS `enum`.
+ * Null when the compiler is missing, too old, or the output is unparseable.
+ */
+export function runEmitMapFileSync(
+  compiler: string,
+  file: string,
+): EmitMapResult | null {
+  let stdout: string;
+  try {
+    stdout = String(
+      execFileSync(compiler, ["--emit-map", file], EXEC_SYNC_OPTIONS),
+    );
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stdout) as (EmitMapResult & { file: string })[];
+    const entry = parsed[0];
+    return entry && typeof entry.code === "string"
+      ? { code: entry.code, mappings: entry.mappings ?? [] }
+      : null;
+  } catch {
+    return null;
+  }
 }

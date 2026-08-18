@@ -10,8 +10,10 @@
  * compiler (`rlc --check`) stays the single source of truth for errors.
  *
  * Relative `.rl` specifiers are resolved by a custom module resolver that
- * points them at the .rl file (served as TS content); everything else goes
- * through standard TypeScript resolution.
+ * points them at the .rl file (served as TS content); `"@rl/std"` falls back
+ * to the compiler's own standard library module when the project does not
+ * map the specifier itself (TASK-055); everything else goes through standard
+ * TypeScript resolution.
  * ----------------------------------------------------------------------- */
 import * as fs from "fs";
 import * as path from "path";
@@ -65,6 +67,9 @@ export interface TsTypeInfo {
   declFile: string | null;
 }
 
+/** The standard library's bare specifier (docs/reference/std.md). */
+const STD_SPECIFIER = "@rl/std";
+
 const COMPILER_OPTIONS: ts.CompilerOptions = {
   // Internal but load-bearing (the standard trick of embedded-TS tooling —
   // VS Code itself, Volar, Svelte): without it the program silently drops
@@ -81,9 +86,14 @@ export class TsProject {
   private readonly service: ts.LanguageService;
 
   constructor(
+    /** The text the server serves for a file, if it serves one — an open
+     * buffer or the emitted TypeScript of an `.rl` module on disk. */
     private readonly getOpenDoc: (fileName: string) => OpenDoc | null,
     private readonly getOpenFileNames: () => string[],
     rootDir: string = process.cwd(),
+    /** Path of the standard library module to fall back to when the project
+     * does not resolve `"@rl/std"` itself. Null disables the fallback. */
+    private readonly getStdModule: () => string | null = () => null,
   ) {
     const readFile = (fileName: string): string | undefined => {
       const open = this.getOpenDoc(fileName);
@@ -132,6 +142,29 @@ export class TsProject {
       resolveModuleNameLiterals: (literals, containingFile, _, options) =>
         literals.map((literal) => {
           const spec = literal.text;
+          if (spec === STD_SPECIFIER) {
+            // A project that maps the specifier itself (tsconfig `paths` to
+            // `rlc --types` output, or a package on disk) keeps its own
+            // module; otherwise the compiler's copy stands in, so a buffer
+            // that imports the std types is never inferred as `any` just
+            // because the project has no mapping yet.
+            const own = ts.resolveModuleName(
+              spec,
+              containingFile,
+              options,
+              resolutionHost,
+            );
+            if (own.resolvedModule) return own;
+            const builtin = this.getStdModule();
+            if (!builtin) return { resolvedModule: undefined };
+            return {
+              resolvedModule: {
+                resolvedFileName: builtin,
+                extension: ts.Extension.Ts,
+                isExternalLibraryImport: false,
+              },
+            };
+          }
           const relative = spec.startsWith("./") || spec.startsWith("../");
           if (relative && spec.endsWith(".rl")) {
             const resolved = path.resolve(path.dirname(containingFile), spec);

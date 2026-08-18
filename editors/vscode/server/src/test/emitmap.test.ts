@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { runEmitMap } from "../rlc";
+import { runEmitMap, runEmitMapFileSync, stdModulePath } from "../rlc";
 import { TsProject } from "../tsproject";
 import { MappedDoc } from "../virtual";
 
@@ -112,5 +112,151 @@ test(
     const defs = ts.definitionsAt(file, at!);
     assert.ok(defs.length > 0, "expected a definition for Math");
     assert.ok(defs[0].fileName.endsWith(".d.ts"));
+  },
+);
+
+/* --------------------------------------------------------------------------
+ * TASK-055: the std module and imported `.rl` modules must reach the
+ * language service with real types. Both used to arrive as `any` — the bare
+ * `"@rl/std"` specifier resolved nowhere, and an imported `.rl` file was
+ * served as raw source TypeScript can only error-recover through.
+ * -------------------------------------------------------------------- */
+
+const PIPE_SOURCE = [
+  'import { Result } from "@rl/std";',
+  "",
+  "declare function tokenize(s: string): Result<string[], string>;",
+  "declare function parse(t: string[]): Result<number, string>;",
+  "",
+  "export function calculate(input: string): Result<number, string> {",
+  "  return input",
+  "    |> .trim()",
+  "    |> tokenize",
+  "    |> Result.andThenP(parse);",
+  "}",
+  "",
+].join("\n");
+
+/** A buffer served as a virtual document, with the std fallback wired in
+ * exactly as the server wires it. */
+async function stdProject(source: string): Promise<{
+  file: string;
+  mapped: MappedDoc;
+  ts: TsProject;
+}> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-std-test-"));
+  const file = path.join(dir, "calc.rl");
+  fs.writeFileSync(file, source);
+  const result = await runEmitMap(COMPILER, source, file);
+  assert.ok(result, "rlc --emit-map failed");
+  const mapped = new MappedDoc(source, result!.code, result!.mappings);
+  const ts = new TsProject(
+    (fileName) =>
+      fileName === file ? { text: mapped.code, version: "1:emitted" } : null,
+    () => [file],
+    dir,
+    () => stdModulePath(COMPILER),
+  );
+  return { file, mapped, ts };
+}
+
+test("a pipeline step over the std module is not `any`", { skip }, async () => {
+  const { file, mapped, ts } = await stdProject(PIPE_SOURCE);
+  const src = PIPE_SOURCE.indexOf("andThenP");
+  const at = mapped.srcToOut(src);
+  assert.notEqual(at, null, "pipeline step must be mapped");
+  const info = ts.quickInfoAt(file, at!);
+  assert.ok(info, "expected quick info");
+  assert.ok(
+    info!.signature.includes("Result<number, string>"),
+    `signature was: ${info!.signature}`,
+  );
+});
+
+test(
+  "a postfix pipeline step keeps its receiver's type",
+  { skip },
+  async () => {
+    const { file, mapped, ts } = await stdProject(PIPE_SOURCE);
+    const src = PIPE_SOURCE.indexOf("trim");
+    const at = mapped.srcToOut(src);
+    assert.notEqual(at, null, "postfix step must be mapped");
+    const info = ts.quickInfoAt(file, at!);
+    assert.ok(info, "expected quick info");
+    assert.ok(
+      info!.signature.includes("String.trim(): string"),
+      `signature was: ${info!.signature}`,
+    );
+  },
+);
+
+const IMPORTED_SHAPES = [
+  "export enum Shape {",
+  "  Circle(radius: number),",
+  "  Rect(w: number, h: number),",
+  "}",
+  "",
+].join("\n");
+
+const IMPORTER = [
+  'import { Shape } from "./shapes.rl";',
+  "",
+  "declare function getShape(): Shape;",
+  "",
+  "export const area = match (getShape()) {",
+  "  Circle(radius) => Math.PI * radius * radius,",
+  "  Rect(w, h) => w * h,",
+  "};",
+  "",
+].join("\n");
+
+test(
+  "an imported .rl module is served emitted, not raw",
+  { skip },
+  async () => {
+    // The importer is the open buffer; `shapes.rl` is only on disk, so it
+    // reaches the service through the synchronous compile the server does
+    // for imported modules. Served raw, TypeScript reads `enum Shape` as a
+    // TS enum and the arm bindings lose their types.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-import-test-"));
+    const shapes = path.join(dir, "shapes.rl");
+    const main = path.join(dir, "main.rl");
+    fs.writeFileSync(shapes, IMPORTED_SHAPES);
+    fs.writeFileSync(main, IMPORTER);
+
+    const result = await runEmitMap(COMPILER, IMPORTER, main);
+    assert.ok(result, "rlc --emit-map failed");
+    const mapped = new MappedDoc(IMPORTER, result!.code, result!.mappings);
+    const onDisk = runEmitMapFileSync(COMPILER, shapes);
+    assert.ok(onDisk, "rlc --emit-map on the imported module failed");
+    const diskDoc = new MappedDoc(
+      IMPORTED_SHAPES,
+      onDisk!.code,
+      onDisk!.mappings,
+    );
+
+    const ts = new TsProject(
+      (fileName) => {
+        if (fileName === main)
+          return { text: mapped.code, version: "1:emitted" };
+        if (fileName === shapes) {
+          return { text: diskDoc.code, version: "disk-1:emitted" };
+        }
+        return null;
+      },
+      () => [main],
+      dir,
+      () => stdModulePath(COMPILER),
+    );
+
+    const src = IMPORTER.indexOf("radius * radius");
+    const at = mapped.srcToOut(src);
+    assert.notEqual(at, null, "arm body must be mapped");
+    const info = ts.quickInfoAt(main, at!);
+    assert.ok(info, "expected quick info");
+    assert.ok(
+      info!.signature.includes("radius: number"),
+      `signature was: ${info!.signature}`,
+    );
   },
 );
