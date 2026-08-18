@@ -62,7 +62,11 @@ Tooling options (bundler plugins, editors):
                         compiles nothing (--types runs this step for you)
   --symbols             print rl enum declarations (with positions) and the
                         direct .rl imports of each input as JSON; compiles
-                        nothing (for language tooling)"
+                        nothing (for language tooling)
+  --emit-map            print each input's emitted TypeScript plus source<->
+                        output byte mappings as JSON; parse + emit only (no
+                        rl-level checks, .rl specifiers untouched) — the
+                        editor's virtual-document feed (for language tooling)"
     );
 }
 
@@ -166,6 +170,47 @@ fn symbols_mode(jobs: &[Job]) -> ExitCode {
         entry.push_str(&imports.join(","));
         entry.push_str("]}");
         entries.push(entry);
+    }
+    println!("[{}]", entries.join(","));
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `--emit-map`: prints, as a JSON array on stdout, each input file's
+/// emitted TypeScript and the source<->output byte mappings of every chunk
+/// copied verbatim from the source (`rlc::emit_mapped`). Parse + emit only —
+/// no rl-level checks, no verification, `.rl`/`@rl/std` specifiers left
+/// untouched — so a buffer mid-edit still emits. This is the feed for the
+/// language server's virtual TypeScript documents (TASK-050).
+fn emit_map_mode(jobs: &[Job]) -> ExitCode {
+    let mut entries: Vec<String> = Vec::new();
+    let mut failed = false;
+    for job in jobs {
+        let filename = job.file.display().to_string();
+        let source = match fs::read_to_string(&job.file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("rlc: {filename}: {e}");
+                failed = true;
+                continue;
+            }
+        };
+        let mapped = rlc::emit_mapped(&source);
+        let mappings = mapped
+            .mappings
+            .iter()
+            .map(|m| format!("{{\"src\":{},\"out\":{},\"len\":{}}}", m.src, m.out, m.len))
+            .collect::<Vec<_>>()
+            .join(",");
+        entries.push(format!(
+            "{{\"file\":{},\"code\":{},\"mappings\":[{}]}}",
+            json_str(&filename),
+            json_str(&mapped.code),
+            mappings
+        ));
     }
     println!("[{}]", entries.join(","));
     if failed {
@@ -420,6 +465,7 @@ fn main() -> ExitCode {
     let mut banner = true;
     let mut verify = true;
     let mut symbols = false;
+    let mut emit_map = false;
     let mut sidecar_dir: Option<PathBuf> = None;
     let mut node: Option<PathBuf> = None;
     let mut rewrite_imports = ImportRewrite::default();
@@ -440,6 +486,7 @@ fn main() -> ExitCode {
             "--check" => check = true,
             "--types" => types = true,
             "--symbols" => symbols = true,
+            "--emit-map" => emit_map = true,
             "--no-banner" => banner = false,
             "--no-verify" => verify = false,
             "--emit-std" => emit_std = true,
@@ -506,14 +553,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if types && (print || check || symbols || sidecar_dir.is_some()) {
-        eprintln!("rlc: --types does not combine with -p, --check, --symbols, or --sidecar");
+    if types && (print || check || symbols || emit_map || sidecar_dir.is_some()) {
+        eprintln!(
+            "rlc: --types does not combine with -p, --check, --symbols, --emit-map, or --sidecar"
+        );
         return ExitCode::FAILURE;
     }
 
     // Tooling modes stay .rl-only; the compile modes carry hand-written
     // TypeScript along so the output tree is complete.
-    let include_ts = !symbols && sidecar_dir.is_none();
+    let include_ts = !symbols && !emit_map && sidecar_dir.is_none();
 
     if types {
         let opts = TypesOptions {
@@ -543,6 +592,10 @@ fn main() -> ExitCode {
 
     if symbols {
         return symbols_mode(&jobs);
+    }
+
+    if emit_map {
+        return emit_map_mode(&jobs);
     }
 
     if let Some(dir) = &sidecar_dir {
@@ -1173,6 +1226,14 @@ fn run_types_host(
         let detail = detail.trim();
         if output.status.code() == Some(2) {
             eprintln!("rlc: typescript not found — install it (npm i -D typescript)");
+        } else if output.status.code() == Some(4) {
+            // TypeScript 7 is the native compiler: `require("typescript")`
+            // exposes no JS compiler API, which --types drives directly.
+            eprintln!(
+                "rlc: the resolved typescript has no JS compiler API \
+                 (TypeScript 7's native compiler) — --types needs \
+                 typescript 5 or 6 (npm i -D typescript@6)"
+            );
         } else {
             eprintln!("rlc: declaration emit failed: {detail}");
         }

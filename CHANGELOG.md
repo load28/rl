@@ -6,7 +6,26 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- TypeScript 7(네이티브 컴파일러)만 해석되는 환경에서 `rlc --types`가
+  원인 불명의 `TypeError` 스택 대신 명확한 안내를 낸다 — TS 7 패키지에는
+  JS 컴파일러 API가 없어 `--types`가 구동할 수 없으므로, API 없는 설치는
+  건너뛰고(프로젝트에 7, 전역에 6이 있으면 6으로 동작) 끝내 없으면
+  `typescript@6` 설치를 안내한다. CI 게이트는 `typescript@6`으로 고정.
+  (TASK-051)
+
 ### Added
+
+- 방출 매핑 기반 TS 위임: `rlc --emit-map`(신규, 공개 API `emit_mapped()`)이
+  방출 TypeScript와 원본↔출력 바이트 매핑을 내고 — 파싱+방출만 수행해
+  편집 중인 버퍼도 항상 방출 — VSCode 언어 서버가 이를 **가상 TypeScript
+  문서**로 TS 언어 서비스에 서빙한다. 방출물이 순수 TS이므로 match 암
+  본문·스크루티니·`try`/`let-else`/`if let` 식·파이프라인 스텝 내부에서도
+  호버·자동완성·정의 이동·참조·이름 변경이 온전한 타입 추론으로 동작하고,
+  match 암 자동완성은 스크루티니의 TS 추론 타입으로 대상 enum을 특정한다
+  (구조적 추론 실패 시, 선언 파일 교차 검증). 컴파일러가 없거나 방출이
+  버퍼를 못 따라온 순간에는 종전의 원문 서빙으로 자동 폴백한다. (TASK-050)
 
 - npm 패키징: `npm install --save-dev rl-lang`으로 rlc가 프리빌트
   바이너리로 설치된다 (bin `rlc`, esbuild/swc 방식의 플랫폼 패키지

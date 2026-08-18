@@ -808,6 +808,63 @@ fn global_typescript_resolvable() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a TypeScript with a **JS compiler API** resolves — what `--types`
+/// actually needs. TypeScript 7 is the native compiler: its package exposes
+/// no JS API, so a machine where only TS 7 is reachable must skip the
+/// `--types` success tests (rlc reports a clear diagnostic there instead).
+/// Mirrors the resolution order of `types_host.mjs`: plain `require`, then
+/// the package that owns each `tsc` on PATH.
+fn usable_typescript_for_types() -> bool {
+    const API_CHECK: &str = "if (typeof require(\"typescript\")\
+        .convertCompilerOptionsFromJson !== \"function\") process.exit(1);";
+    let dir = tmpdir();
+    let via_require = Command::new("node")
+        .current_dir(&dir)
+        .args(["-e", API_CHECK])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    if via_require {
+        return true;
+    }
+
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for entry in std::env::split_paths(&path) {
+        for name in ["tsc", "tsc.cmd"] {
+            let Ok(base) = fs::canonicalize(entry.join(name)) else {
+                continue;
+            };
+            let check = "const { createRequire } = require(\"node:module\");\
+                const ts = createRequire(process.argv[1])(\"typescript\");\
+                if (typeof ts.convertCompilerOptionsFromJson !== \"function\") process.exit(1);";
+            let ok = Command::new("node")
+                .args(["-e", check])
+                .arg(&base)
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false);
+            if ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Skip a `--types` success test when no usable (JS-API) TypeScript exists.
+macro_rules! require_types_typescript {
+    () => {
+        if !usable_typescript_for_types() {
+            eprintln!(
+                "skipping: no TypeScript with a JS compiler API (--types needs typescript 5/6)"
+            );
+            return;
+        }
+    };
+}
+
 #[test]
 fn cli_checks_exhaustiveness_across_rl_imports() {
     let dir = tmpdir();
@@ -1074,6 +1131,7 @@ fn cli_refuses_to_overwrite_a_pass_through_input() {
 #[test]
 fn cli_types_leaves_nothing_but_the_sidecars() {
     require_toolchain!();
+    require_types_typescript!();
     let dir = tmpdir();
     write_consumer_tree(&dir);
 
@@ -1106,6 +1164,7 @@ fn cli_types_leaves_nothing_but_the_sidecars() {
 #[test]
 fn cli_types_reports_type_errors_but_keeps_the_sidecars_fresh() {
     require_toolchain!();
+    require_types_typescript!();
     let dir = tmpdir();
     write_consumer_tree(&dir);
     // A type error in the consumer, not an rl-level one: declarations are
@@ -1148,6 +1207,7 @@ fn cli_types_without_typescript_says_so() {
 #[test]
 fn cli_types_sidecars_typecheck_the_source_tree() {
     require_toolchain!();
+    require_types_typescript!();
     let dir = tmpdir();
     write_consumer_tree(&dir);
 

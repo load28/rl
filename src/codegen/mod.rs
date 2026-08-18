@@ -9,26 +9,33 @@
 //! The emitted code is plain TypeScript with no type-level tricks; the code
 //! shapes are normative and documented in `docs/reference/language.md`.
 //!
+//! Emission assembles a [`rope::Rope`] so every source-copied chunk keeps
+//! its source offset; [`emit`] discards the resulting mappings, while
+//! [`emit_with_map`] returns them for language tooling (`--emit-map`).
+//!
 //! Module layout: this file owns program/template emission; [`enums`] emits
 //! `enum` declarations (union type + constructor object); [`matches`] emits
 //! `match` expressions (switch IIFE).
 
 mod enums;
 mod matches;
+mod rope;
 
 use std::cell::Cell;
 
+use crate::EmitMapping;
 use crate::ImportRewrite;
 use crate::ast::*;
+use rope::Rope;
 
 /// A trailing line comment would swallow whatever codegen appends on the
 /// same line — rescue it with a newline (same rule as match arm bodies).
-fn guard_line_comment(text: &str) -> String {
-    if text.rsplit('\n').next().unwrap_or("").contains("//") {
-        format!("{text}\n")
-    } else {
-        text.to_string()
+fn guard_line_comment(rope: Rope) -> Rope {
+    let mut rope = rope;
+    if rope.text().rsplit('\n').next().unwrap_or("").contains("//") {
+        rope.push_lit("\n");
     }
+    rope
 }
 
 /// Emits a whole program back to TypeScript text.
@@ -38,14 +45,26 @@ pub(crate) fn emit(
     rewrite_imports: ImportRewrite,
     std_import: Option<&str>,
 ) -> String {
+    emit_with_map(program, src, rewrite_imports, std_import).0
+}
+
+/// [`emit`], also returning the source↔output byte mappings of every chunk
+/// copied verbatim from the source (see [`crate::emit_mapped`]).
+pub(crate) fn emit_with_map(
+    program: &Program,
+    src: &str,
+    rewrite_imports: ImportRewrite,
+    std_import: Option<&str>,
+) -> (String, Vec<EmitMapping>) {
     let emitter = Emitter {
+        src,
         bytes: src.as_bytes(),
         rewrite_imports,
         std_import,
         try_seq: Cell::new(0),
         used_pipe: Cell::new(false),
     };
-    let mut code = emitter.emit_program(program);
+    let (mut code, mappings) = emitter.emit_program(program).flatten();
     // The pipeline apply helper, once per file. A function declaration
     // hoists, so appending at the end keeps every original line in place
     // while top-level pipelines still evaluate correctly at module init.
@@ -55,10 +74,11 @@ pub(crate) fn emit(
         }
         code.push_str("function $rl_ap<A, B>(v: A, f: (v: A) => B): B { return f(v); }\n");
     }
-    code
+    (code, mappings)
 }
 
 pub(super) struct Emitter<'a> {
+    src: &'a str,
     pub(super) bytes: &'a [u8],
     rewrite_imports: ImportRewrite,
     /// Replacement for the standard library's bare specifier, if the caller
@@ -74,49 +94,48 @@ pub(super) struct Emitter<'a> {
 }
 
 impl Emitter<'_> {
-    pub(super) fn emit_program(&self, program: &Program) -> String {
-        let mut out: Vec<u8> = Vec::new();
+    /// The source slice of a byte range, with its offset — the unit of
+    /// verbatim copying.
+    fn src_slice(&self, start: usize, end: usize) -> (&str, usize) {
+        (&self.src[start..end], start)
+    }
+
+    pub(super) fn emit_program(&self, program: &Program) -> Rope {
+        let mut out = Rope::new();
         for segment in &program.segments {
             match segment {
                 Segment::Verbatim(span) => {
-                    out.extend_from_slice(&self.bytes[span.start..span.end]);
+                    let (text, at) = self.src_slice(span.start, span.end);
+                    out.push_src(text, at);
                 }
-                Segment::Enum(decl) => out.extend_from_slice(enums::emit_enum(decl).as_bytes()),
-                Segment::Match(expr) => {
-                    out.extend_from_slice(matches::emit_match(self, expr).as_bytes());
-                }
-                Segment::TupleMatch(expr) => {
-                    out.extend_from_slice(matches::emit_tuple_match(self, expr).as_bytes());
-                }
-                Segment::Try(stmt) => out.extend_from_slice(self.emit_try(stmt).as_bytes()),
-                Segment::LetElse(stmt) => {
-                    out.extend_from_slice(self.emit_let_else(stmt).as_bytes());
-                }
-                Segment::IfLet(stmt) => {
-                    out.extend_from_slice(self.emit_if_let(stmt).as_bytes());
-                }
-                Segment::Pipe(pipe) => out.extend_from_slice(self.emit_pipe(pipe).as_bytes()),
+                Segment::Enum(decl) => out.push_lit(enums::emit_enum(decl)),
+                Segment::Match(expr) => out.append(matches::emit_match(self, expr)),
+                Segment::TupleMatch(expr) => out.append(matches::emit_tuple_match(self, expr)),
+                Segment::Try(stmt) => out.append(self.emit_try(stmt)),
+                Segment::LetElse(stmt) => out.append(self.emit_let_else(stmt)),
+                Segment::IfLet(stmt) => out.append(self.emit_if_let(stmt)),
+                Segment::Pipe(pipe) => out.append(self.emit_pipe(pipe)),
                 Segment::RlImport(decl) => self.emit_rl_import(decl.spec, decl.kind, &mut out),
                 Segment::Template(template) => self.emit_template(template, &mut out),
             }
         }
-        // Safe: the output is a recombination of valid UTF-8 slices of the
-        // input plus ASCII text emitted by the compiler.
-        String::from_utf8(out).expect("codegen output is valid UTF-8")
+        out
     }
 
     /// Emits a `try` statement: evaluate once, early-return the `Err` from
     /// the enclosing function, then bind the `Ok` value (declaration form).
     /// Emitted on one line so source lines keep lining up roughly.
-    fn emit_try(&self, stmt: &TryStmt) -> String {
+    fn emit_try(&self, stmt: &TryStmt) -> Rope {
         let n = self.try_seq.get();
         self.try_seq.set(n + 1);
         let tmp = format!("$rl_t{n}");
-        let expr = self.emit_program(&stmt.expr);
-        let expr = expr.trim();
-        let mut code = format!("const {tmp} = ({expr}); if ({tmp}.kind !== \"Ok\") return {tmp};");
+        let expr = self.emit_program(&stmt.expr).trim();
+        let mut code = Rope::new();
+        code.push_lit(format!("const {tmp} = ("));
+        code.append(expr);
+        code.push_lit(format!("); if ({tmp}.kind !== \"Ok\") return {tmp};"));
         if let Some((kw, binding)) = &stmt.decl {
-            code.push_str(&format!(" {kw} {binding} = {tmp}.value;"));
+            code.push_lit(format!(" {kw} {binding} = {tmp}.value;"));
         }
         code
     }
@@ -126,24 +145,24 @@ impl Emitter<'_> {
     /// `try`, emitted on one line into the enclosing scope; the diverging
     /// `else` block is what lets tsc narrow the temporary to the matched
     /// case for the destructuring — no type-level tricks.
-    fn emit_let_else(&self, stmt: &LetElseStmt) -> String {
+    fn emit_let_else(&self, stmt: &LetElseStmt) -> Rope {
         let n = self.try_seq.get();
         self.try_seq.set(n + 1);
         let tmp = format!("$rl_t{n}");
-        let expr = self.emit_program(&stmt.expr);
-        let expr = expr.trim();
-        let body = self.emit_program(&stmt.else_body);
-        let body = body.trim();
+        let expr = self.emit_program(&stmt.expr).trim();
+        let body = self.emit_program(&stmt.else_body).trim();
         // a trailing line comment would swallow the closing brace
-        let nl = if body.rsplit('\n').next().unwrap_or("").contains("//") {
+        let nl = if body.text().rsplit('\n').next().unwrap_or("").contains("//") {
             "\n"
         } else {
             ""
         };
-        let mut code = format!(
-            "const {tmp} = ({expr}); if ({tmp}.kind !== \"{}\") {{ {body}{nl} }}",
-            stmt.tag
-        );
+        let mut code = Rope::new();
+        code.push_lit(format!("const {tmp} = ("));
+        code.append(expr);
+        code.push_lit(format!("); if ({tmp}.kind !== \"{}\") {{ ", stmt.tag));
+        code.append(body);
+        code.push_lit(format!("{nl} }}"));
         if !stmt.bindings.is_empty() {
             let parts = stmt
                 .bindings
@@ -154,7 +173,7 @@ impl Emitter<'_> {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            code.push_str(&format!(" {} {{ {} }} = {tmp};", stmt.kw, parts));
+            code.push_lit(format!(" {} {{ {} }} = {tmp};", stmt.kw, parts));
         }
         code
     }
@@ -165,29 +184,34 @@ impl Emitter<'_> {
     /// the temporary through the condition, so no type tricks. The whole
     /// thing is a block statement (no IIFE, no `return` of its own), which
     /// is why it is valid in any statement position.
-    fn emit_if_let(&self, stmt: &IfLetStmt) -> String {
+    fn emit_if_let(&self, stmt: &IfLetStmt) -> Rope {
         let n = self.try_seq.get();
         self.try_seq.set(n + 1);
         let tmp = format!("$rl_t{n}");
-        let expr = self.emit_program(&stmt.expr);
-        let expr = expr.trim();
+        let expr = self.emit_program(&stmt.expr).trim();
         let (cond, binds) = matches::pattern_conds_binds(&stmt.pattern, &tmp);
-        let body = self.emit_program(&stmt.body);
-        let body = guard_line_comment(body.trim());
-        let mut code = format!("{{ const {tmp} = ({expr}); if ({cond}) {{ {binds}{body} }}");
+        let body = guard_line_comment(self.emit_program(&stmt.body).trim());
+        let mut code = Rope::new();
+        code.push_lit(format!("{{ const {tmp} = ("));
+        code.append(expr);
+        code.push_lit(format!("); if ({cond}) {{ {binds}"));
+        code.append(body);
+        code.push_lit(" }");
         match &stmt.else_part {
             Some(IfLetElse::Block(block)) => {
-                let block = self.emit_program(block);
-                let block = guard_line_comment(block.trim());
-                code.push_str(&format!(" else {{ {block} }}"));
+                let block = guard_line_comment(self.emit_program(block).trim());
+                code.push_lit(" else { ");
+                code.append(block);
+                code.push_lit(" }");
             }
             Some(IfLetElse::IfLet(inner)) => {
                 // the chained statement is itself a block — `else { ... }`
-                code.push_str(&format!(" else {}", self.emit_if_let(inner)));
+                code.push_lit(" else ");
+                code.append(self.emit_if_let(inner));
             }
             None => {}
         }
-        code.push_str(" }");
+        code.push_lit(" }");
         code
     }
 
@@ -198,18 +222,29 @@ impl Emitter<'_> {
     /// Putting each step in argument position is what gives it a contextual
     /// type, so curried combinator steps infer fully (the fp-ts `pipe`
     /// mechanism — see docs/design/pipeline-operator.md §4.1).
-    fn emit_pipe(&self, pipe: &PipeExpr) -> String {
+    fn emit_pipe(&self, pipe: &PipeExpr) -> Rope {
         self.used_pipe.set(true);
-        let head = self.emit_program(&pipe.head);
-        let mut acc = format!("({})", guard_line_comment(head.trim()));
+        let head = guard_line_comment(self.emit_program(&pipe.head).trim());
+        let mut acc = Rope::new();
+        acc.push_lit("(");
+        acc.append(head);
+        acc.push_lit(")");
         for step in &pipe.steps {
-            let body = self.emit_program(&step.body);
-            let body = guard_line_comment(body.trim());
+            let body = guard_line_comment(self.emit_program(&step.body).trim());
+            let mut next = Rope::new();
             if step.postfix {
-                acc = format!("({}){}", acc, body);
+                next.push_lit("(");
+                next.append(acc);
+                next.push_lit(")");
+                next.append(body);
             } else {
-                acc = format!("$rl_ap({}, ({}))", acc, body);
+                next.push_lit("$rl_ap(");
+                next.append(acc);
+                next.push_lit(", (");
+                next.append(body);
+                next.push_lit("))");
             }
+            acc = next;
         }
         acc
     }
@@ -217,50 +252,48 @@ impl Emitter<'_> {
     /// Emits a lifted `.rl` module specifier (quotes included), swapping
     /// the extension per [`ImportRewrite`]. The parser guarantees the span
     /// is a quoted string whose content ends in `.rl`, so the last four
-    /// bytes are `.rl` plus the closing quote.
-    fn emit_rl_import(&self, span: Span, kind: RlSpecifier, out: &mut Vec<u8>) {
-        let spec = &self.bytes[span.start..span.end];
+    /// bytes are `.rl` plus the closing quote. The untouched prefix keeps
+    /// its source mapping even when the extension is rewritten.
+    fn emit_rl_import(&self, span: Span, kind: RlSpecifier, out: &mut Rope) {
+        let (spec, at) = self.src_slice(span.start, span.end);
 
         // The standard library is not on disk until rlc writes it, so its
         // specifier is only rewritten when the caller says where it went.
         if kind == RlSpecifier::Std {
             match self.std_import {
                 Some(path) => {
-                    let quote = spec[0];
-                    out.push(quote);
-                    out.extend_from_slice(path.as_bytes());
-                    out.push(quote);
+                    let quote = &spec[..1];
+                    out.push_lit(format!("{quote}{path}{quote}"));
                 }
-                None => out.extend_from_slice(spec),
+                None => out.push_src(spec, at),
             }
             return;
         }
 
         match self.rewrite_imports {
-            ImportRewrite::Off => out.extend_from_slice(spec),
+            ImportRewrite::Off => out.push_src(spec, at),
             ImportRewrite::Js => {
-                out.extend_from_slice(&spec[..spec.len() - 4]);
-                out.extend_from_slice(b".js");
-                out.push(spec[spec.len() - 1]);
+                out.push_src(&spec[..spec.len() - 4], at);
+                out.push_lit(format!(".js{}", &spec[spec.len() - 1..]));
             }
             ImportRewrite::Ts => {
-                out.extend_from_slice(&spec[..spec.len() - 4]);
-                out.extend_from_slice(b".ts");
-                out.push(spec[spec.len() - 1]);
+                out.push_src(&spec[..spec.len() - 4], at);
+                out.push_lit(format!(".ts{}", &spec[spec.len() - 1..]));
             }
         }
     }
 
-    fn emit_template(&self, template: &Template, out: &mut Vec<u8>) {
+    fn emit_template(&self, template: &Template, out: &mut Rope) {
         for chunk in &template.chunks {
             match chunk {
                 TemplateChunk::Raw(span) => {
-                    out.extend_from_slice(&self.bytes[span.start..span.end]);
+                    let (text, at) = self.src_slice(span.start, span.end);
+                    out.push_src(text, at);
                 }
                 TemplateChunk::Interp(interp) => {
-                    out.extend_from_slice(b"${");
-                    out.extend_from_slice(self.emit_program(interp).as_bytes());
-                    out.push(b'}');
+                    out.push_lit("${");
+                    out.append(self.emit_program(interp));
+                    out.push_lit("}");
                 }
             }
         }

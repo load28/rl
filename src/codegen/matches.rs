@@ -14,6 +14,7 @@
 //! keeps its value semantics.
 
 use super::Emitter;
+use super::rope::Rope;
 use crate::ast::{Arm, Binding, MatchExpr, Pattern, TagPattern, TupleMatchExpr, TuplePattern};
 use crate::scanner::contains_await;
 
@@ -31,7 +32,7 @@ fn arm_has_nested(arm: &Arm) -> bool {
     matches!(&arm.pattern, Pattern::Tags(alts) if alts.iter().any(alt_has_nested))
 }
 
-pub(super) fn emit_match(e: &Emitter, expr: &MatchExpr) -> String {
+pub(super) fn emit_match(e: &Emitter, expr: &MatchExpr) -> Rope {
     let scrutinee = e.emit_program(&expr.scrutinee);
     let is_async = contains_await(e.bytes, expr.scrutinee_span.start, expr.scrutinee_span.end)
         || expr.arms.iter().any(|a| {
@@ -52,13 +53,18 @@ pub(super) fn emit_match(e: &Emitter, expr: &MatchExpr) -> String {
     };
 
     let f = if is_async { "async () => {" } else { "() => {" };
-    let body = format!("({}\n  const $rl_m = ({});\n{}}})()", f, scrutinee, inner);
-
+    let mut body = Rope::new();
     if is_async {
-        format!("(await {})", body)
+        body.push_lit("(await (");
     } else {
-        format!("({})", body)
+        body.push_lit("((");
     }
+    body.push_lit(format!("{f}\n  const $rl_m = ("));
+    body.append(scrutinee);
+    body.push_lit(");\n");
+    body.append(inner);
+    body.push_lit("})())");
+    body
 }
 
 /// The shared destructuring statement of an arm, or `""` when it binds
@@ -136,17 +142,16 @@ fn collect_conds_binds(
     }
 }
 
-/// An expression body's text plus the newline that rescues a trailing line
+/// An expression body's rope plus the newline that rescues a trailing line
 /// comment from swallowing the closing paren.
-fn expr_body(e: &Emitter, arm: &Arm, indent: &str) -> (String, &'static str) {
+fn expr_body(e: &Emitter, arm: &Arm, indent: &str) -> (Rope, &'static str) {
     expr_body_text(e, &arm.body, indent)
 }
 
 /// See [`expr_body`] — shared with tuple arms.
-fn expr_body_text(e: &Emitter, body: &crate::ast::Program, indent: &str) -> (String, &'static str) {
-    let body = e.emit_program(body);
-    let body = body.trim().to_string();
-    let nl = if body.rsplit('\n').next().unwrap_or("").contains("//") {
+fn expr_body_text(e: &Emitter, body: &crate::ast::Program, indent: &str) -> (Rope, &'static str) {
+    let body = e.emit_program(body).trim();
+    let nl = if body.text().rsplit('\n').next().unwrap_or("").contains("//") {
         match indent {
             "    " => "\n    ",
             _ => "\n  ",
@@ -157,8 +162,8 @@ fn expr_body_text(e: &Emitter, body: &crate::ast::Program, indent: &str) -> (Str
     (body, nl)
 }
 
-fn emit_switch(e: &Emitter, expr: &MatchExpr) -> String {
-    let mut cases = String::new();
+fn emit_switch(e: &Emitter, expr: &MatchExpr) -> Rope {
+    let mut cases = Rope::new();
     let mut has_wildcard = false;
     for arm in &expr.arms {
         let label = match &arm.pattern {
@@ -180,31 +185,32 @@ fn emit_switch(e: &Emitter, expr: &MatchExpr) -> String {
         };
 
         if arm.block {
-            let body = e.emit_program(&arm.body);
-            let body = body.trim();
+            let body = e.emit_program(&arm.body).trim();
             // `break` (not `return`) so an arm whose block always returns doesn't
             // widen the match's type with `undefined`; if the block doesn't return,
             // the arm evaluates to undefined, which the inferred type then reflects.
-            cases.push_str(&format!(
-                "    {}: {{ {}{}\n      break; }}\n",
-                label, bind, body
-            ));
+            cases.push_lit(format!("    {}: {{ {}", label, bind));
+            cases.append(body);
+            cases.push_lit("\n      break; }\n");
         } else {
             let (body, nl) = expr_body(e, arm, "    ");
-            cases.push_str(&format!(
-                "    {}: {{ {}return ({}{}); }}\n",
-                label, bind, body, nl
-            ));
+            cases.push_lit(format!("    {}: {{ {}return (", label, bind));
+            cases.append(body);
+            cases.push_lit(format!("{nl}); }}\n"));
         }
     }
 
     if !has_wildcard {
-        cases.push_str(
+        cases.push_lit(
             "    default: { throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m)); }\n",
         );
     }
 
-    format!("  switch ($rl_m.kind) {{\n{}  }}\n", cases)
+    let mut out = Rope::new();
+    out.push_lit("  switch ($rl_m.kind) {\n");
+    out.append(cases);
+    out.push_lit("  }\n");
+    out
 }
 
 /// Tuple match emission: each scrutinee is evaluated once into its own
@@ -213,7 +219,7 @@ fn emit_switch(e: &Emitter, expr: &MatchExpr) -> String {
 /// which is what "guard failed / tuple mismatched, try the next arm" needs.
 /// tsc narrows each temporary through its own `kind` comparison, so the
 /// per-element destructurings need no type tricks.
-pub(super) fn emit_tuple_match(e: &Emitter, expr: &TupleMatchExpr) -> String {
+pub(super) fn emit_tuple_match(e: &Emitter, expr: &TupleMatchExpr) -> Rope {
     let is_async = expr
         .scrutinees
         .iter()
@@ -226,40 +232,21 @@ pub(super) fn emit_tuple_match(e: &Emitter, expr: &TupleMatchExpr) -> String {
         });
 
     let needs_label = expr.arms.iter().any(|a| a.block);
-    let mut inner = String::new();
+    let mut inner = Rope::new();
     if needs_label {
-        inner.push_str("  $rl_b: {\n");
+        inner.push_lit("  $rl_b: {\n");
     }
 
     let mut unconditional = false;
     for arm in &expr.arms {
-        let exit = if arm.block {
-            let body = e.emit_program(&arm.body);
-            let body = body.trim().to_string();
-            format!("{{ {}\n    break $rl_b; }}", body)
-        } else {
-            let (body, nl) = expr_body_text(e, &arm.body, "  ");
-            format!("return ({}{});", body, nl)
-        };
-
-        let exit = match &arm.guard {
-            Some(guard) => {
-                let g = e.emit_program(&guard.expr);
-                let g = g.trim().to_string();
-                let g_nl = if g.rsplit('\n').next().unwrap_or("").contains("//") {
-                    "\n  "
-                } else {
-                    ""
-                };
-                format!("if (({}{})) {}", g, g_nl, exit)
-            }
-            None => exit,
-        };
+        let exit = arm_exit(e, &arm.body, arm.block, &arm.guard, "  ");
 
         match &arm.pattern {
             TuplePattern::Wildcard => {
                 unconditional = true; // a bare `_` arm never has a guard
-                inner.push_str(&format!("  {}\n", exit));
+                inner.push_lit("  ");
+                inner.append(exit);
+                inner.push_lit("\n");
             }
             TuplePattern::Elems(elems) => {
                 let mut conds: Vec<String> = Vec::new();
@@ -289,14 +276,13 @@ pub(super) fn emit_tuple_match(e: &Emitter, expr: &TupleMatchExpr) -> String {
                     if arm.guard.is_none() {
                         unconditional = true;
                     }
-                    inner.push_str(&format!("  {}\n", exit));
+                    inner.push_lit("  ");
+                    inner.append(exit);
+                    inner.push_lit("\n");
                 } else {
-                    inner.push_str(&format!(
-                        "  if ({}) {{ {}{} }}\n",
-                        conds.join(" && "),
-                        bind,
-                        exit
-                    ));
+                    inner.push_lit(format!("  if ({}) {{ {}", conds.join(" && "), bind));
+                    inner.append(exit);
+                    inner.push_lit(" }\n");
                 }
             }
         }
@@ -307,64 +293,88 @@ pub(super) fn emit_tuple_match(e: &Emitter, expr: &TupleMatchExpr) -> String {
             .map(|i| format!("$rl_m{i}"))
             .collect::<Vec<_>>()
             .join(", ");
-        inner.push_str(&format!(
+        inner.push_lit(format!(
             "  throw new Error(\"rl match: unexpected case \" + JSON.stringify([{list}]));\n"
         ));
     }
     if needs_label {
-        inner.push_str("  }\n");
+        inner.push_lit("  }\n");
     }
 
-    let mut header = String::new();
+    let mut header = Rope::new();
     for (i, (_, scrutinee)) in expr.scrutinees.iter().enumerate() {
-        header.push_str(&format!(
-            "\n  const $rl_m{i} = ({});",
-            e.emit_program(scrutinee).trim()
-        ));
+        header.push_lit(format!("\n  const $rl_m{i} = ("));
+        header.append(e.emit_program(scrutinee).trim());
+        header.push_lit(");");
     }
 
     let f = if is_async { "async () => {" } else { "() => {" };
-    let body = format!("({}{}\n{}}})()", f, header, inner);
+    let mut body = Rope::new();
     if is_async {
-        format!("(await {})", body)
+        body.push_lit("(await (");
     } else {
-        format!("({})", body)
+        body.push_lit("((");
+    }
+    body.push_lit(f);
+    body.append(header);
+    body.push_lit("\n");
+    body.append(inner);
+    body.push_lit("})())");
+    body
+}
+
+/// How a selected arm produces the match's value and stops the chain —
+/// shared by the if-chain and tuple emissions, guard wrapping included.
+fn arm_exit(
+    e: &Emitter,
+    body: &crate::ast::Program,
+    block: bool,
+    guard: &Option<crate::ast::GuardExpr>,
+    indent: &str,
+) -> Rope {
+    let mut exit = Rope::new();
+    if block {
+        let body = e.emit_program(body).trim();
+        exit.push_lit("{ ");
+        exit.append(body);
+        exit.push_lit("\n    break $rl_b; }");
+    } else {
+        let (body, nl) = expr_body_text(e, body, indent);
+        exit.push_lit("return (");
+        exit.append(body);
+        exit.push_lit(format!("{nl});"));
+    }
+
+    match guard {
+        Some(guard) => {
+            let g = e.emit_program(&guard.expr).trim();
+            let g_nl = if g.text().rsplit('\n').next().unwrap_or("").contains("//") {
+                "\n  "
+            } else {
+                ""
+            };
+            let mut wrapped = Rope::new();
+            wrapped.push_lit("if ((");
+            wrapped.append(g);
+            wrapped.push_lit(format!("{g_nl})) "));
+            wrapped.append(exit);
+            wrapped
+        }
+        None => exit,
     }
 }
 
-fn emit_if_chain(e: &Emitter, expr: &MatchExpr) -> String {
+fn emit_if_chain(e: &Emitter, expr: &MatchExpr) -> Rope {
     // `break $rl_b` is only needed by block bodies; skip the label otherwise
     let needs_label = expr.arms.iter().any(|a| a.block);
-    let mut out = String::new();
+    let mut out = Rope::new();
     if needs_label {
-        out.push_str("  $rl_b: {\n");
+        out.push_lit("  $rl_b: {\n");
     }
 
     let mut has_wildcard = false;
     for arm in &expr.arms {
-        // how the selected arm produces the match's value and stops the chain
-        let exit = if arm.block {
-            let body = e.emit_program(&arm.body);
-            let body = body.trim().to_string();
-            format!("{{ {}\n    break $rl_b; }}", body)
-        } else {
-            let (body, nl) = expr_body(e, arm, "  ");
-            format!("return ({}{});", body, nl)
-        };
-
-        let exit = match &arm.guard {
-            Some(guard) => {
-                let g = e.emit_program(&guard.expr);
-                let g = g.trim().to_string();
-                let g_nl = if g.rsplit('\n').next().unwrap_or("").contains("//") {
-                    "\n  "
-                } else {
-                    ""
-                };
-                format!("if (({}{})) {}", g, g_nl, exit)
-            }
-            None => exit,
-        };
+        let exit = arm_exit(e, &arm.body, arm.block, &arm.guard, "  ");
 
         match &arm.pattern {
             Pattern::Tags(alts) => {
@@ -379,22 +389,26 @@ fn emit_if_chain(e: &Emitter, expr: &MatchExpr) -> String {
                         .join(" || ");
                     (cond, bind_str(&alts[0].bindings))
                 };
-                out.push_str(&format!("  if ({}) {{ {}{} }}\n", cond, bind, exit));
+                out.push_lit(format!("  if ({}) {{ {}", cond, bind));
+                out.append(exit);
+                out.push_lit(" }\n");
             }
             Pattern::Wildcard => {
                 has_wildcard = true;
-                out.push_str(&format!("  {}\n", exit));
+                out.push_lit("  ");
+                out.append(exit);
+                out.push_lit("\n");
             }
         }
     }
 
     if !has_wildcard {
-        out.push_str(
+        out.push_lit(
             "  throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m));\n",
         );
     }
     if needs_label {
-        out.push_str("  }\n");
+        out.push_lit("  }\n");
     }
     out
 }

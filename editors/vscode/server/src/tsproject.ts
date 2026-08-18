@@ -17,10 +17,12 @@ import * as fs from "fs";
 import * as path from "path";
 import * as ts from "typescript";
 
-/** A file the editor currently has open, served instead of the disk copy. */
+/** A file the editor currently has open, served instead of the disk copy.
+ * `version` may carry a suffix distinguishing raw from virtual (emitted)
+ * serving of the same buffer version, so the service re-reads on switch. */
 export interface OpenDoc {
   text: string;
-  version: number;
+  version: number | string;
 }
 
 /** One definition target, with the target file's text for offset→position
@@ -53,6 +55,14 @@ export interface TsCompletion {
 /** One reference or rename location. */
 export interface TsReference extends TsDefinition {
   isDefinition: boolean;
+}
+
+/** The TypeScript-inferred type at a position (see [`TsProject.typeAt`]):
+ * display name without generic arguments, plus the declaring file of its
+ * symbol when TypeScript knows one. */
+export interface TsTypeInfo {
+  name: string;
+  declFile: string | null;
 }
 
 const COMPILER_OPTIONS: ts.CompilerOptions = {
@@ -260,6 +270,58 @@ export class TsProject {
       });
     }
     return out;
+  }
+
+  /** The TypeScript-inferred type at a UTF-16 offset: its display name
+   * (generic arguments stripped: `Option<string>` → `Option`) and the file
+   * its symbol is declared in. When `within` is given, the type is taken
+   * from the widest expression node contained in that span — the whole
+   * scrutinee expression rather than just the token under the offset.
+   * Never throws — null means no delegated answer. */
+  typeAt(
+    fileName: string,
+    offset: number,
+    within?: { start: number; end: number },
+  ): TsTypeInfo | null {
+    try {
+      const program = this.service.getProgram();
+      if (!program) return null;
+      const sourceFile = program.getSourceFile(fileName);
+      if (!sourceFile) return null;
+      const checker = program.getTypeChecker();
+
+      const deepest = (node: ts.Node): ts.Node | null => {
+        if (offset < node.getStart(sourceFile) || offset >= node.getEnd()) {
+          return null;
+        }
+        for (const child of node.getChildren(sourceFile)) {
+          const hit = deepest(child);
+          if (hit) return hit;
+        }
+        return node;
+      };
+      let node = deepest(sourceFile);
+      if (!node || node === sourceFile) return null;
+      if (within) {
+        let widest = node;
+        for (let p = node.parent; p && p !== sourceFile; p = p.parent) {
+          if (p.getStart(sourceFile) >= within.start && p.getEnd() <= within.end) {
+            widest = p;
+          }
+        }
+        node = widest;
+      }
+
+      const type = checker.getTypeAtLocation(node);
+      let name = checker.typeToString(type);
+      const lt = name.indexOf("<");
+      if (lt > 0) name = name.slice(0, lt);
+      const symbol = type.aliasSymbol ?? type.getSymbol();
+      const decl = symbol?.declarations?.[0];
+      return { name, declFile: decl ? decl.getSourceFile().fileName : null };
+    } catch {
+      return null;
+    }
   }
 
   /** TypeScript's quick-info (hover signature) at a UTF-16 offset. */

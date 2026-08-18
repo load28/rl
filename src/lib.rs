@@ -300,6 +300,55 @@ pub fn enum_symbols(source: &str) -> Vec<EnumSymbol> {
         .collect()
 }
 
+/// One chunk of emitted output copied verbatim from the source: `len` bytes
+/// starting at byte `src` of the source appear at byte `out` of the output.
+/// Produced by [`emit_mapped`]; chunks are non-overlapping in both
+/// coordinate spaces. Compiler-written glue (IIFE scaffolding,
+/// destructurings, enum emissions) has no mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmitMapping {
+    /// Byte offset of the chunk in the source.
+    pub src: usize,
+    /// Byte offset of the chunk in the emitted output.
+    pub out: usize,
+    /// Length of the chunk in bytes (identical in both spaces).
+    pub len: usize,
+}
+
+/// The result of [`emit_mapped`]: the emitted TypeScript and the
+/// source↔output mappings of every verbatim-copied chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappedEmit {
+    /// The emitted TypeScript.
+    pub code: String,
+    /// Source↔output mappings, ordered by output offset.
+    pub mappings: Vec<EmitMapping>,
+}
+
+/// Emits `source` for language tooling: structural parse + code emission
+/// only, with source↔output byte mappings for every chunk copied verbatim
+/// (passthrough segments, match scrutinees and arm bodies, `try`/let-else/
+/// `if let` expressions, pipeline steps, template chunks).
+///
+/// Unlike [`compile`] this is **infallible**: semantic checks and output
+/// verification are skipped, so a buffer mid-edit (with, say, a
+/// non-exhaustive match) still emits — diagnostics remain [`compile`]/`rlc
+/// --check`'s job. Relative `.rl` import specifiers and `"@rl/std"` are
+/// left untouched ([`ImportRewrite::Off`] semantics): the consumer — an
+/// editor serving the output as a virtual TypeScript document — resolves
+/// them itself. Corresponds to the CLI's `--emit-map`.
+///
+/// ```
+/// let m = rlc::emit_mapped("const n: number = 1;\n");
+/// assert_eq!(m.code, "const n: number = 1;\n");
+/// assert_eq!(m.mappings, [rlc::EmitMapping { src: 0, out: 0, len: 21 }]);
+/// ```
+pub fn emit_mapped(source: &str) -> MappedEmit {
+    let program = parser::parse(source);
+    let (code, mappings) = codegen::emit_with_map(&program, source, ImportRewrite::Off, None);
+    MappedEmit { code, mappings }
+}
+
 /// Converts a byte offset into `source` to a 1-based `(line, column)` —
 /// the same mapping [`CompileError`] positions use (column counted in
 /// UTF-8 code points). Offsets past the end clamp to the last position.

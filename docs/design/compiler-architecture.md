@@ -103,6 +103,13 @@ sema를 통과한 AST에서 텍스트로의 순수 매핑이다. verbatim 구간
 [`../reference/language.md`](../reference/language.md)). `await` 감지는
 AST에 남긴 원시 Span 위로 `scanner::contains_await`를 돌려 수행한다.
 
+방출은 내부적으로 Lit(컴파일러 글루)/Src(원본 복사, 오프셋 유지) 조각의
+로프(`codegen/rope.rs`)로 조립된다 — `compile()`은 평탄화한 텍스트만 쓰고,
+언어 도구용 `emit_mapped()`(`rlc --emit-map`)는 원본↔출력 바이트 매핑까지
+받아 에디터의 가상 TypeScript 문서에 쓴다(TASK-050). 이 도구 경로는
+파싱+방출만 조합한다: sema·verify를 생략해 편집 중인 버퍼에도 무오류로
+방출한다 — 진단이 `--check`의 몫이라는 에러 계층 계약은 그대로다.
+
 ## 기능 추가 가이드
 
 | 변경 종류 | 손대는 단계 |

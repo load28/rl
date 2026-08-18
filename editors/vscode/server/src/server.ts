@@ -35,6 +35,7 @@ import * as path from "node:path";
 
 import * as sidecar from "./sidecar";
 import * as tsproject from "./tsproject";
+import * as virtual from "./virtual";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -145,13 +146,112 @@ function analyze(doc: TextDocument): Analyzed {
   return result;
 }
 
+// ----------------------------------------- virtual documents (TASK-050)
+
+/* The compiler's emitted TypeScript for each open .rl buffer, refreshed on
+ * the validation cadence (`rlc --emit-map`). When current, it is what the
+ * TypeScript language service sees instead of the raw .rl text — the
+ * emitted code is plain TypeScript, so inference works inside match arms,
+ * scrutinees and the other rl constructs. Offsets are translated through
+ * the emit mappings in both directions; while the entry lags the buffer
+ * (or the compiler is missing) the raw text is served and offsets pass
+ * through unchanged — the pre-TASK-050 error-recovery behavior. */
+
+interface VirtualEntry {
+  version: number;
+  doc: virtual.MappedDoc;
+}
+
+const virtualDocs = new Map<string, VirtualEntry>();
+
+/** The buffer's mapped virtual document, when it matches `version`. */
+function activeVirtual(
+  fsPath: string,
+  version: number,
+): virtual.MappedDoc | null {
+  const entry = virtualDocs.get(fsPath);
+  return entry && entry.version === version ? entry.doc : null;
+}
+
+async function refreshVirtual(
+  doc: TextDocument,
+  compiler: string,
+): Promise<void> {
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return;
+  const version = doc.version;
+  const text = doc.getText();
+  const result = await rlc.runEmitMap(compiler, text, uri.fsPath);
+  const current = documents.get(doc.uri);
+  if (!current || current.version !== version) return; // stale
+  if (result) {
+    virtualDocs.set(uri.fsPath, {
+      version,
+      doc: new virtual.MappedDoc(text, result.code, result.mappings),
+    });
+  } else {
+    virtualDocs.delete(uri.fsPath);
+  }
+}
+
+/** The open document for a filesystem path, if any. */
+function openDocByPath(fsPath: string): TextDocument | null {
+  for (const doc of documents.all()) {
+    const uri = URI.parse(doc.uri);
+    if (uri.scheme === "file" && uri.fsPath === fsPath) return doc;
+  }
+  return null;
+}
+
+/** A source offset translated into the text the service currently sees
+ * for this buffer — identity while the raw text is served, mapped when
+ * the virtual document is. Null: the position is compiler glue. */
+function toServiceOffset(
+  fsPath: string,
+  doc: TextDocument,
+  offset: number,
+): number | null {
+  const mapped = activeVirtual(fsPath, doc.version);
+  return mapped ? mapped.srcToOut(offset) : offset;
+}
+
+/** A service-space span start translated back to source coordinates, with
+ * the text LSP positions should be computed against. Null: the span has no
+ * source counterpart (compiler glue). */
+function fromServiceOffset(
+  fileName: string,
+  fileText: string,
+  offset: number,
+): { text: string; offset: number } | null {
+  const doc = openDocByPath(fileName);
+  if (!doc) return { text: fileText, offset }; // disk file, served raw
+  const mapped = activeVirtual(fileName, doc.version);
+  if (!mapped) return { text: doc.getText(), offset };
+  const src = mapped.outToSrc(offset);
+  return src === null ? null : { text: doc.getText(), offset: src };
+}
+
+/** [`fromServiceOffset`] over a span; null when either end is unmapped. */
+function fromServiceSpan(
+  fileName: string,
+  fileText: string,
+  start: number,
+  length: number,
+): { text: string; start: number; end: number } | null {
+  const s = fromServiceOffset(fileName, fileText, start);
+  const e = fromServiceOffset(fileName, fileText, start + length);
+  if (!s || !e || e.offset < s.offset) return null;
+  return { text: s.text, start: s.offset, end: e.offset };
+}
+
 // -------------------------------------------- TypeScript language service
 
-/* An .rl file is TypeScript plus four constructs, so symbols the rl
+/* An .rl file is TypeScript plus six constructs, so symbols the rl
  * analysis does not own — variables, functions, types, imported values —
- * are answered by the real TypeScript language service over the same
- * sources (tsproject.ts). Used as the fallback for definitions and hover;
- * TS diagnostics are never surfaced. */
+ * are answered by the real TypeScript language service (tsproject.ts) over
+ * the virtual documents above (or the raw sources while one lags). Used as
+ * the fallback for definitions and hover; TS diagnostics are never
+ * surfaced. */
 
 let tsProjectInstance: tsproject.TsProject | null = null;
 
@@ -161,7 +261,11 @@ function getTsProject(): tsproject.TsProject {
       for (const doc of documents.all()) {
         const uri = URI.parse(doc.uri);
         if (uri.scheme === "file" && uri.fsPath === fileName) {
-          return { text: doc.getText(), version: doc.version };
+          const mapped = activeVirtual(fileName, doc.version);
+          if (mapped) {
+            return { text: mapped.code, version: `${doc.version}:emitted` };
+          }
+          return { text: doc.getText(), version: `${doc.version}:raw` };
         }
       }
       return null;
@@ -180,14 +284,21 @@ function getTsProject(): tsproject.TsProject {
 function tsDefinitions(doc: TextDocument, offset: number): Location[] | null {
   const uri = URI.parse(doc.uri);
   if (uri.scheme !== "file") return null;
-  const definitions = getTsProject().definitionsAt(uri.fsPath, offset);
-  if (definitions.length === 0) return null;
-  return definitions.map((d) =>
-    Location.create(URI.file(d.fileName).toString(), {
-      start: tsproject.positionAt(d.fileText, d.start),
-      end: tsproject.positionAt(d.fileText, d.start + d.length),
-    }),
-  );
+  const at = toServiceOffset(uri.fsPath, doc, offset);
+  if (at === null) return null;
+  const definitions = getTsProject().definitionsAt(uri.fsPath, at);
+  const locations: Location[] = [];
+  for (const d of definitions) {
+    const span = fromServiceSpan(d.fileName, d.fileText, d.start, d.length);
+    if (!span) continue;
+    locations.push(
+      Location.create(URI.file(d.fileName).toString(), {
+        start: tsproject.positionAt(span.text, span.start),
+        end: tsproject.positionAt(span.text, span.end),
+      }),
+    );
+  }
+  return locations.length > 0 ? locations : null;
 }
 
 /** TypeScript ScriptElementKind strings → LSP completion kinds. */
@@ -219,8 +330,10 @@ const TS_COMPLETION_KINDS: Record<string, CompletionItemKind> = {
 function tsCompletions(doc: TextDocument, offset: number): CompletionItem[] {
   const uri = URI.parse(doc.uri);
   if (uri.scheme !== "file") return [];
+  const at = toServiceOffset(uri.fsPath, doc, offset);
+  if (at === null) return [];
   return getTsProject()
-    .completionsAt(uri.fsPath, offset)
+    .completionsAt(uri.fsPath, at)
     .map((entry) => ({
       label: entry.name,
       kind: TS_COMPLETION_KINDS[entry.kind] ?? CompletionItemKind.Text,
@@ -231,8 +344,20 @@ function tsCompletions(doc: TextDocument, offset: number): CompletionItem[] {
 function tsHover(doc: TextDocument, offset: number) {
   const uri = URI.parse(doc.uri);
   if (uri.scheme !== "file") return null;
-  const info = getTsProject().quickInfoAt(uri.fsPath, offset);
+  const at = toServiceOffset(uri.fsPath, doc, offset);
+  if (at === null) return null;
+  const info = getTsProject().quickInfoAt(uri.fsPath, at);
   if (!info || info.signature === "") return null;
+  const mapped = activeVirtual(uri.fsPath, doc.version);
+  let start = info.start;
+  let end = info.start + info.length;
+  if (mapped) {
+    const s = mapped.outToSrc(start);
+    const e = mapped.outToSrc(end);
+    if (s === null || e === null || e < s) return null;
+    start = s;
+    end = e;
+  }
   const value =
     "```ts\n" +
     info.signature +
@@ -241,8 +366,8 @@ function tsHover(doc: TextDocument, offset: number) {
   return {
     contents: { kind: MarkupKind.Markdown, value },
     range: {
-      start: doc.positionAt(info.start),
-      end: doc.positionAt(info.start + info.length),
+      start: doc.positionAt(start),
+      end: doc.positionAt(end),
     },
   };
 }
@@ -346,6 +471,10 @@ async function validate(doc: TextDocument): Promise<void> {
   const compiler = rlc.findCompiler(settings.compilerPath, workspaceRoots);
   const uri = URI.parse(doc.uri);
   const docName = uri.scheme === "file" ? uri.fsPath : uri.path;
+
+  // The virtual document rides the same debounce; it degrades to raw-text
+  // serving on its own when the compiler is missing.
+  void refreshVirtual(doc, compiler);
 
   const result = await rlc.runCheck(
     compiler,
@@ -468,6 +597,8 @@ documents.onDidChangeContent((e) => {
 documents.onDidClose((e) => {
   analysisCache.delete(e.document.uri);
   importedCache.delete(e.document.uri);
+  const uri = URI.parse(e.document.uri);
+  if (uri.scheme === "file") virtualDocs.delete(uri.fsPath);
   const pending = pendingValidation.get(e.document.uri);
   if (pending !== undefined) {
     clearTimeout(pending);
@@ -571,7 +702,13 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
 
   // Arm pattern position → case tags (not yet covered) + `_`.
   if (ctx?.patternPosition) {
-    const inferred = analysis.inferEnum(masked, ctx.match, visible);
+    // Structural inference first (an `Enum.` mention in the scrutinee, or a
+    // unique owner of the written tags) — it is exact when it fires. Then
+    // the TypeScript-inferred type of the scrutinee expression, matched
+    // against the visible rl enums (TASK-050). Only then the full pool.
+    const inferred =
+      analysis.inferEnum(masked, ctx.match, visible) ??
+      tsScrutineeEnum(doc, ctx.match, visible);
     const pool = inferred ? [inferred] : visible;
     const covered = new Set(analysis.armTags(masked, ctx.match));
     const items: CompletionItem[] = [];
@@ -620,6 +757,58 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
     tsCompletions(doc, offset).filter((i) => !seen.has(i.label)),
   );
 });
+
+/**
+ * The visible rl enum a match scrutinee has, according to TypeScript's
+ * inferred type of the scrutinee expression (TASK-050). The type name must
+ * match a visible enum (pre-alias import names included), and when
+ * TypeScript reports the declaring file it must be the file that enum
+ * actually lives in — a same-named unrelated TS type is not a hit. Null
+ * on any doubt: the caller falls back to the full visible pool.
+ */
+function tsScrutineeEnum(
+  doc: TextDocument,
+  m: analysis.MatchInfo,
+  visible: analysis.EnumInfo[],
+): analysis.EnumInfo | null {
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return null;
+
+  // The scrutinee expression, whitespace-trimmed, in source coordinates.
+  const text = doc.getText();
+  let start = m.scrutOpen + 1;
+  let end = m.scrutClose;
+  while (start < end && /\s/.test(text[start])) start++;
+  while (end > start && /\s/.test(text[end - 1])) end--;
+  if (start >= end) return null;
+
+  let queryStart = start;
+  let queryEnd = end;
+  const mapped = activeVirtual(uri.fsPath, doc.version);
+  if (mapped) {
+    const s = mapped.srcToOut(start);
+    const e = mapped.srcToOut(end - 1);
+    if (s === null || e === null || e < s) return null;
+    queryStart = s;
+    queryEnd = e + 1;
+  }
+  const info = getTsProject().typeAt(uri.fsPath, queryStart, {
+    start: queryStart,
+    end: queryEnd,
+  });
+  if (!info) return null;
+
+  return (
+    visible.find((e) => {
+      if (e.name !== info.name && e.imported?.name !== info.name) return false;
+      // Built-ins (Option/Result) have no on-disk declaration to compare.
+      if (e.builtin) return true;
+      if (info.declFile === null) return true;
+      const declared = e.imported ? e.imported.path : uri.fsPath;
+      return path.resolve(info.declFile) === path.resolve(declared);
+    }) ?? null
+  );
+}
 
 function constructorItem(
   e: analysis.EnumInfo,
@@ -778,16 +967,23 @@ connection.onReferences((params): Location[] | null => {
   const offset = doc.offsetAt(params.position);
   // Delegated wholesale to TypeScript: it resolves the passthrough region
   // exactly, and rl-specific spans degrade to an empty result.
+  const at = toServiceOffset(uri.fsPath, doc, offset);
+  if (at === null) return null;
   const references = getTsProject()
-    .referencesAt(uri.fsPath, offset)
+    .referencesAt(uri.fsPath, at)
     .filter((r) => params.context.includeDeclaration || !r.isDefinition);
-  if (references.length === 0) return null;
-  return references.map((r) =>
-    Location.create(URI.file(r.fileName).toString(), {
-      start: tsproject.positionAt(r.fileText, r.start),
-      end: tsproject.positionAt(r.fileText, r.start + r.length),
-    }),
-  );
+  const locations: Location[] = [];
+  for (const r of references) {
+    const span = fromServiceSpan(r.fileName, r.fileText, r.start, r.length);
+    if (!span) continue;
+    locations.push(
+      Location.create(URI.file(r.fileName).toString(), {
+        start: tsproject.positionAt(span.text, span.start),
+        end: tsproject.positionAt(span.text, span.end),
+      }),
+    );
+  }
+  return locations.length > 0 ? locations : null;
 });
 
 connection.onRenameRequest(async (params) => {
@@ -811,16 +1007,22 @@ connection.onRenameRequest(async (params) => {
   );
   if (sym) return null;
 
-  const locations = getTsProject().renameAt(uri.fsPath, offset);
+  const at = toServiceOffset(uri.fsPath, doc, offset);
+  if (at === null) return null;
+  const locations = getTsProject().renameAt(uri.fsPath, at);
   if (!locations || locations.length === 0) return null;
   const changes: Record<string, TextEdit[]> = {};
   for (const l of locations) {
+    const span = fromServiceSpan(l.fileName, l.fileText, l.start, l.length);
+    // A rename edit that cannot be mapped back would silently skip an
+    // occurrence and corrupt the rename — refuse the whole operation.
+    if (!span) return null;
     const target = URI.file(l.fileName).toString();
     (changes[target] ??= []).push(
       TextEdit.replace(
         {
-          start: tsproject.positionAt(l.fileText, l.start),
-          end: tsproject.positionAt(l.fileText, l.start + l.length),
+          start: tsproject.positionAt(span.text, span.start),
+          end: tsproject.positionAt(span.text, span.end),
         },
         params.newName,
       ),
