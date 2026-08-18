@@ -332,8 +332,10 @@ const msg = match (half(4)) {
 };
 ```
 
-모듈 안의 선언은 같은 이름의 rl enum을 컴파일한 결과와 **바이트 단위로 같은
-형태**이므로 `match`가 그대로 동작합니다.
+모듈이 만드는 **값**은 같은 이름의 rl enum을 컴파일한 결과와 **바이트 단위로
+같은 형태**이므로 `match`가 그대로 동작합니다. `Result`의 두 생성자만 타입이
+다릅니다 — `Result.Ok(v)`는 `Ok<T>`, `Result.Err(e)`는 `Err<E>`를 돌려줍니다
+([`std.md` §값의 형태 계약](./std.md#값의-형태-계약)).
 
 ### 4.2 내장 enum과 소진성 검사
 
@@ -398,6 +400,11 @@ const $rl_t0 = (parseNum(cfg)); if ($rl_t0.kind !== "Ok") return $rl_t0; const p
   바꾸세요.
 - 함수 반환 타입은 식의 `Err` 타입과 호환되는 `Result`여야 합니다
   (Rust의 `From` 같은 자동 변환 없음).
+- 반환 타입을 **적지 않으면** tsc가 조기 return들과 마지막 `Result.Ok(...)`의
+  합집합으로 추론합니다. `Err` 타입이 서로 다른 `try`를 여러 번 써도
+  `Ok<T> | Err<E1> | Err<E2>` — 즉 `Result<T, E1 | E2>` — 가 됩니다.
+  rlc는 에러 타입을 모으지 않습니다; 추론은 전적으로 tsc의 몫입니다
+  ([`std.md` §여러 `try`의 에러 타입](./std.md#여러-try의-에러-타입)).
 
 ### 5.4 사용 위치 제약
 

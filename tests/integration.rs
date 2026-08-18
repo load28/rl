@@ -67,6 +67,36 @@ fn typecheck(src: &str) -> (bool, String) {
     )
 }
 
+/// Type-check a snippet that imports the standard library: the std module is
+/// written next to it as `rl.ts` and both files go through tsc (`--noEmit`).
+/// Returns (ok, tsc output + compiled source).
+fn typecheck_with_std(src: &str) -> (bool, String) {
+    let code = compile(&as_module(src), &Options::default()).expect("rl compile failed");
+    let dir = tmpdir();
+    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    fs::write(dir.join("main.ts"), &code).unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg(dir.join("rl.ts"))
+        .arg("--noEmit")
+        .args([
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+        ])
+        .output()
+        .expect("failed to run tsc");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    (
+        out.status.success(),
+        format!("{text}\n---compiled---\n{code}"),
+    )
+}
+
 /// Compile rl source, emit JS with tsc, execute with node, return stdout lines.
 fn run(src: &str) -> Vec<String> {
     let code = compile(&as_module(src), &Options::default()).expect("rl compile failed");
@@ -435,10 +465,10 @@ console.log(JSON.stringify(Option.zip(Option.Some(1), Option.None)));
 console.log(JSON.stringify(Option.flatten(Option.Some(Option.Some(2)))));
 console.log(JSON.stringify(Option.collect([Option.Some(1), Option.Some(2)])));
 console.log(JSON.stringify(Option.collect([Option.Some(1), Option.None])));
-console.log(JSON.stringify(Option.transpose(Option.Some(Result.Ok<number, string>(3)))));
+console.log(JSON.stringify(Option.transpose(Option.Some(Result.Ok<number>(3)))));
 console.log(JSON.stringify(Result.collect([Result.Ok(1), Result.Ok(2)])));
-console.log(JSON.stringify(Result.collect([Result.Ok<number, string>(1), Result.Err<number, string>("x")])));
-console.log(JSON.stringify(Result.flatten(Result.Ok<Result<number, string>, string>(Result.Ok(4)))));
+console.log(JSON.stringify(Result.collect<number, string>([Result.Ok(1), Result.Err("x")])));
+console.log(JSON.stringify(Result.flatten<number, string>(Result.Ok(Result.Ok(4)))));
 const nested: Result<Option<number>, string> = Result.Ok(Option.None);
 console.log(JSON.stringify(Result.transpose(nested)));
 Result.fromPromise(Promise.resolve(5))
@@ -695,6 +725,95 @@ const f = (s: Shape) => match (s) {
 "#,
     );
     assert!(ok, "{out}");
+}
+
+#[test]
+fn std_result_constructors_type_only_their_own_variant() {
+    require_toolchain!();
+    // `Ok` carries no error type and `Err` carries no success type, so each
+    // constructor is typed by its own variant — and both still fit a
+    // `Result<T, E>` wherever one is expected.
+    let (ok, out) = typecheck_with_std(
+        r#"
+import { Result } from "./rl.js";
+import type { Ok, Err } from "./rl.js";
+
+type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+const ok = Result.Ok(123);
+const err = Result.Err("bad");
+const okIsOkOfNumber: Exact<typeof ok, Ok<number>> = true;
+const errIsErrOfString: Exact<typeof err, Err<string>> = true;
+
+const fromOk: Result<number, string> = Result.Ok(1);
+const fromErr: Result<number, string> = Result.Err("bad");
+
+function parse(value: string): Result<number, string> {
+  if (value.length === 0) {
+    return Result.Err("empty");
+  }
+  return Result.Ok(Number(value));
+}
+
+console.log(okIsOkOfNumber, errIsErrOfString, fromOk, fromErr, parse("1"));
+"#,
+    );
+    assert!(ok, "tsc rejected variant-typed constructors:\n{out}");
+}
+
+#[test]
+fn try_error_types_infer_as_a_union_without_an_annotation() {
+    require_toolchain!();
+    // Two `try`s over results with different error types: the lowered early
+    // returns plus `Result.Ok(...)` give tsc `Err<UserError> | Err<ConfigError>
+    // | Ok<Data>`, which is exactly `Result<Data, UserError | ConfigError>`.
+    // rlc collects no error types of its own — this is tsc's union inference.
+    let (ok, out) = typecheck_with_std(
+        r#"
+import { Result } from "./rl.js";
+
+type User = { id: number };
+type Config = { port: number };
+type UserError = { tag: "user" };
+type ConfigError = { tag: "config" };
+
+declare function getUser(): Result<User, UserError>;
+declare function getConfig(): Result<Config, ConfigError>;
+
+function load() {
+  const user = try getUser();
+  const config = try getConfig();
+  return Result.Ok({ user, config });
+}
+
+const loaded: Result<{ user: User; config: Config }, UserError | ConfigError> = load();
+console.log(loaded);
+"#,
+    );
+    assert!(ok, "tsc lost the try error union:\n{out}");
+}
+
+#[test]
+fn try_error_union_stays_checked_against_the_declared_return_type() {
+    require_toolchain!();
+    // The inference above is not a hole: an annotated function whose `Err`
+    // type does not cover a propagated error is still a type error, reported
+    // by tsc on the emitted early return.
+    let (ok, out) = typecheck_with_std(
+        r#"
+import { Result } from "./rl.js";
+
+declare function getUser(): Result<number, { tag: "user" }>;
+
+function load(): Result<number, string> {
+  const user = try getUser();
+  return Result.Ok(user);
+}
+
+console.log(load());
+"#,
+    );
+    assert!(!ok, "tsc accepted an uncovered error type:\n{out}");
 }
 
 #[test]

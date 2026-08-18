@@ -72,7 +72,8 @@
 | TASK-062 | 표준 라이브러리 메서드가 자동완성에 안 나오는 문제 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-062](./TASK-062-editor-member-completion.md) |
 | TASK-063 | `flow` — 함수 합성 (포인트프리 파이프라인) | 완료 | 2026-08-18 | 2026-08-18 | [TASK-063](./TASK-063-flow-composition.md) |
 | TASK-064 | `result` 계산 블록 — Result 바인딩 `<-` | 완료 | 2026-08-18 | 2026-08-18 | [TASK-064](./TASK-064-result-computation-block.md) |
+| TASK-065 | `Result` 타입 모델 개선 — `Ok<T>` / `Err<E>` 변종 타입 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-065](./TASK-065-result-variant-types.md) |
 
 ## 다음 태스크 번호
 
-**TASK-065**
+**TASK-066**

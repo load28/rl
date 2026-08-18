@@ -1,18 +1,26 @@
 // rl standard library — `Option` and `Result` with functional combinators.
 //
-// Plain TypeScript in exactly the shape rl enums compile to (`kind`-tagged
-// unions), so `match` works on these values and rlc checks exhaustiveness
-// of `Some`/`None` and `Ok`/`Err` arms. See docs/reference/std.md.
+// Plain TypeScript whose values have exactly the shape rl enums compile to
+// (`kind`-tagged objects), so `match` works on these values and rlc checks
+// exhaustiveness of `Some`/`None` and `Ok`/`Err` arms. `Result`'s variants
+// additionally get names of their own (`Ok<T>`/`Err<E>`) so each constructor
+// can be typed by what its value really carries. See docs/reference/std.md.
 
 /** An optional value: either `Some` carrying a `value`, or `None`. */
 export type Option<T> =
   | { kind: "Some"; value: T }
   | { kind: "None" };
 
+/** The success variant of a `Result`, carrying a `value`. */
+export type Ok<T> = { kind: "Ok"; value: T };
+
+/** The failure variant of a `Result`, carrying an `error`. */
+export type Err<E> = { kind: "Err"; error: E };
+
 /** A success (`Ok` carrying a `value`) or a failure (`Err` carrying an `error`). */
 export type Result<T, E> =
-  | { kind: "Ok"; value: T }
-  | { kind: "Err"; error: E };
+  | Ok<T>
+  | Err<E>;
 
 /** Constructors and combinators for `Option`. */
 export const Option = {
@@ -133,15 +141,18 @@ export const Option = {
 
 /** Constructors and combinators for `Result`. */
 export const Result = {
-  Ok: <T, E>(value: T): Result<T, E> => ({ kind: "Ok", value }),
-  Err: <T, E>(error: E): Result<T, E> => ({ kind: "Err", error }),
+  // Each constructor takes only the type its own variant actually carries:
+  // `Ok(v)` is an `Ok<T>`, `Err(e)` is an `Err<E>`. A `Result<T, E>` is the
+  // union of the two, so both still fit wherever one is expected — and a
+  // function with several `try`s gets `Ok<T> | Err<E1> | Err<E2>` inferred
+  // instead of an `unknown` error. See docs/reference/std.md.
+  Ok: <T>(value: T): Ok<T> => ({ kind: "Ok", value }),
+  Err: <E>(error: E): Err<E> => ({ kind: "Err", error }),
 
   /** True if `r` is `Ok` (narrows the type). */
-  isOk: <T, E>(r: Result<T, E>): r is { kind: "Ok"; value: T } =>
-    r.kind === "Ok",
+  isOk: <T, E>(r: Result<T, E>): r is Ok<T> => r.kind === "Ok",
   /** True if `r` is `Err` (narrows the type). */
-  isErr: <T, E>(r: Result<T, E>): r is { kind: "Err"; error: E } =>
-    r.kind === "Err",
+  isErr: <T, E>(r: Result<T, E>): r is Err<E> => r.kind === "Err",
   /** Applies `f` to the `Ok` value; leaves `Err` untouched. */
   map: <T, E, U>(r: Result<T, E>, f: (value: T) => U): Result<U, E> =>
     r.kind === "Ok" ? { kind: "Ok", value: f(r.value) } : r,

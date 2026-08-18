@@ -56,6 +56,7 @@ try validateRange(parsed);          // propagate-only; `try await f();` ok
 - Statement position in a function body ONLY; trailing `;` MANDATORY (else passthrough).
 - Result only (Ok unwraps `.value`; Err returned from enclosing fn). Option unsupported → `Option.okOr(o, err)` first.
 - Enclosing fn return type must be Result compatible with expr's Err type; no auto conversion.
+- UNANNOTATED fn: tsc infers the union of the return paths, so several `try`s with different Err types give `Ok<T> | Err<E1> | Err<E2>` = `Result<T, E1 | E2>`. rlc never collects/unions error types — leave inference to tsc.
 - FORBIDDEN (compile error): inside match (scrutinee/arm), template interpolation, another try, module top level → extract helper fn.
 - Expr can't start with `(` or `<`: `try f(x);` not `try (f(x));`.
 
@@ -118,7 +119,8 @@ const data = result {
 ```rl
 import { Option, Result } from "@rl/std";
 ```
-- `Option<T>` = `Some(value: T) | None`; `Result<T, E>` = `Ok(value: T) | Err(error: E)`. Field names: `value` (Some/Ok), `error` (Err) → arms `Some(value)`, `Ok(value)`, `Err(error)`, alias `Some(value: v)`.
+- `Option<T>` = `Some(value: T) | None`; `Result<T, E>` = `Ok<T> | Err<E>` (`Ok<T>` = `{kind:"Ok";value:T}`, `Err<E>` = `{kind:"Err";error:E}`, both exported as TYPES). Field names: `value` (Some/Ok), `error` (Err) → arms `Some(value)`, `Ok(value)`, `Err(error)`, alias `Some(value: v)`.
+- Constructors take only their own variant's type: `Result.Ok(1)` → `Ok<number>`, `Result.Err("bad")` → `Err<string>` (NOT `Result.Ok<number, string>(1)` — one type arg each). Both fit any `Result<T, E>` slot; annotate the variable/return type when you need the full Result. Combinators still take/return `Result<T, E>`.
 - Both are BUILT-IN enums: `_`-less match on their tags is exhaustiveness-checked even without import. Built-ins give checking only — import (or declare) to construct values.
 - Combinators = data-first static fns; `*P` = data-last curried for pipelines.
   - Option: map andThen orElse filter unwrapOr unwrapOrElse expect okOr fromNullable toNullable isSome isNone zip flatten transpose collect (+P: map andThen orElse filter unwrapOr unwrapOrElse expect okOr)
