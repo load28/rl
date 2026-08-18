@@ -31,6 +31,7 @@ import { URI } from "vscode-uri";
 
 import * as analysis from "./analysis";
 import * as rlc from "./rlc";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 import * as sidecar from "./sidecar";
@@ -173,6 +174,96 @@ function activeVirtual(
   return entry && entry.version === version ? entry.doc : null;
 }
 
+/* An imported `.rl` module the editor does not have open is served the same
+ * way (TASK-055) — compiled synchronously on first use and cached until its
+ * mtime changes. Serving the raw source instead would hand TypeScript a file
+ * it can only error-recover through: an rl `enum` reads as a misparsed TS
+ * `enum`, so every value flowing across the import loses its type. */
+
+interface DiskEntry {
+  /** Compiler path and mtime the entry was compiled from — a failed compile
+   * is cached too, so keying on the compiler lets a session that only later
+   * resolves one (settings arriving after the first request) try again. */
+  key: string;
+  /** null: the compiler could not produce an emit map for it. */
+  doc: virtual.MappedDoc | null;
+}
+
+const diskVirtuals = new Map<string, DiskEntry>();
+
+/** The compiler path last resolved from settings — the synchronous paths
+ * (disk modules, the std module) have no place to await settings. */
+let servedCompiler: string | null = null;
+
+function currentCompiler(): string {
+  return servedCompiler ?? rlc.findCompiler("", workspaceRoots);
+}
+
+/** The emitted document of an `.rl` file on disk, or null when it is not a
+ * compilable `.rl` file (the caller then serves the disk text as-is). */
+function diskVirtualEntry(fsPath: string): DiskEntry | null {
+  if (!fsPath.endsWith(".rl")) return null;
+  const compiler = currentCompiler();
+  let key: string;
+  try {
+    key = `${compiler}@${fs.statSync(fsPath).mtimeMs}`;
+  } catch {
+    diskVirtuals.delete(fsPath);
+    return null;
+  }
+  const cached = diskVirtuals.get(fsPath);
+  if (cached && cached.key === key) return cached;
+
+  let doc: virtual.MappedDoc | null = null;
+  const result = rlc.runEmitMapFileSync(compiler, fsPath);
+  if (result) {
+    try {
+      doc = new virtual.MappedDoc(
+        fs.readFileSync(fsPath, "utf8"),
+        result.code,
+        result.mappings,
+      );
+    } catch {
+      doc = null;
+    }
+  }
+  const entry: DiskEntry = { key, doc };
+  diskVirtuals.set(fsPath, entry);
+  return entry;
+}
+
+function diskVirtual(fsPath: string): virtual.MappedDoc | null {
+  return diskVirtualEntry(fsPath)?.doc ?? null;
+}
+
+/** Bring the buffer's virtual document up to date and wait for it. The
+ * validation cadence refreshes it on a debounce; a request that arrives
+ * inside that window would otherwise be answered off the raw text, where
+ * TypeScript cannot parse a pipeline or a match arm at all and answers
+ * `any`. Concurrent requests for the same version share one compiler run. */
+const pendingVirtual = new Map<string, Promise<void>>();
+
+async function ensureVirtual(doc: TextDocument): Promise<void> {
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return;
+  if (activeVirtual(uri.fsPath, doc.version)) return;
+
+  const key = `${doc.uri}@${doc.version}`;
+  const existing = pendingVirtual.get(key);
+  if (existing) {
+    await existing;
+    return;
+  }
+  const run = (async () => {
+    const settings = await getSettings(doc.uri);
+    const compiler = rlc.findCompiler(settings.compilerPath, workspaceRoots);
+    servedCompiler = compiler;
+    await refreshVirtual(doc, compiler);
+  })().finally(() => pendingVirtual.delete(key));
+  pendingVirtual.set(key, run);
+  await run;
+}
+
 async function refreshVirtual(
   doc: TextDocument,
   compiler: string,
@@ -224,7 +315,12 @@ function fromServiceOffset(
   offset: number,
 ): { text: string; offset: number } | null {
   const doc = openDocByPath(fileName);
-  if (!doc) return { text: fileText, offset }; // disk file, served raw
+  if (!doc) {
+    const disk = diskVirtual(fileName);
+    if (!disk) return { text: fileText, offset }; // served raw
+    const src = disk.outToSrc(offset);
+    return src === null ? null : { text: disk.srcText, offset: src };
+  }
   const mapped = activeVirtual(fileName, doc.version);
   if (!mapped) return { text: doc.getText(), offset };
   const src = mapped.outToSrc(offset);
@@ -268,6 +364,10 @@ function getTsProject(): tsproject.TsProject {
           return { text: doc.getText(), version: `${doc.version}:raw` };
         }
       }
+      const disk = diskVirtualEntry(fileName);
+      if (disk?.doc) {
+        return { text: disk.doc.code, version: `disk-${disk.key}:emitted` };
+      }
       return null;
     },
     () =>
@@ -277,6 +377,7 @@ function getTsProject(): tsproject.TsProject {
         .filter((u) => u.scheme === "file")
         .map((u) => u.fsPath),
     workspaceRoots[0] ?? process.cwd(),
+    () => rlc.stdModulePath(currentCompiler()),
   );
   return tsProjectInstance;
 }
@@ -474,6 +575,7 @@ async function validate(doc: TextDocument): Promise<void> {
 
   // The virtual document rides the same debounce; it degrades to raw-text
   // serving on its own when the compiler is missing.
+  servedCompiler = compiler;
   void refreshVirtual(doc, compiler);
 
   const result = await rlc.runCheck(
@@ -664,6 +766,7 @@ const KEYWORD_SNIPPETS: CompletionItem[] = [
 connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
+  await ensureVirtual(doc);
   const { masked, enums, matches } = analyze(doc);
   const offset = doc.offsetAt(params.position);
   const visible = analysis.visibleEnums(enums, await importedEnums(doc));
@@ -836,6 +939,7 @@ function constructorItem(
 connection.onHover(async (params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
+  await ensureVirtual(doc);
   const { text, masked, enums, matches } = analyze(doc);
   const offset = doc.offsetAt(params.position);
 
@@ -906,6 +1010,7 @@ connection.onHover(async (params) => {
 connection.onDefinition(async (params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
+  await ensureVirtual(doc);
   const { text, masked, enums, matches } = analyze(doc);
   const offset = doc.offsetAt(params.position);
   const sym = analysis.symbolAt(
@@ -959,11 +1064,12 @@ connection.onDefinition(async (params) => {
 
 // -------------------------------------------------- references and rename
 
-connection.onReferences((params): Location[] | null => {
+connection.onReferences(async (params): Promise<Location[] | null> => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
   const uri = URI.parse(doc.uri);
   if (uri.scheme !== "file") return null;
+  await ensureVirtual(doc);
   const offset = doc.offsetAt(params.position);
   // Delegated wholesale to TypeScript: it resolves the passthrough region
   // exactly, and rl-specific spans degrade to an empty result.
@@ -991,6 +1097,7 @@ connection.onRenameRequest(async (params) => {
   if (!doc) return null;
   const uri = URI.parse(doc.uri);
   if (uri.scheme !== "file") return null;
+  await ensureVirtual(doc);
   const offset = doc.offsetAt(params.position);
 
   // rl symbols (enums, case tags) are compiled into the emitted `kind`
