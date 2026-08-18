@@ -281,11 +281,19 @@ export class TsProject {
         "dependencies, or install `typescript` in the workspace."
       );
     }
-    let loaded: ts.SourceFile | undefined;
+    // Asked of the program rather than compared by path: `getSourceFile`
+    // would answer on path form (separators, casing) as much as on whether
+    // a library is there, and a mismatch would disable diagnostics on a
+    // sound install.
+    let loaded = false;
     try {
-      loaded = this.service.getProgram()?.getSourceFile(this.defaultLib);
+      const program = this.service.getProgram();
+      loaded =
+        program
+          ?.getSourceFiles()
+          .some((f) => program.isSourceFileDefaultLibrary(f)) ?? false;
     } catch {
-      loaded = undefined;
+      loaded = false;
     }
     return loaded
       ? null
