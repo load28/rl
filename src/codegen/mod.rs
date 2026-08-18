@@ -26,6 +26,7 @@ use std::cell::Cell;
 use crate::EmitMapping;
 use crate::ImportRewrite;
 use crate::ast::*;
+use crate::scanner::contains_await;
 use rope::Rope;
 
 /// A trailing line comment would swallow whatever codegen appends on the
@@ -86,9 +87,10 @@ pub(super) struct Emitter<'a> {
     /// Replacement for the standard library's bare specifier, if the caller
     /// supplied one (see [`crate::Options::std_import`]).
     std_import: Option<&'a str>,
-    /// File-wide counter for `try` and let-else temporaries — unlike the
-    /// match IIFE's `$rl_m`, these statements emit into the enclosing
-    /// scope, so every temporary needs a unique name (`$rl_t0`, `$rl_t1`, ...).
+    /// File-wide counter for `try`, let-else, `if let` and `result` block
+    /// temporaries — unlike the match IIFE's `$rl_m`, these emit into a
+    /// surrounding scope, so every temporary needs a unique name
+    /// (`$rl_t0`, `$rl_t1`, ... and `$rl_r0`, `$rl_r1`, ... for bindings).
     try_seq: Cell<usize>,
     /// Set when a pipeline was emitted — the file then gets the `$rl_ap`
     /// apply helper appended once.
@@ -120,6 +122,7 @@ impl<'a> Emitter<'a> {
                 Segment::LetElse(stmt) => out.append(self.emit_let_else(stmt)),
                 Segment::IfLet(stmt) => out.append(self.emit_if_let(stmt)),
                 Segment::Pipe(pipe) => out.append(self.emit_pipe(pipe)),
+                Segment::ResultBlock(block) => out.append(self.emit_result_block(block)),
                 Segment::RlImport(decl) => self.emit_rl_import(decl.spec, decl.kind, &mut out),
                 Segment::Template(template) => self.emit_template(template, &mut out),
             }
@@ -217,6 +220,48 @@ impl<'a> Emitter<'a> {
             None => {}
         }
         code.push_lit(" }");
+        code
+    }
+
+    /// Emits a `result { ... }` computation block as an IIFE of plain
+    /// statements: every binding evaluates once, early-`return`s its `Err`
+    /// out of the block, and binds the `Ok` value — exactly the `try`
+    /// statement's shape, scoped to the block instead of the enclosing
+    /// function. The trailing expression is returned wrapped in an `Ok`
+    /// object literal.
+    ///
+    /// No type tricks and no helper: tsc narrows each temporary through its
+    /// own `if`, so the block's type is the union of the returned `Err`
+    /// members and the final `Ok` — which is how the error types of the
+    /// individual steps end up unioned in the block's type. `await` inside
+    /// the block makes the IIFE async, like a `match`.
+    fn emit_result_block(&self, block: &ResultBlock) -> Rope<'a> {
+        let is_async = contains_await(self.bytes, block.body_span.start, block.body_span.end);
+        let mut code = Rope::new();
+        code.push_lit(if is_async {
+            "(await (async () => {"
+        } else {
+            "((() => {"
+        });
+        for item in &block.items {
+            match item {
+                ResultItem::Stmts(stmts) => {
+                    code.append(guard_line_comment(self.emit_program(stmts)));
+                }
+                ResultItem::Bind(bind) => {
+                    let n = self.try_seq.get();
+                    self.try_seq.set(n + 1);
+                    let tmp = format!("$rl_r{n}");
+                    code.push_lit(format!("const {tmp} = ("));
+                    code.append(guard_line_comment(self.emit_program(&bind.expr).trim()));
+                    code.push_lit(format!("); if ({tmp}.kind !== \"Ok\") return {tmp};"));
+                    code.push_lit(format!(" {} {} = {tmp}.value;", bind.kw, bind.binding));
+                }
+            }
+        }
+        code.push_lit("return { kind: \"Ok\" as const, value: (");
+        code.append(guard_line_comment(self.emit_program(&block.value)));
+        code.push_lit(") }; })())");
         code
     }
 

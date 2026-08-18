@@ -7,19 +7,20 @@ CLI는 [`cli.md`](./cli.md), 에러 메시지는 [`errors.md`](./errors.md), 표
 1. [기본 원칙](#1-기본-원칙) · 2. [`enum`](#2-enum-선언) ·
 3. [`match`](#3-match-표현식) · 4. [표준 라이브러리](#4-표준-라이브러리와-내장-enum) ·
 5. [`try`](#5-에러-전파-try-문) · 6. [`let-else`·`if let`](#6-값-추출-let-else-문) ·
-7. [`|>`](#7-파이프라인-연산자-) · 8. [모듈](#8-모듈-rl-import-지정자-재작성) ·
-9. [제한사항](#9-제한사항)
+7. [`|>`](#7-파이프라인-연산자-) · 8. [`result` 블록](#8-result-계산-블록) ·
+9. [모듈](#9-모듈-rl-import-지정자-재작성) · 10. [제한사항](#10-제한사항)
 
 ---
 
 ## 1. 기본 원칙
 
-`.rl` 파일은 TypeScript에 여섯 구문 — `enum` 선언, `match` 표현식, `try` 문,
-let-else 문, `if let` 문, 파이프라인 연산자 `|>` — 을 더한 것입니다.
+`.rl` 파일은 TypeScript에 일곱 구문 — `enum` 선언, `match` 표현식, `try` 문,
+let-else 문, `if let` 문, 파이프라인 연산자 `|>`, `result` 계산 블록 — 을 더한
+것입니다.
 
 > **모든 유효한 TypeScript 파일은 그대로 유효한 `.rl` 파일이며, 자기 자신으로
 > 컴파일됩니다.** 유일한 예외는 상대 경로 `.rl` import 지정자의 재작성입니다
-> ([§8](#8-모듈-rl-import-지정자-재작성)).
+> ([§9](#9-모듈-rl-import-지정자-재작성)).
 
 컴파일러는 rl 구문으로 **완전하게 파싱되는** 부분만 변환하고 나머지는 바이트
 그대로 통과시킵니다.
@@ -212,7 +213,7 @@ const area = ((() => {
 
 스크루티니·가드·암 본문에 `await`가 있으면 async 함수로 방출되고 전체가
 `await`됩니다. 감지는 토큰 단위이므로 중첩 함수 안의 `await`도 async를
-유발합니다 ([§9](#9-제한사항)).
+유발합니다 ([§9](#10-제한사항)).
 
 ### 3.6 소진성 검사
 
@@ -229,7 +230,7 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 
 1. 같은 파일에 선언된 rl enum
 2. 상대 경로 `.rl` import로 가져온 exported rl enum
-   ([§8.3](#83-선언-수집과-프로젝트-단위-소진성))
+   ([§9.3](#93-선언-수집과-프로젝트-단위-소진성))
 3. 내장 `Option`/`Result` ([§4.2](#42-내장-enum과-소진성-검사))
 
 - or-패턴 암은 모든 대안 태그를 커버한 것으로 인정됩니다.
@@ -644,7 +645,144 @@ const h = flow |> Option.mapP((x: number) => x + 1) |> Option.unwrapOrP(0);
 
 ---
 
-## 8. 모듈: `.rl` import 지정자 재작성
+## 8. `result` 계산 블록
+
+`Result`를 돌려주는 연산을 여러 단계 잇는 코드는 콤비네이터로 쓰면 단계마다
+콜백이 한 겹씩 깊어지고, 앞 단계의 값을 계속 안쪽으로 넘겨야 합니다.
+`result { ... }`는 같은 계산을 **평탄한 문장 나열**로 씁니다.
+
+```rl
+const data = result {
+  const user <- getUser(id);
+  const company <- getCompany(user.companyId);
+  const permission <- getPermission(user, company);
+  { user, company, permission }
+};
+```
+
+`<-`는 **Result 바인딩**입니다. 오른쪽 식이 `Ok`면 그 값을 왼쪽 이름에 묶고 다음
+문장으로 갑니다. `Err`면 나머지 문장을 실행하지 않고 그 `Err`가 블록 전체의
+값이 됩니다.
+
+### 8.1 문법
+
+```
+result-블록   ::= "result" "{" 문장* 값-식 "}"
+문장          ::= result-바인딩 | 임의의 TypeScript·rl 문장
+result-바인딩 ::= ("const" | "let" | "var") 바인딩 "<-" 식 ";"
+값-식         ::= 식                     // 블록의 마지막, 세미콜론 없이
+```
+
+| 규칙 | 내용 |
+|------|------|
+| 바인딩 최소 1개 | Result 바인딩이 하나도 없는 `result { ... }`는 rl 구문이 아닙니다 — 그대로 통과합니다 ([§8.4](#84-구조-규칙)) |
+| `<-` | 두 바이트를 **붙여** 씁니다. `a < -b`(비교)와는 선언 키워드 뒤라는 점으로 구분됩니다 |
+| 바인딩 자리 | `try` 선언 형태와 같습니다 — 이름, 구조 분해, 타입 주석 모두 됩니다: `const n: number <- parse(raw);`, `const { x, y } <- point();` |
+| 세미콜론 | 바인딩은 `;`로 끝납니다. **마지막 값 식에는 `;`를 붙이지 않습니다** |
+| 사이 문장 | 바인딩 사이에는 평범한 TypeScript·rl 문장을 자유롭게 씁니다 |
+
+### 8.2 의미
+
+`result { ... }`는 **표현식**입니다. 값은 이렇게 정해집니다.
+
+- 모든 바인딩이 `Ok`면 → 마지막 값 식을 `Ok(...)`로 감싼 값.
+- 어떤 바인딩이 `Err`면 → 그 `Err` 그대로. 이후 문장(다음 바인딩의 식 포함)은
+  실행되지 않습니다.
+
+```rl
+const name = result {
+  const user <- getUser(id);
+  const profile <- getProfile(user);
+  profile.name                       // Result<string, ...>의 성공값
+};
+```
+
+**타입은 전부 tsc가 추론합니다.** rlc는 `getUser`의 타입을 보지 않습니다 —
+`<-`라는 구문 자체가 Result 바인딩이라는 표시이고, rlc는 tsc가 정확히 추론할 수
+있는 구조로 낮출 뿐입니다([§8.3](#83-컴파일-결과)). 그래서 에러 타입도 자연히
+합쳐집니다: `Result<User, UserError>`와 `Result<Company, CompanyError>`를 잇는
+블록의 타입은 `Result<T, UserError | CompanyError>`에 그대로 대입됩니다(둘 중
+하나를 빠뜨린 주석은 tsc가 그 주석 위치에서 잡습니다).
+
+`|>`와는 푸는 문제가 다릅니다. 파이프라인은 **값 하나**를 연달아 변환할 때,
+`result` 블록은 **여러 Result 연산**이 앞 단계의 값을 계속 참조할 때 씁니다.
+둘은 섞어 씁니다.
+
+```rl
+const data = result {
+  const user <- getUser(id);
+  const name = user.name |> .trim() |> .toLowerCase();
+  const company <- getCompany(name);
+  { name, company }
+};
+```
+
+### 8.3 컴파일 결과
+
+블록은 **평범한 문장들의 IIFE**가 됩니다. 바인딩마다 식을 한 번 평가해 임시
+변수에 담고, `Ok`가 아니면 블록에서 즉시 `return` 하고(= `Err` 전파), 아니면
+값을 꺼내 바인딩합니다 — `try` 문과 같은 모양이며([§5.3](#53-컴파일-결과)),
+탈출 범위가 함수가 아니라 블록이라는 점만 다릅니다.
+
+```rl
+const data = result {
+  const user <- getUser(id);
+  const label = user.name.trim();
+  const company <- getCompany(user.companyId);
+  { user, company, label }
+};
+```
+
+```ts
+const data = ((() => {
+  const $rl_r0 = (getUser(id)); if ($rl_r0.kind !== "Ok") return $rl_r0; const user = $rl_r0.value;
+  const label = user.name.trim();
+  const $rl_r1 = (getCompany(user.companyId)); if ($rl_r1.kind !== "Ok") return $rl_r1; const company = $rl_r1.value;
+  return { kind: "Ok" as const, value: ({ user, company, label }
+) }; })());
+```
+
+- 타입 트릭도 헬퍼도 없습니다. tsc는 각 `if`에서 임시 변수를 좁히므로 바인딩은
+  성공값 타입이 되고, 블록의 타입은 **반환된 `Err`들과 마지막 `Ok`의 유니언**이
+  됩니다 — 그래서 에러 타입이 저절로 합쳐집니다.
+- 임시 변수는 파일 단위로 번호가 붙습니다(`$rl_r0`, `$rl_r1`, ...) — 블록이
+  중첩돼도 이름이 겹치지 않습니다.
+- 블록 안에 `await`가 있으면 `(await (async () => { ... })())`로 방출됩니다
+  (match와 같은 규칙 — [§3.5](#35-await와-async)).
+
+### 8.4 구조 규칙
+
+`result`는 **문맥 키워드**입니다. TypeScript에서 `result`는 평범한 식별자이고,
+`result` 다음 줄에 블록 문이 오는 코드도 유효하므로(ASI) 키워드만으로는 판별할
+수 없습니다. 판별하는 것은 **바인딩**입니다.
+
+| 상황 | 결과 |
+|------|------|
+| 블록에 Result 바인딩(`const x <- 식;`)이 하나 이상 | rl `result` 블록 |
+| 바인딩이 없는 `result { ... }`, `const result = ...`, `class result { }`, `obj.result` | 통과 (평범한 TypeScript) |
+| 블록 안 최상위의 `const x = a < -b;` | 통과 — 초기화 `=`가 먼저 오므로 바인딩이 아닙니다 |
+| 블록 안 최상위의 `let x: Foo<-1>;` | 통과 — `<-` 뒤에 짝 없는 `>`가 남으므로(제네릭 타입 인자) 바인딩이 아닙니다. 같은 이유로 `<-` 뒤 식의 최상위에 짝 없는 `>`를 두려면 괄호로 감쌉니다 |
+| 바인딩이 있지만 완전하게 파싱되지 않음 (`;` 누락, 마지막 값 식 없음, `<-` 뒤 식 없음) | 위치를 담은 rl 에러 ([`errors.md`](./errors.md)) |
+
+선언 키워드 뒤의 `<-`는 유효한 TypeScript일 수 없으므로(선언자에는 초기화
+`=`가 필요합니다) 이 판별은 통과 계약을 깨지 않습니다. 같은 이유로, 바인딩이
+있는데 파싱에 실패한 블록은 통과시킬 수 없어 **에러**가 됩니다.
+
+그 밖의 위치·문장 규칙:
+
+- 블록은 표현식이므로 **어디에나** 놓입니다 — 변수 초기화, 인자, 화살표 본문,
+  match 암, 템플릿 보간, 파이프라인 head(`result { ... } |> Result.mapP(f)`).
+- 블록 안의 `return`은 **블록에서** 빠져나옵니다(둘러싼 함수가 아니라).
+  그래서 블록 안에서는 `try` 문과 let-else를 쓸 수 없습니다 — 둘 다 둘러싼
+  함수에서 나가는 `return`으로 컴파일되기 때문입니다(위치를 담은 rl 에러).
+  `if let`은 자체 완결 블록으로 컴파일되므로 자유롭게 씁니다.
+- 마지막 값 식이 이미 `Result`라면 한 겹 더 감싸집니다(`Result<Result<...>>`).
+  그럴 때는 마지막 줄도 바인딩으로 쓰고 값을 돌려주면 됩니다.
+- 중첩된 `result` 블록은 안쪽부터 각각 하나의 표현식입니다.
+
+---
+
+## 9. 모듈: `.rl` import 지정자 재작성
 
 `.rl` 파일은 다른 `.rl`을 상대 경로 그대로 import합니다. 컴파일러가 방출 시
 지정자를 소비 측이 해석할 수 있는 형태로 바꿉니다.
@@ -657,7 +795,7 @@ import { CalcError } from "./error.rl";   // parser.rl
 import { CalcError } from "./error.js";   // parser.ts (기본 --rewrite-imports js)
 ```
 
-### 8.1 재작성 대상
+### 9.1 재작성 대상
 
 **정적 import 선언과 re-export**의 지정자 중 **`./`·`../`로 시작하고 `.rl`로
 끝나는 것**만 바뀝니다. 절, 따옴표 스타일, 공백, import attributes는 바이트
@@ -672,7 +810,7 @@ import { CalcError } from "./error.js";   // parser.ts (기본 --rewrite-imports
 | `import "./side-effect.rl"` | 문자열·주석·템플릿 안의 import처럼 보이는 텍스트 |
 | `export { x } from "./e.rl"`, `export * from`, `export * as g from`, `export type { U } from` | 정적 import 절로 완전하게 파싱되지 않는 후보 |
 
-### 8.2 방출 형태 (`--rewrite-imports`)
+### 9.2 방출 형태 (`--rewrite-imports`)
 
 올바른 형태는 소비 측 `moduleResolution`에 달렸으므로 플래그(라이브러리에서는
 `Options { rewrite_imports }`)로 고릅니다.
@@ -694,7 +832,7 @@ emit이 막힙니다 (`TS5096`).
 
 이 모드에서 확장자는 층마다 한 번 바뀝니다 — `.rl` →(rlc)→ `.ts` →(tsc)→ `.js`.
 
-### 8.3 선언 수집과 프로젝트 단위 소진성
+### 9.3 선언 수집과 프로젝트 단위 소진성
 
 `rlc`로 컴파일하면 각 파일의 **직접(1-홉) 상대 경로 `.rl` import**를 따라가
 참조 파일의 **exported rl enum(이름 + 태그 집합)만** 뽑아 소진성 검사에
@@ -718,7 +856,7 @@ rlc: parser.rl:3:28: match on enum Token (imported from "./token.rl")
 
 ---
 
-## 9. 제한사항
+## 10. 제한사항
 
 | 항목 | 내용 |
 |------|------|
@@ -726,8 +864,8 @@ rlc: parser.rl:3:28: match on enum Token (imported from "./token.rl")
 | 패턴 | 태그 패턴(or-패턴·가드·중첩 패턴 포함)과 `_`뿐. 리터럴 패턴은 의도적으로 미지원. `_ if ...`는 rl 구문이 아닙니다 |
 | 중첩 패턴 | match 전용 — let-else 바인딩은 별칭만. or-패턴과 조합 불가. 소진성 커버 불인정(가드와 동일) |
 | 튜플 match | 튜플-패턴 사이의 or(`(A, B) \| (C, D)`)는 미지원 — 원소 수준 or로 씁니다: `(A, B \| D)`. 스크루티니 분리는 구조적이라 최상위 비교 연산자(`a < b, c > d`)는 제네릭 인자로 오인될 수 있습니다 — 괄호로 감쌉니다 |
-| 소진성 수집 | 직접(1-홉) 상대 경로 `.rl` import만. re-export 체인·패키지 경로의 enum과 손으로 쓴 유니언은 검사되지 않습니다 ([§3.6](#36-소진성-검사), [§8.3](#83-선언-수집과-프로젝트-단위-소진성)) |
-| import 재작성 | 정적 상대 경로 `.rl` 지정자만. 참조 파일의 존재는 검사하지 않습니다 ([§8](#8-모듈-rl-import-지정자-재작성)) |
+| 소진성 수집 | 직접(1-홉) 상대 경로 `.rl` import만. re-export 체인·패키지 경로의 enum과 손으로 쓴 유니언은 검사되지 않습니다 ([§3.6](#36-소진성-검사), [§9.3](#93-선언-수집과-프로젝트-단위-소진성)) |
+| import 재작성 | 정적 상대 경로 `.rl` 지정자만. 참조 파일의 존재는 검사하지 않습니다 ([§9](#9-모듈-rl-import-지정자-재작성)) |
 | `try` | `;` 필수, 식은 `(`/`<`로 시작 불가, match 내부·템플릿 보간·모듈 최상위 불가. `Option` 전파 미지원 |
 | `let-else` | 패턴 괄호와 `;` 필수, else는 발산 키워드로 끝나야 함. or-패턴·가드·중첩 패턴, `= try 식 else` 조합 미지원 |
 | `if let` | else는 블록 또는 if-let만(일반 `else if (조건)` 불가 — else 블록 안에 쓰기). or-패턴·가드 미지원. 표현식 위치 불가. `= 식` 최상위의 괄호 없는 블록 화살표는 괄호 필수 |
@@ -736,6 +874,7 @@ rlc: parser.rl:3:28: match on enum Token (imported from "./token.rl")
 | `\|>` head 판별 | 구조 추적입니다. 삼항·화살표는 괄호 필수([§7.4](#74-구조-규칙)), 이항 `in`/`instanceof`·복합 시프트 대입(`>>=`) 옆이나 세미콜론 없는 코드의 문장 경계에서는 head를 짧거나 길게 잡을 수 있습니다 — head를 괄호로 감싸면 항상 명확합니다 |
 | `\|> ?.m()` | `?.` 시작 스텝 미지원 ([§7.4](#74-구조-규칙)) |
 | `flow` | 첫 스텝이 입력 타입을 정합니다 — 제네릭 함수·커링 콤비네이터를 첫 스텝으로 쓰면 타입 인자를 명시해야 합니다. 첫 스텝은 메서드 스텝 불가. 입력 타입 주석 문법(`flow<T>`)은 없습니다 ([§7.5](#75-함수-합성-flow)) |
+| `result` 블록 | 바인딩이 하나 이상 필요하고 마지막은 세미콜론 없는 값 식이어야 합니다. 바인딩은 `Result` 전용(`Option`·`Promise` do-표기법 없음), `<-`는 블록 안 선언에서만. `<-` 뒤 식의 최상위 `>`는 제네릭 타입 인자와 구분되지 않아 괄호가 필요합니다. 블록 안의 `return`은 블록에서 빠져나가며 `try`·let-else는 쓸 수 없습니다 ([§8.4](#84-구조-규칙)) |
 | async 감지 | 토큰 단위 — 중첩 함수 안의 `await`도 async 방출을 유발하므로, 그런 match를 async가 아닌 곳에 두면 생성물이 문법 에러가 됩니다 |
 | `.tsx` | 미지원 (제네릭 화살표 함수 출력이 JSX와 충돌) |
 | 식별자 | rl 구문 안에서는 ASCII만 |

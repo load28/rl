@@ -118,4 +118,4 @@ require("./m.js")          // tsc가 emit 시점에 바꾼다
 
 - **타입 검사** — tsc의 책임으로 남긴다.
 - **`node_modules` 해석** — 상대 경로만 다룬다.
-- **`.tsx`** — 별개 제약이 있다 ([language.md §9](../reference/language.md#9-제한사항)).
+- **`.tsx`** — 별개 제약이 있다 ([language.md §10](../reference/language.md#10-제한사항)).

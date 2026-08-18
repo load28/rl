@@ -6,6 +6,8 @@
     { "include": "#rl-enum" },
     { "include": "#rl-match" },
     { "include": "#rl-flow" },
+    { "include": "#rl-result" },
+    { "include": "#rl-result-bind" },
     { "include": "source.ts" }
   ],
   "repository": {
@@ -71,6 +73,17 @@
     "rl-flow": {
       "match": "(?<![.$\\w])(flow)(?=\\s*\\|>)",
       "captures": { "1": { "name": "keyword.control.flow.rl" } }
+    },
+    "rl-result": {
+      "match": "(?<![.$\\w])(?<!class )(?<!interface )(?<!namespace )(?<!function )(result)(?=\\s*\\{)",
+      "captures": { "1": { "name": "keyword.control.result.rl" } }
+    },
+    "rl-result-bind": {
+      "begin": "(?<![.$\\w])(const|let|var)\\b(?=[^=;{}()]*<-)",
+      "beginCaptures": { "1": { "name": "storage.type.rl" } },
+      "end": "(<-)",
+      "endCaptures": { "1": { "name": "keyword.operator.result-bind.rl" } },
+      "patterns": [{ "include": "source.ts" }]
     },
     "rl-match": {
       "begin": "(?<![.$\\w])(match)\\s*(?=\\()",

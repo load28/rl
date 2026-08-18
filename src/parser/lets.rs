@@ -17,7 +17,7 @@
 //! The "else block must diverge" rule is *computed* here (a bool on the AST
 //! node) but *enforced* by [`crate::sema`] — the parser stays infallible.
 
-use super::cursor::{Cursor, dotted_at, skip_match_shape};
+use super::cursor::{Cursor, dotted_at, skip_braced_construct};
 use crate::ast::LetElseStmt;
 use crate::lexer::TokenKind;
 
@@ -124,12 +124,10 @@ fn expr_until_else(cur: &Cursor) -> Option<(usize, usize)> {
                 if super::tries::STMT_ONLY_WORDS.contains(&word) {
                     return None;
                 }
-                // Skip a whole `match ( ... ) { ... }` shape so the bare-`{`
-                // abort below doesn't reject it (the recursive parse of the
-                // expression decides whether it really is an rl match).
-                if word == "match"
-                    && let Some(past) = skip_match_shape(cur.tokens, k)
-                {
+                // Skip a whole `match ( ... ) { ... }` or `result { ... }`
+                // shape so the bare-`{` abort below doesn't reject it (the
+                // recursive parse decides whether it really is rl syntax).
+                if let Some(past) = skip_braced_construct(cur.tokens, word, k) {
                     expr_end = cur.tokens[past - 1].span.end;
                     k = past;
                     continue;

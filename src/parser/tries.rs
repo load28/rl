@@ -16,7 +16,7 @@
 //! top level (`:` without a ternary `?`, `=`, a bare `{`, closers, `,`).
 //! Anything rejected passes through verbatim, as always.
 
-use super::cursor::{Cursor, dotted_at, skip_match_shape};
+use super::cursor::{Cursor, dotted_at, skip_braced_construct};
 use crate::ast::{Span, TryStmt};
 use crate::lexer::{Token, TokenKind};
 
@@ -166,13 +166,11 @@ fn stmt_expr_end(cur: &Cursor) -> Option<(usize, usize)> {
                 if STMT_ONLY_WORDS.contains(&word) {
                     return None;
                 }
-                // A match expression carries its own top-level braces; skip
-                // the whole `match ( ... ) { ... }` shape so the bare-`{`
+                // A match expression and a `result` block carry their own
+                // top-level braces; skip the whole shape so the bare-`{`
                 // abort below doesn't reject it (the recursive parse of the
-                // expression decides whether it really is an rl match).
-                if word == "match"
-                    && let Some(past) = skip_match_shape(cur.tokens, k)
-                {
+                // expression decides whether it really is an rl construct).
+                if let Some(past) = skip_braced_construct(cur.tokens, word, k) {
                     k = past;
                     continue;
                 }

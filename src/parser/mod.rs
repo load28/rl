@@ -26,6 +26,7 @@
 //! rules; [`cursor`] is the token cursor sub-parsers consume; [`enums`]
 //! parses rl `enum` declarations; [`matches`] parses `match` expressions;
 //! [`tries`] parses `try` statements; [`lets`] parses let-else statements;
+//! [`results`] parses `result { ... }` computation blocks;
 //! [`imports`] lifts relative `.rl` module specifiers out of static
 //! import/re-export statements.
 
@@ -36,6 +37,7 @@ mod imports;
 mod lets;
 mod matches;
 mod pipes;
+mod results;
 mod tries;
 
 use crate::ast::*;
@@ -177,6 +179,7 @@ fn segment_start(seg: &Segment) -> usize {
             Some(TemplateChunk::Interp(_)) | None => 0, // first chunk is always Raw
         },
         Segment::Pipe(p) => p.head_span.start,
+        Segment::ResultBlock(b) => b.keyword_off,
     }
 }
 
@@ -224,6 +227,7 @@ impl Parser<'_> {
         let mut segments: Vec<Segment> = Vec::new();
         let mut stray_pipes: Vec<usize> = Vec::new();
         let mut stray_if_lets: Vec<usize> = Vec::new();
+        let mut stray_results: Vec<usize> = Vec::new();
         let mut seg_start = start;
         let mut i = 0usize;
 
@@ -410,6 +414,28 @@ impl Parser<'_> {
                 stray_if_lets.push(tok.span.start);
             }
 
+            // `result { ... }` — a computation block. Only a block that
+            // carries a Result binding (`const x <- ...;`) is claimed: a
+            // declaration keyword followed by `<-` is never valid
+            // TypeScript, while `result` alone is an ordinary identifier
+            // that a block statement may legally follow.
+            if !dotted
+                && word == "result"
+                && matches!(tokens.get(i + 1), Some(t) if matches!(t.kind, TokenKind::Punct(b'{')))
+            {
+                match results::parse_result_block(Cursor::new(self, tokens, i + 1, end), tok.span) {
+                    results::Attempt::Claimed(cur, byte_end, block) => {
+                        flush_verbatim(&mut segments, seg_start, tok.span.start);
+                        segments.push(Segment::ResultBlock(block));
+                        seg_start = byte_end;
+                        i = cur.idx;
+                        continue;
+                    }
+                    results::Attempt::Malformed => stray_results.push(tok.span.start),
+                    results::Attempt::Pass => {}
+                }
+            }
+
             if !dotted && is_pipe_boundary_word(word) {
                 expr = (i + 1, false);
             }
@@ -421,6 +447,7 @@ impl Parser<'_> {
             segments,
             stray_pipes,
             stray_if_lets,
+            stray_results,
         }
     }
 
@@ -468,7 +495,7 @@ impl Parser<'_> {
     /// True when the token after the `}` at `close_idx` continues the
     /// surrounding expression (`.m`, `)`, an operator, `|>`, ...) rather
     /// than starting a new statement or expression.
-    fn brace_ends_expression(&self, tokens: &[Token], close_idx: usize) -> bool {
+    pub(super) fn brace_ends_expression(&self, tokens: &[Token], close_idx: usize) -> bool {
         match tokens.get(close_idx + 1) {
             None => true,
             Some(t) => match &t.kind {

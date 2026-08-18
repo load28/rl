@@ -1893,3 +1893,228 @@ fn plain_if_statements_pass_through() {
     let src = "if (x) { a(); } else if (y) { b(); } else { c(); }\nconst z = cond ? 1 : 2;\n";
     assert_eq!(ok(src), src);
 }
+
+/* ------------------------------------------------------------------ */
+/* result computation block                                            */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn result_block_emits_an_iife_of_early_returns() {
+    let out = ok(r#"
+const data = result {
+  const user <- getUser(id);
+  const company <- getCompany(user.companyId);
+  { user, company }
+};
+"#);
+    assert!(out.contains("const data = ((() => {"), "{out}");
+    assert!(
+        out.contains(
+            "const $rl_r0 = (getUser(id)); if ($rl_r0.kind !== \"Ok\") return $rl_r0; \
+             const user = $rl_r0.value;"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "const $rl_r1 = (getCompany(user.companyId)); if ($rl_r1.kind !== \"Ok\") \
+             return $rl_r1; const company = $rl_r1.value;"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("return { kind: \"Ok\" as const, value: ({ user, company }"),
+        "{out}"
+    );
+    assert!(out.contains(") }; })())"), "{out}");
+}
+
+#[test]
+fn result_block_keeps_ordinary_statements_and_nested_constructs() {
+    let out = ok(r#"
+const data = result {
+  const user <- getUser(id);
+  // normalize before the next step
+  const name = user.name |> .trim() |> .toLowerCase();
+  const company <- getCompany(name);
+  { name, company }
+};
+"#);
+    assert!(out.contains("// normalize before the next step"), "{out}");
+    assert!(
+        out.contains("const name = (((user.name)).trim()).toLowerCase();"),
+        "{out}"
+    );
+}
+
+#[test]
+fn result_block_binding_may_be_let_var_annotated_or_destructured() {
+    let out = ok(r#"
+const a = result {
+  let n: number <- parse(raw);
+  var { x, y } <- point();
+  const [first] <- items();
+  n + x + y + first
+};
+"#);
+    assert!(out.contains("let n: number = $rl_r0.value;"), "{out}");
+    assert!(out.contains("var { x, y } = $rl_r1.value;"), "{out}");
+    assert!(out.contains("const [first] = $rl_r2.value;"), "{out}");
+}
+
+#[test]
+fn result_block_with_await_becomes_an_async_iife() {
+    let out = ok(r#"
+const data = async () => result {
+  const user <- await getUser(id);
+  user.name
+};
+"#);
+    assert!(out.contains("(await (async () => {"), "{out}");
+    assert!(out.contains("const $rl_r0 = (await getUser(id));"), "{out}");
+}
+
+#[test]
+fn result_blocks_nest_and_number_their_temporaries_uniquely() {
+    let out = ok(r#"
+const a = result {
+  const outer <- result {
+    const inner <- f();
+    inner + 1
+  };
+  outer
+};
+"#);
+    assert!(out.contains("$rl_r0"), "{out}");
+    assert!(out.contains("$rl_r1"), "{out}");
+    assert!(!out.contains("$rl_r2"), "{out}");
+}
+
+#[test]
+fn result_block_can_be_a_pipeline_head() {
+    let out = ok("const a = result {\n  const x <- f();\n  x\n} |> Result.mapP(double);\n");
+    assert!(out.contains("$rl_ap((((() => {"), "{out}");
+    assert!(out.contains(", (Result.mapP(double)))"), "{out}");
+}
+
+#[test]
+fn result_block_value_may_be_a_match_expression() {
+    let out = ok(r#"
+const a = result {
+  const r <- f();
+  match (r) {
+    Ok(value) => value,
+    Err(error) => error,
+  }
+};
+"#);
+    assert!(
+        out.contains("return { kind: \"Ok\" as const, value: (((() => {"),
+        "{out}"
+    );
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn try_and_let_else_are_rejected_inside_a_result_block() {
+    let e = err("const a = result {\n  const x <- f();\n  const y = try g();\n  x + y\n};\n");
+    assert!(
+        e.message.contains("`try` cannot be used inside"),
+        "{}",
+        e.message
+    );
+    assert!(e.message.contains("a `result` block"), "{}", e.message);
+
+    let e = err(
+        "const a = result {\n  const x <- f();\n  const Some(v) = o else { return 0; };\n  v\n};\n",
+    );
+    assert!(
+        e.message.contains("let-else cannot be used inside"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn if_let_is_allowed_inside_a_result_block() {
+    let out = ok(r#"
+const a = result {
+  const x <- f();
+  let label = "none";
+  if let Some(value) = o { label = value; }
+  { x, label }
+};
+"#);
+    assert!(out.contains("if ($rl_t1.kind === \"Some\")"), "{out}");
+}
+
+#[test]
+fn result_block_without_a_trailing_expression_is_an_error() {
+    let e = err("const a = result {\n  const x <- f();\n};\n");
+    assert!(
+        e.message
+            .contains("`result` block could not be parsed here"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (1, 11));
+}
+
+#[test]
+fn result_binding_without_a_semicolon_is_an_error() {
+    // The binding is rl syntax whether or not the `;` is there, so this is
+    // a located rl error rather than a failed output self-check.
+    let e = err("const a = result {\n  const x <- f()\n  x\n};\n");
+    assert!(
+        e.message
+            .contains("`result` block could not be parsed here"),
+        "{}",
+        e.message
+    );
+
+    let e = err("const a = result {\n  const x <- f()\n  const y <- g();\n  y\n};\n");
+    assert!(
+        e.message
+            .contains("`result` block could not be parsed here"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn result_binding_without_an_expression_is_an_error() {
+    let e = err("const a = result {\n  const x <- ;\n  x\n};\n");
+    assert!(
+        e.message
+            .contains("`result` block could not be parsed here"),
+        "{}",
+        e.message
+    );
+    let e = err("const a = result {\n  const <- f();\n  x\n};\n");
+    assert!(
+        e.message
+            .contains("`result` block could not be parsed here"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn result_block_is_an_expression_in_every_nested_position() {
+    // Its own braces are skipped whole by the `try`/let-else/`if let`
+    // expression scanners, so a block can sit inside them too.
+    let out = ok(r#"
+const s = `${result { const x <- f(); x }}`;
+const t = g(result { const y <- h(); y + 1 }, 2);
+function outer() {
+  const w = try result { const q <- m(); q };
+  return w;
+}
+"#);
+    assert!(out.contains("const s = `${((() => {"), "{out}");
+    assert!(out.contains("const t = g(((() => {"), "{out}");
+    assert!(
+        out.contains("const $rl_t2 = (((() => {") && out.contains("const w = $rl_t2.value;"),
+        "{out}"
+    );
+}

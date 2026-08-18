@@ -82,6 +82,19 @@ match 바인딩은 이름 기준이므로 `Some(value)`·`Err(error)` 또는 별
 | `transpose` | `(r: Result<Option<T>, E>) => Option<Result<T, E>>` | 층 교환: `Ok(None)`→`None`, `Err(e)`→`Some(Err(e))` |
 | `collect` | `(items: readonly Result<T, E>[]) => Result<T[], E>` | 전부 `Ok`이면 값 배열, 아니면 첫 `Err` |
 
+`Result`를 반환하는 연산을 여러 단계 잇는 코드는 `andThen`을 중첩하는 대신
+`result` 계산 블록으로 평탄하게 씁니다
+([`language.md` §8](./language.md#8-result-계산-블록)) — 단계마다 에러 타입이
+달라도 블록의 타입에서 그대로 합쳐집니다.
+
+```rl
+const view = result {
+  const user <- getUser(id);
+  const company <- getCompany(user.companyId);
+  { user, company }
+};
+```
+
 ## 파이프라인 변형 (`*P`)
 
 `|>`([`language.md` §7](./language.md#7-파이프라인-연산자-))에 바로 끼울 수

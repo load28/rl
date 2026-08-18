@@ -1,6 +1,6 @@
 # rl — AI context
 
-rl = TypeScript + 6 constructs; `rlc` compiles `.rl` → plain TS. Write normal TS everywhere; rl syntax only for: enum (tagged union), match, try, let-else, if let, `|>` (+ `flow` composition).
+rl = TypeScript + 7 constructs; `rlc` compiles `.rl` → plain TS. Write normal TS everywhere; rl syntax only for: enum (tagged union), match, try, let-else, if let, `|>` (+ `flow` composition), `result` block.
 
 CONTRACTS:
 - Every valid TS file is a valid `.rl` file. rlc transforms only text parsing COMPLETELY as an rl construct; all else passes through byte-for-byte.
@@ -94,6 +94,25 @@ const label = half(4) |> Option.mapP(x => x + 1) |> Option.unwrapOrP(0) |> .toFi
 - `flow` is contextual — only a head that is exactly `flow`; a `flow` VARIABLE pipes when parenthesized (`(flow) |> f`). `flow |> f` (one step) = `f`.
 - flow's FIRST step fixes the input type and cannot be a method step (compile error). Generic/curried first step → `unknown`; give type args (`flow |> wrap<number> |> ...`, `flow |> Option.mapP((x: number) => x + 1) |> ...`). Later steps infer from the previous step.
 
+## result block
+
+```rl
+const data = result {
+  const user <- getUser(id);              // Ok → bind value; Err → whole block IS that Err
+  const name = user.name |> .trim();      // ordinary TS/rl statements between bindings
+  const company <- getCompany(user.companyId);
+  { user, company, name }                 // LAST expr, NO `;` — wrapped in Ok
+};
+```
+- Flat replacement for nested `Result.andThenP(user => ... )` callbacks; every earlier binding stays in scope.
+- `result` is contextual: block is claimed ONLY if it has ≥1 `<-` binding, else plain identifier + block statement (passthrough). Write `<-` with no space.
+- Binding = `const|let|var <name|destructuring|: type> <- expr;` — `;` MANDATORY on bindings, FORBIDDEN on the final value expr (else located compile error). A top-level `>` in the bound expr needs parens (generic-type-argument ambiguity).
+- Result only (no Option/Promise do-notation, no `<-` outside a result block).
+- Block is an EXPRESSION (compiles to an IIFE of early returns): usable anywhere, incl. pipeline head. `await` inside → async IIFE, awaited.
+- Error types UNION automatically: bindings of `Result<_, E1>` + `Result<_, E2>` → block assignable to `Result<T, E1 | E2>`. rlc infers NO types; tsc narrows each step.
+- `return` inside the block returns from the BLOCK. So `try`/let-else are FORBIDDEN inside (located error) — use `<-`. `if let` is fine.
+- Final expr already a Result → nested `Result<Result<...>>`; bind it with `<-` instead.
+
 ## @rl/std
 
 ```rl
@@ -148,4 +167,4 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 
 ## Checklist
 
-match parens + `_` last + object arms `({...})`; bind by field name not position; no literal patterns; `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; relative imports keep `.rl`; verify with `npx rlc --check src` + `tsc --noEmit`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.
+match parens + `_` last + object arms `({...})`; bind by field name not position; no literal patterns; `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check src` + `tsc --noEmit`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.
