@@ -8,6 +8,31 @@
 
 ### Changed
 
+- **`andThen`이 에러 타입을 유니언으로 누적한다** (TASK-066). 이어 붙이는
+  함수가 자기 방식으로 실패할 수 있다는 사실이 타입에 반영된다:
+
+  ```
+  Result<T, E>  +  (T) => Result<U, F>   →   Result<U, E | F>
+  ```
+
+  - 이전에는 `andThen`이 앞뒤에 같은 `E`를 요구해서
+    (`(r: Result<T, E>, f: (T) => Result<U, E>)`), 에러 타입이 다른 두 함수를
+    이으면 `TS2345`로 거절됐다. 이제 `Result.andThen(getUser(), getCompany)`가
+    `Result<Company, UserError | CompanyError>`가 된다.
+  - `Result.andThenP`도 같은 규칙이라 파이프라인 스텝마다 에러가 쌓인다:
+    `loadUser() |> Result.andThenP(fetchProfile) |> Result.andThenP(validate)`
+    → `Result<Profile, ConfigError | TokenError | FetchError | ValidationError>`.
+    `try`와 `result` 블록이 만드는 흩어진 형태(`Ok<T> | Err<E1> | Err<E2>`)도
+    그대로 받는다.
+  - `map`/`mapP`는 새 실패를 만들지 않으므로 그대로다 (`Result<U, E>`).
+  - 표준 라이브러리가 `ErrorOf<R>`(결과 타입에서 에러 쪽만 뽑는 타입)을 함께
+    export한다. 에러 타입 수집은 여전히 tsc의 몫이고, rlc가 방출하는 코드에는
+    조건부 타입이 없다.
+  - **주의**: `andThenP`는 넘겨준 함수에서 입력 타입을 읽는다. 이름 붙은 함수는
+    그대로 되지만, 인라인 화살표 함수는 매개변수 주석이 필요하다
+    (`Result.andThenP((u: User) => f(u))`).
+  - 방출되는 런타임 값과 코드는 바이트 단위로 그대로다.
+
 - **`Result` 생성자가 자기 변종의 타입만 받는다** (TASK-065). 표준
   라이브러리가 두 케이스에 이름을 주고(`Ok<T>`/`Err<E>`, 타입만 export)
   `Result<T, E>`를 그 합으로 정의한다:

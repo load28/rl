@@ -132,6 +132,52 @@ fn run(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// Compile a snippet that imports the standard library, emit JS for it and
+/// the std module with tsc, execute with node, return stdout lines. The
+/// two-file shape mirrors real projects: `./rl.js` in the source resolves to
+/// `rl.ts` for tsc and to the emitted `rl.js` for node.
+fn run_with_std(src: &str) -> Vec<String> {
+    let code = compile(src, &Options::default()).expect("rl compile failed");
+    let dir = tmpdir();
+    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    fs::write(dir.join("main.ts"), &code).unwrap();
+    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
+    let out = Command::new("tsc")
+        .arg(dir.join("main.ts"))
+        .arg(dir.join("rl.ts"))
+        .arg("--outDir")
+        .arg(&dir)
+        .args([
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+        ])
+        .output()
+        .expect("failed to run tsc");
+    assert!(
+        out.status.success(),
+        "tsc failed:\n{}\n---compiled---\n{code}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = Command::new("node")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("failed to run node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 macro_rules! require_toolchain {
     () => {
         if !have("tsc") || !have("node") {
@@ -366,12 +412,7 @@ console.log(JSON.stringify(Shape.Circle(1)));
 #[test]
 fn runtime_std_option_result_functional_pipeline() {
     require_toolchain!();
-    // Two-file setup: the standard library module next to a compiled rl file
-    // that imports it. nodenext resolution so the emitted JS runs under node
-    // unchanged (`./rl.js` → tsc reads rl.ts, node loads rl.js).
-    let dir = tmpdir();
-    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
-    let code = compile(
+    let lines = run_with_std(
         r#"
 import { Option, Result } from "./rl.js";
 
@@ -399,45 +440,7 @@ console.log(Option.unwrapOr(Option.map(Option.fromNullable([1, 2].find((n) => n 
 console.log(Result.unwrapOr(Result.andThen(parseNum("10"), (n): Result<number, string> => n > 5 ? Result.Ok(n * 2) : Result.Err("small")), -1));
 console.log(Result.isErr(Result.fromThrowable(() => JSON.parse("{"))));
 "#,
-        &Options::default(),
-    )
-    .expect("rl compile failed");
-    fs::write(dir.join("main.ts"), &code).unwrap();
-    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
-    let out = Command::new("tsc")
-        .arg(dir.join("main.ts"))
-        .arg(dir.join("rl.ts"))
-        .arg("--outDir")
-        .arg(&dir)
-        .args([
-            "--strict",
-            "--target",
-            "es2022",
-            "--module",
-            "nodenext",
-            "--moduleResolution",
-            "nodenext",
-        ])
-        .output()
-        .expect("failed to run tsc");
-    assert!(
-        out.status.success(),
-        "tsc failed:\n{}\n---compiled---\n{code}",
-        String::from_utf8_lossy(&out.stdout)
     );
-    let out = Command::new("node")
-        .arg(dir.join("main.js"))
-        .output()
-        .expect("failed to run node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect();
     assert_eq!(
         lines,
         vec![
@@ -454,9 +457,7 @@ console.log(Result.isErr(Result.fromThrowable(() => JSON.parse("{"))));
 #[test]
 fn runtime_std_new_combinators() {
     require_toolchain!();
-    let dir = tmpdir();
-    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
-    let code = compile(
+    let lines = run_with_std(
         r#"
 import { Option, Result } from "./rl.js";
 
@@ -476,45 +477,7 @@ Result.fromPromise(Promise.resolve(5))
   .then(() => Result.fromPromise(Promise.reject("boom")))
   .then((r) => console.log(JSON.stringify(r)));
 "#,
-        &Options::default(),
-    )
-    .expect("rl compile failed");
-    fs::write(dir.join("main.ts"), &code).unwrap();
-    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
-    let out = Command::new("tsc")
-        .arg(dir.join("main.ts"))
-        .arg(dir.join("rl.ts"))
-        .arg("--outDir")
-        .arg(&dir)
-        .args([
-            "--strict",
-            "--target",
-            "es2022",
-            "--module",
-            "nodenext",
-            "--moduleResolution",
-            "nodenext",
-        ])
-        .output()
-        .expect("failed to run tsc");
-    assert!(
-        out.status.success(),
-        "tsc failed:\n{}\n---compiled---\n{code}",
-        String::from_utf8_lossy(&out.stdout)
     );
-    let out = Command::new("node")
-        .arg(dir.join("main.js"))
-        .output()
-        .expect("failed to run node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect();
     assert_eq!(
         lines,
         vec![
@@ -537,9 +500,7 @@ Result.fromPromise(Promise.resolve(5))
 #[test]
 fn runtime_try_error_propagation() {
     require_toolchain!();
-    let dir = tmpdir();
-    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
-    let code = compile(
+    let lines = run_with_std(
         r#"
 import { Result } from "./rl.js";
 
@@ -567,45 +528,7 @@ console.log(JSON.stringify(sumList(["1", "2", "3"])));
 console.log(JSON.stringify(sumList(["1", "x"])));
 console.log(JSON.stringify(checked("4")));
 "#,
-        &Options::default(),
-    )
-    .expect("rl compile failed");
-    fs::write(dir.join("main.ts"), &code).unwrap();
-    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
-    let out = Command::new("tsc")
-        .arg(dir.join("main.ts"))
-        .arg(dir.join("rl.ts"))
-        .arg("--outDir")
-        .arg(&dir)
-        .args([
-            "--strict",
-            "--target",
-            "es2022",
-            "--module",
-            "nodenext",
-            "--moduleResolution",
-            "nodenext",
-        ])
-        .output()
-        .expect("failed to run tsc");
-    assert!(
-        out.status.success(),
-        "tsc failed:\n{}\n---compiled---\n{code}",
-        String::from_utf8_lossy(&out.stdout)
     );
-    let out = Command::new("node")
-        .arg(dir.join("main.js"))
-        .output()
-        .expect("failed to run node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect();
     assert_eq!(
         lines,
         vec![
@@ -621,9 +544,7 @@ fn runtime_let_else_narrows_and_diverges() {
     require_toolchain!();
     // tsc --strict must accept the emitted destructuring: the diverging
     // else block narrows the temporary to the matched case.
-    let dir = tmpdir();
-    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
-    let code = compile(
+    let lines = run_with_std(
         r#"
 import { Option, Result } from "./rl.js";
 
@@ -651,45 +572,7 @@ console.log(greet(2));
 console.log(double("21"));
 console.log(double("x"));
 "#,
-        &Options::default(),
-    )
-    .expect("rl compile failed");
-    fs::write(dir.join("main.ts"), &code).unwrap();
-    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
-    let out = Command::new("tsc")
-        .arg(dir.join("main.ts"))
-        .arg(dir.join("rl.ts"))
-        .arg("--outDir")
-        .arg(&dir)
-        .args([
-            "--strict",
-            "--target",
-            "es2022",
-            "--module",
-            "nodenext",
-            "--moduleResolution",
-            "nodenext",
-        ])
-        .output()
-        .expect("failed to run tsc");
-    assert!(
-        out.status.success(),
-        "tsc failed:\n{}\n---compiled---\n{code}",
-        String::from_utf8_lossy(&out.stdout)
     );
-    let out = Command::new("node")
-        .arg(dir.join("main.js"))
-        .output()
-        .expect("failed to run node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect();
     assert_eq!(lines, vec!["hello, amy", "who?", "42", "-1"]);
 }
 
@@ -814,6 +697,257 @@ console.log(load());
 "#,
     );
     assert!(!ok, "tsc accepted an uncovered error type:\n{out}");
+}
+
+/// Declarations shared by the `andThen` error-union tests: four steps, each
+/// failing its own way, so a chain that loses an error type is visible in the
+/// asserted union.
+const ERROR_UNION_PRELUDE: &str = r#"
+import { Result } from "./rl.js";
+
+type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+type User = { id: number };
+type Company = { name: string };
+type Profile = { title: string };
+type ConfigError = { tag: "config" };
+type TokenError = { tag: "token" };
+type FetchError = { tag: "fetch" };
+type ValidationError = { tag: "validation" };
+
+declare function loadConfig(): Result<string, ConfigError>;
+declare function loadToken(config: string): Result<User, TokenError>;
+declare function getCompany(user: User): Result<Company, FetchError>;
+declare function fetchProfile(user: User): Result<Profile, FetchError>;
+declare function validateProfile(profile: Profile): Result<Profile, ValidationError>;
+"#;
+
+#[test]
+fn std_result_and_then_unions_the_two_error_types() {
+    require_toolchain!();
+    // `andThen` takes the chained function's error type as its own generic,
+    // so chaining a `Result<User, TokenError>` with a step that fails with
+    // `FetchError` keeps both — no `mapErr` to a common type first.
+    let (ok, out) = typecheck_with_std(&format!(
+        r#"{ERROR_UNION_PRELUDE}
+declare const first: Result<User, TokenError>;
+
+const chained = Result.andThen(first, (user) => getCompany(user));
+const exact: Exact<typeof chained, Result<Company, TokenError | FetchError>> = true;
+
+console.log(chained, exact);
+"#
+    ));
+    assert!(ok, "andThen lost an error type:\n{out}");
+}
+
+#[test]
+fn std_result_and_then_on_a_variant_typed_value_keeps_the_chained_error() {
+    require_toolchain!();
+    // A value typed as the `Ok<T>` variant alone (what `Result.Ok(...)` and a
+    // never-failing function give) offers nothing to infer the incoming `E`
+    // from. The `E = never` default is what keeps that case precise instead of
+    // collapsing the union to `unknown`.
+    let (ok, out) = typecheck_with_std(&format!(
+        r#"{ERROR_UNION_PRELUDE}
+const chained = Result.andThen(Result.Ok({{ id: 1 }}), (user: User) => fetchProfile(user));
+const exact: Exact<typeof chained, Result<Profile, FetchError>> = true;
+
+console.log(chained, exact);
+"#
+    ));
+    assert!(
+        ok,
+        "andThen on an Ok value lost the chained error type:\n{out}"
+    );
+}
+
+#[test]
+fn std_result_and_then_p_accumulates_error_types_along_a_pipeline() {
+    require_toolchain!();
+    // The end-to-end shape from the design: `try` collects two error types
+    // into the function's inferred return type, and every `andThenP` step
+    // adds its own. rlc collects nothing — this is tsc's union inference.
+    let (ok, out) = typecheck_with_std(&format!(
+        r#"{ERROR_UNION_PRELUDE}
+function loadUser() {{
+  const config = try loadConfig();
+  const token = try loadToken(config);
+  return Result.Ok(token);
+}}
+
+const profile = loadUser()
+  |> Result.andThenP(fetchProfile)
+  |> Result.andThenP(validateProfile);
+
+const exact: Exact<
+  typeof profile,
+  Result<Profile, ConfigError | TokenError | FetchError | ValidationError>
+> = true;
+
+console.log(profile, exact);
+"#
+    ));
+    assert!(ok, "the pipeline lost an error type:\n{out}");
+}
+
+#[test]
+fn std_result_map_p_keeps_the_error_type_it_was_given() {
+    require_toolchain!();
+    // `map`/`mapP` add no failure of their own, so they carry `E` through
+    // unchanged — including a union an earlier `andThenP` accumulated.
+    let (ok, out) = typecheck_with_std(&format!(
+        r#"{ERROR_UNION_PRELUDE}
+declare const first: Result<User, TokenError>;
+
+const title = first
+  |> Result.andThenP(fetchProfile)
+  |> Result.mapP((profile) => profile.title);
+
+const exact: Exact<typeof title, Result<string, TokenError | FetchError>> = true;
+
+console.log(title, exact);
+"#
+    ));
+    assert!(ok, "mapP changed the error type:\n{out}");
+}
+
+#[test]
+fn std_result_and_then_p_composes_under_flow() {
+    require_toolchain!();
+    // `andThenP` returns a function still generic in `E`, so a `flow`
+    // composition of two steps stays open at its input end: applying it to a
+    // `Result<User, TokenError>` unions that error in too.
+    let (ok, out) = typecheck_with_std(&format!(
+        r#"{ERROR_UNION_PRELUDE}
+declare const first: Result<User, TokenError>;
+
+const pipeline = flow
+  |> Result.andThenP(fetchProfile)
+  |> Result.andThenP(validateProfile);
+
+const profile = pipeline(first);
+const exact: Exact<
+  typeof profile,
+  Result<Profile, TokenError | FetchError | ValidationError>
+> = true;
+
+console.log(profile, exact);
+"#
+    ));
+    assert!(ok, "flow composition lost an error type:\n{out}");
+}
+
+#[test]
+fn std_result_and_then_p_takes_an_annotated_inline_callback() {
+    require_toolchain!();
+    // The curried form reads `T` off the chained function, so an inline
+    // callback carries its own parameter annotation. A named function (every
+    // other test here) needs nothing.
+    let (ok, out) = typecheck_with_std(&format!(
+        r#"{ERROR_UNION_PRELUDE}
+declare const first: Result<User, TokenError>;
+
+const profile = first |> Result.andThenP((user: User) => fetchProfile(user));
+const exact: Exact<typeof profile, Result<Profile, TokenError | FetchError>> = true;
+
+console.log(profile, exact);
+"#
+    ));
+    assert!(ok, "an annotated inline callback did not typecheck:\n{out}");
+}
+
+#[test]
+fn std_result_block_output_pipes_into_and_then_p() {
+    require_toolchain!();
+    // A `result` block infers the same shape a `try` function does — one `Ok`
+    // arm plus one `Err` arm per binding — so its value chains on with its
+    // error types intact.
+    let (ok, out) = typecheck_with_std(&format!(
+        r#"{ERROR_UNION_PRELUDE}
+const user = result {{
+  const config <- loadConfig();
+  const loaded <- loadToken(config);
+  loaded
+}};
+
+const profile = user |> Result.andThenP(fetchProfile);
+const exact: Exact<
+  typeof profile,
+  Result<Profile, ConfigError | TokenError | FetchError>
+> = true;
+
+console.log(profile, exact);
+"#
+    ));
+    assert!(
+        ok,
+        "a result block lost its error types in a pipeline:\n{out}"
+    );
+}
+
+#[test]
+fn std_result_and_then_error_union_stays_checked_against_an_annotation() {
+    require_toolchain!();
+    // Accumulating errors is not a hole either: a declared return type that
+    // covers only one of the two chained error types is still a tsc error.
+    let (ok, out) = typecheck_with_std(&format!(
+        r#"{ERROR_UNION_PRELUDE}
+declare const first: Result<User, TokenError>;
+
+function chain(): Result<Profile, TokenError> {{
+  return Result.andThen(first, (user) => fetchProfile(user));
+}}
+
+console.log(chain());
+"#
+    ));
+    assert!(
+        !ok,
+        "tsc accepted a return type missing an error case:\n{out}"
+    );
+}
+
+#[test]
+fn runtime_result_and_then_chain_short_circuits_on_the_first_err() {
+    require_toolchain!();
+    // The types changed; the emitted values did not. Both spellings still
+    // return the first `Err` untouched and run the rest only on `Ok`.
+    let lines = run_with_std(
+        r#"
+import { Result } from "./rl.js";
+
+type Parsed = { n: number };
+type ParseError = { tag: "parse"; raw: string };
+type RangeError = { tag: "range"; n: number };
+
+const parse = (raw: string): Result<Parsed, ParseError> =>
+  Number.isNaN(Number(raw))
+    ? Result.Err({ tag: "parse" as const, raw })
+    : Result.Ok({ n: Number(raw) });
+
+const inRange = (p: Parsed): Result<number, RangeError> =>
+  p.n <= 10 ? Result.Ok(p.n) : Result.Err({ tag: "range" as const, n: p.n });
+
+const check = (raw: string) => parse(raw) |> Result.andThenP(inRange);
+
+console.log(JSON.stringify(check("4")));
+console.log(JSON.stringify(check("40")));
+console.log(JSON.stringify(check("x")));
+console.log(JSON.stringify(Result.andThen(parse("4"), inRange)));
+console.log(JSON.stringify(Result.andThen(parse("x"), inRange)));
+"#,
+    );
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Ok","value":4}"#,
+            r#"{"kind":"Err","error":{"tag":"range","n":40}}"#,
+            r#"{"kind":"Err","error":{"tag":"parse","raw":"x"}}"#,
+            r#"{"kind":"Ok","value":4}"#,
+            r#"{"kind":"Err","error":{"tag":"parse","raw":"x"}}"#,
+        ]
+    );
 }
 
 #[test]
@@ -1847,9 +1981,7 @@ fn runtime_result_block_replaces_nested_combinator_callbacks() {
     require_toolchain!();
     // The motivating shape: three dependent steps that all stay in scope,
     // written flat, against the real standard library.
-    let dir = tmpdir();
-    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
-    let code = compile(
+    let lines = run_with_std(
         r#"
 import { Result } from "./rl.js";
 
@@ -1874,45 +2006,7 @@ const view = (id: number) => result {
 console.log(JSON.stringify(view(1)));
 console.log(JSON.stringify(view(2)));
 "#,
-        &Options::default(),
-    )
-    .expect("rl compile failed");
-    fs::write(dir.join("main.ts"), &code).unwrap();
-    fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
-    let out = Command::new("tsc")
-        .arg(dir.join("main.ts"))
-        .arg(dir.join("rl.ts"))
-        .arg("--outDir")
-        .arg(&dir)
-        .args([
-            "--strict",
-            "--target",
-            "es2022",
-            "--module",
-            "nodenext",
-            "--moduleResolution",
-            "nodenext",
-        ])
-        .output()
-        .expect("failed to run tsc");
-    assert!(
-        out.status.success(),
-        "tsc failed:\n{}\n---compiled---\n{code}",
-        String::from_utf8_lossy(&out.stdout)
     );
-    let out = Command::new("node")
-        .arg(dir.join("main.js"))
-        .output()
-        .expect("failed to run node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect();
     assert_eq!(
         lines,
         vec![
