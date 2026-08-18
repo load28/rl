@@ -284,6 +284,15 @@ fn bitwise_or_and_unions_are_not_pipelines() {
 }
 
 #[test]
+fn flow_is_an_ordinary_identifier_in_typescript() {
+    // `flow` only means composition at a pipeline head, and a pipeline
+    // needs a `|>` — which valid TypeScript cannot contain.
+    assert_passthrough("import { flow } from \"fp-ts/function\";\nconst f = flow(g, h);\n");
+    assert_passthrough("const flow = 1;\nconst a = flow | mask;\nconst b = o.flow;\n");
+    assert_passthrough("function flow<T>(x: T): T { return x; }\ntype flow = number;\n");
+}
+
+#[test]
 fn pipe_bytes_in_strings_comments_regexes_and_templates_pass_through() {
     assert_passthrough(
         "const s = \"a |> b\";\n// c |> d\n/* e |> f */\nconst r = /\\|>/;\nconst t = `g |> h`;\n",

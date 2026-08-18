@@ -1364,6 +1364,53 @@ console.log(order.join(","), out);
 }
 
 #[test]
+fn flow_composition_infers_input_from_its_first_step() {
+    require_toolchain!();
+    // The composed function's parameter type comes from the first step,
+    // and every later step (curried combinator, method step) infers from
+    // the previous step's return type — no annotations anywhere.
+    let (ok, out) = typecheck(&format!(
+        "{PIPE_PRELUDE}\nconst label = flow |> half |> Option.mapP(x => x + 1) \
+         |> Option.unwrapOrP(0) |> .toFixed(1);\nconst s: string = label(4);\n"
+    ));
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn flow_composition_keeps_the_first_step_arity() {
+    require_toolchain!();
+    // Composition is emitted with a rest-tuple parameter, so a multi-argument
+    // first step stays multi-argument (a unary `flow` type would lose this).
+    let (ok, out) = typecheck(
+        "const add = (a: number, b: number) => a + b;\nconst f = flow |> add |> ((n: number) => n * 2);\nconst v: number = f(1, 2);\n",
+    );
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn flow_composition_input_mismatch_is_a_type_error_on_user_text() {
+    require_toolchain!();
+    // Calling the composed function with the wrong argument type is the
+    // user's error — rlc emits no type tricks that could hide it.
+    let (ok, out) = typecheck(
+        "const parse = (s: string) => s.length;\nconst f = flow |> parse |> ((n: number) => n + 1);\nconst v = f(3);\n",
+    );
+    assert!(!ok, "{out}");
+}
+
+#[test]
+fn flow_composition_runs_left_to_right_when_called() {
+    require_toolchain!();
+    let lines = run(r#"
+const order: string[] = [];
+const tap = <T,>(name: string) => (v: T): T => { order.push(name); return v; };
+const f = flow |> tap<number>("s1") |> .toFixed(0) |> tap("s2");
+console.log(order.join(","), "|", f(10), "|", order.join(","));
+"#);
+    assert_eq!(lines, [" | 10 | s1,s2"]); // nothing ran until the call
+}
+
+#[test]
 fn pipeline_await_in_head_runs_in_the_surrounding_async_context() {
     require_toolchain!();
     let lines = run(r#"

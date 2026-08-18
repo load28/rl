@@ -110,6 +110,8 @@ TS가 아니어서 아래 출력 검증 에러로 드러납니다.
 |--------|-------------|
 | `` pipeline: `|>` could not be parsed here (steps must be expressions; parenthesize ternaries and arrow functions) `` | `\|>`가 파이프라인으로 완전히 파싱되지 않았습니다. `\|>`는 유효한 TS에 존재할 수 없어 통과시킬 수 없으므로 위치와 함께 에러입니다. 흔한 원인: head/step 최상위의 삼항이나 괄호 없는 화살표(괄호로 감쌉니다 — `(c ? a : b) \|> f`, `x \|> (n => n + 1)`), 빈 스텝(`x \|>;`), `?.` 시작 스텝. 위치는 `\|>` |
 
+| `` `flow`: the first step cannot be a method step — it is the composed function's input, so it must be a function (`flow \|> ((s: string) => s.trim()) \|> ...`) `` | 합성(`flow`)에는 아직 값이 없어 첫 스텝에 메서드 체인을 걸 수 없습니다. 입력을 받는 함수를 첫 스텝으로 쓰거나(`flow \|> parse \|> .trim()`), 괄호 화살표로 감쌉니다. 위치는 첫 스텝의 `.` ([`language.md` §7.5](./language.md#75-함수-합성-flow)) |
+
 head/step 내부의 `try` 문은 위의 try 위치 제약 에러로 보고됩니다
 ([`language.md` §7.4](./language.md#74-구조-규칙)).
 

@@ -93,7 +93,7 @@ const HELP_TOPICS: &[(&str, &[&str], &str)] = &[
     ("try", &[], "## try"),
     ("let-else", &["letelse"], "## let-else"),
     ("if-let", &["iflet"], "## if let"),
-    ("pipe", &["pipeline", "|>"], "## |>"),
+    ("pipe", &["pipeline", "|>", "flow"], "## |>"),
     ("std", &["option", "result"], "## @rl/std"),
     ("modules", &["imports"], "## Modules"),
     ("install", &["update"], "## Install"),

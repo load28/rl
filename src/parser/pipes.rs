@@ -10,7 +10,11 @@
 //!
 //! The *head* is found by the main token loop, which tracks the start of
 //! the expression currently being scanned (see `expr start tracking` in
-//! [`super`]); this module owns the forward scan over the steps. A step
+//! [`super`]); this module owns the forward scan over the steps. A head
+//! that is exactly the bare identifier `flow` is the composition keyword
+//! (`flow |> f |> g` builds a function instead of flowing a value) — a
+//! contextual keyword, so a variable named `flow` still pipes when
+//! parenthesized (`(flow) |> f`). A step
 //! runs to the next top-level `|>` or to a terminator the pipeline cannot
 //! contain at its top level (`;`, `,`, an unmatched closer, or the region
 //! end). A top-level `?`, `:`, `=` (assignment), `=>`, or statement-only
@@ -29,6 +33,20 @@ pub(super) fn is_assignment_eq(bytes: &[u8], span: Span) -> bool {
     let prev = span.start.checked_sub(1).map(|p| bytes[p]);
     let next = bytes.get(span.end).copied();
     next != Some(b'=') && !matches!(prev, Some(b'=' | b'!' | b'<' | b'>'))
+}
+
+/// True when the head is exactly the bare `flow` keyword — one identifier
+/// token spelled `flow`. A dotted or called head (`a.flow`, `flow()`) has
+/// more tokens and stays an ordinary value head.
+fn is_flow_head(
+    parser: &super::Parser,
+    tokens: &[Token],
+    head_idx: usize,
+    pipe_idx: usize,
+) -> bool {
+    pipe_idx - head_idx == 1
+        && matches!(tokens[head_idx].kind, TokenKind::Ident)
+        && &parser.src[tokens[head_idx].span.start..tokens[head_idx].span.end] == "flow"
 }
 
 /// `tokens[pipe_idx]` is a `|>` token and `tokens[head_idx..pipe_idx]` is
@@ -111,7 +129,8 @@ pub(super) fn parse_pipeline(
         return None;
     }
 
-    let head = parser.parse_tokens(&tokens[head_idx..pipe_idx], head_span.start, head_span.end);
+    let head = (!is_flow_head(parser, tokens, head_idx, pipe_idx))
+        .then(|| parser.parse_tokens(&tokens[head_idx..pipe_idx], head_span.start, head_span.end));
     Some((
         k,
         PipeExpr {

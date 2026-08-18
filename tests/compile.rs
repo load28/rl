@@ -1305,6 +1305,101 @@ fn try_inside_a_pipeline_step_is_an_error() {
 }
 
 /* ------------------------------------------------------------------ */
+/* flow (function composition)                                         */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn flow_emits_nested_composition_helper_calls() {
+    let out = ok("const f = flow |> parse |> double |> label;\n");
+    assert!(
+        out.contains("const f = $rl_fl($rl_fl((parse), (double)), (label));"),
+        "{out}"
+    );
+    assert!(out.contains(
+        "function $rl_fl<A extends unknown[], B, C>(f: (...a: A) => B, g: (b: B) => C): \
+         (...a: A) => C { return (...a: A) => g(f(...a)); }"
+    ));
+    // a composition is not a value pipeline — no apply helper
+    assert!(!out.contains("$rl_ap"), "{out}");
+}
+
+#[test]
+fn flow_method_step_becomes_a_contextually_typed_arrow() {
+    let out = ok("const f = flow |> parse |> .toFixed(1);\n");
+    assert!(
+        out.contains("const f = $rl_fl((parse), (($rl_v) => ($rl_v).toFixed(1)));"),
+        "{out}"
+    );
+}
+
+#[test]
+fn flow_with_a_single_step_is_that_step_and_needs_no_helper() {
+    let out = ok("const f = flow |> parse;\n");
+    assert!(out.contains("const f = (parse);"), "{out}");
+    assert!(!out.contains("$rl_fl"), "{out}");
+}
+
+#[test]
+fn flow_helper_is_emitted_once_per_file() {
+    let out = ok("const a = flow |> f |> g;\nconst b = flow |> h |> i;\n");
+    assert_eq!(out.matches("function $rl_fl").count(), 1, "{out}");
+    assert!(out.trim_end().ends_with("g(f(...a)); }"), "{out}");
+}
+
+#[test]
+fn file_without_flow_gets_no_composition_helper() {
+    let out = ok("const a = x |> f;\n");
+    assert!(!out.contains("$rl_fl"), "{out}");
+}
+
+#[test]
+fn flow_is_a_contextual_keyword_only_at_a_pipeline_head() {
+    // a `flow` variable still pipes when parenthesized, and a dotted or
+    // called head is an ordinary value head
+    let out = ok("const a = (flow) |> f;\nconst b = o.flow |> f;\nconst c = flow() |> f;\n");
+    assert!(out.contains("const a = $rl_ap(((flow)), (f));"), "{out}");
+    assert!(out.contains("const b = $rl_ap((o.flow), (f));"), "{out}");
+    assert!(out.contains("const c = $rl_ap((flow()), (f));"), "{out}");
+    assert!(!out.contains("$rl_fl"), "{out}");
+}
+
+#[test]
+fn flow_composes_inside_expressions() {
+    let out = ok("const a = xs.map(flow |> parse |> double);\nconst b = `${flow |> f |> g}`;\n");
+    assert!(
+        out.contains("const a = xs.map($rl_fl((parse), (double)));"),
+        "{out}"
+    );
+    assert!(out.contains("const b = `${$rl_fl((f), (g))}`;"), "{out}");
+}
+
+#[test]
+fn flow_step_can_be_a_parenthesized_arrow() {
+    let out = ok("const f = flow |> parse |> (n => n + 1);\n");
+    assert!(
+        out.contains("const f = $rl_fl((parse), ((n => n + 1)));"),
+        "{out}"
+    );
+}
+
+#[test]
+fn flow_first_step_cannot_be_a_method_step() {
+    let e = err("const f = flow |> .trim() |> lower;\n");
+    assert!(
+        e.message.contains("the first step cannot be a method step"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (1, 19));
+}
+
+#[test]
+fn flow_without_a_step_is_an_error() {
+    let e = err("const f = flow |>;\n");
+    assert!(e.message.contains("could not be parsed"), "{}", e.message);
+}
+
+/* ------------------------------------------------------------------ */
 /* tuple match                                                         */
 /* ------------------------------------------------------------------ */
 
