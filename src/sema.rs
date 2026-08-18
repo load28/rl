@@ -536,29 +536,16 @@ impl Checker<'_> {
     /// wins. A local enum shadows an imported or built-in enum of the same
     /// name entirely; an imported enum likewise shadows a built-in.
     fn check_exhaustiveness(&self) -> Result<(), RlError> {
+        // The candidate table does not depend on the match being checked, so
+        // it is built once for the file rather than once per match — with
+        // many enums and many matches the per-pair rebuild was the dominant
+        // cost of this phase.
+        let candidates = self.candidate_enums();
         for check in &self.match_checks {
             // candidate with fewest missing cases: (name, origin, missing)
             let mut best: Option<(&str, Origin, Vec<&str>)> = None;
             let mut satisfied = false;
-            let locals = self.enums.iter().map(|(name, cases)| {
-                let cases: Vec<&str> = cases.iter().map(String::as_str).collect();
-                (name.as_str(), Origin::Local, cases)
-            });
-            let externs = self
-                .externs
-                .iter()
-                .filter(|e| !self.enums.contains_key(&e.name))
-                .map(|e| {
-                    let cases: Vec<&str> = e.tags.iter().map(String::as_str).collect();
-                    (e.name.as_str(), Origin::Extern(e.from.as_deref()), cases)
-                });
-            let builtins = crate::stdlib::BUILTIN_ENUMS
-                .iter()
-                .filter(|(name, _)| {
-                    !self.enums.contains_key(*name) && !self.externs.iter().any(|e| e.name == *name)
-                })
-                .map(|(name, cases)| (*name, Origin::Builtin, cases.to_vec()));
-            for (name, origin, cases) in locals.chain(externs).chain(builtins) {
+            for (name, origin, cases) in candidates.iter().map(|(n, o, c)| (*n, *o, c)) {
                 if !check.tags.iter().all(|t| cases.contains(&t.as_str())) {
                     continue; // not a candidate: some arm tag is not a case of this enum
                 }
@@ -604,32 +591,46 @@ impl Checker<'_> {
 
     /// Resolves a tuple-match position's tag set to an enum: local >
     /// imported > built-in, the first whose cases contain every tag.
-    fn resolve_enum(&self, tags: &[String]) -> Option<(&str, Vec<&str>)> {
-        let contains_all = |cases: &[&str]| tags.iter().all(|t| cases.contains(&t.as_str()));
+    fn resolve_enum<'c>(
+        candidates: &'c [(&'c str, Origin<'c>, Vec<&'c str>)],
+        tags: &[String],
+    ) -> Option<(&'c str, &'c [&'c str])> {
+        candidates
+            .iter()
+            .find(|(_, _, cases)| tags.iter().all(|t| cases.contains(&t.as_str())))
+            .map(|(name, _, cases)| (*name, cases.as_slice()))
+    }
+
+    /// Every enum a match in this file could be over, in shadowing order:
+    /// local declarations first, then imported ones, then the built-ins —
+    /// each name appearing only once, so the nearer origin wins. Built once
+    /// per file and shared by both exhaustiveness passes.
+    fn candidate_enums(&self) -> Vec<(&str, Origin<'_>, Vec<&str>)> {
+        let mut out: Vec<(&str, Origin<'_>, Vec<&str>)> = Vec::new();
         for (name, cases) in &self.enums {
-            let cases: Vec<&str> = cases.iter().map(String::as_str).collect();
-            if contains_all(&cases) {
-                return Some((name, cases));
-            }
+            out.push((
+                name.as_str(),
+                Origin::Local,
+                cases.iter().map(String::as_str).collect(),
+            ));
         }
         for e in self.externs {
             if self.enums.contains_key(&e.name) {
                 continue;
             }
-            let cases: Vec<&str> = e.tags.iter().map(String::as_str).collect();
-            if contains_all(&cases) {
-                return Some((&e.name, cases));
-            }
+            out.push((
+                e.name.as_str(),
+                Origin::Extern(e.from.as_deref()),
+                e.tags.iter().map(String::as_str).collect(),
+            ));
         }
         for (name, cases) in crate::stdlib::BUILTIN_ENUMS {
             if self.enums.contains_key(*name) || self.externs.iter().any(|e| e.name == *name) {
                 continue;
             }
-            if contains_all(cases) {
-                return Some((name, cases.to_vec()));
-            }
+            out.push((name, Origin::Builtin, cases.to_vec()));
         }
-        None
+        out
     }
 
     /// Walks the cartesian product of each tuple match's per-position case
@@ -638,6 +639,7 @@ impl Checker<'_> {
     /// message. A match with a tagged position that resolves to no known
     /// enum is not checked (same as single matches over unknown unions).
     fn check_tuple_exhaustiveness(&self) -> Result<(), RlError> {
+        let candidates = self.candidate_enums();
         'checks: for check in &self.tuple_checks {
             let arity = check.position_tags.len();
             let mut names: Vec<&str> = Vec::with_capacity(arity);
@@ -648,10 +650,10 @@ impl Checker<'_> {
                     cases.push(Vec::new()); // universal position
                     continue;
                 }
-                match self.resolve_enum(tags) {
+                match Self::resolve_enum(&candidates, tags) {
                     Some((name, cs)) => {
                         names.push(name);
-                        cases.push(cs);
+                        cases.push(cs.to_vec());
                     }
                     None => continue 'checks,
                 }

@@ -131,7 +131,7 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 
 - Edit loop: change `.rl` → `npx rlc --check src` (fast rl-level: syntax, exhaustiveness) → `npx tsc --noEmit` (types). Keep `npx rlc --types -w src` running so editor/tsc resolve `./x.rl` + `@rl/std`; if not watching, re-run `--types` after enum changes.
 - Build: `npm run build` (rlc emits TS tree then tsc) or bundler build. CI: `rlc --check src && tsc --noEmit` + tests.
-- `rlc <dir>`: `.rl`→`.ts`, hand-written `.ts` passthrough; `-o <dir>` separate tree (in-place overwrite refused); `@rl/std` auto-materialized when imported. `rlc -w` watches and also recompiles importers of changed files (cross-file exhaustiveness).
+- `rlc <dir>`: `.rl`→`.ts`, hand-written `.ts` passthrough; `-o <dir>` separate tree (in-place overwrite refused); `@rl/std` auto-materialized when imported. `rlc -w` watches and also recompiles importers of changed files (cross-file exhaustiveness). Files compile in parallel (one per core) with identical output/diagnostics either way; `-j <n>` sets the count, `-j 1` = sequential.
 - Emitted `.ts` starts with `// @generated` — NEVER edit output or `.rl-types/`; edit the `.rl` source.
 - Offline docs: `npx rlc help` lists topics; `npx rlc help <topic>` (e.g. `match`, `try`, `install`) prints that section of this guide; `npx rlc help all` prints it whole. `npx rlc -h` = CLI options.
 

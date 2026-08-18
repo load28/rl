@@ -1119,6 +1119,30 @@ import { skip } from "./not-rl.ts";
     assert_eq!(imports[3].names, RlImportNames::None);
 }
 
+#[test]
+fn scan_module_answers_both_questions_in_one_pass() {
+    // The single-fact helpers are defined in terms of the scan, so the two
+    // views must never disagree — that equivalence is what lets the CLI
+    // parse each input once.
+    for source in [
+        "import { Option } from \"@rl/std\";\nimport { T } from \"./t.rl\";\n",
+        "import { T } from \"./t.rl\";\n",
+        "export { Result } from \"@rl/std\";\n",
+        "const match = 1;\n",
+        "",
+    ] {
+        let scan = rlc::scan_module(source);
+        assert_eq!(scan.imports, rlc::rl_imports(source), "{source:?}");
+        assert_eq!(scan.imports_std, rlc::imports_std(source), "{source:?}");
+    }
+
+    let scan =
+        rlc::scan_module("import { Option } from \"@rl/std\";\nimport * as ns from \"../b.rl\";\n");
+    assert!(scan.imports_std);
+    assert_eq!(scan.imports.len(), 1);
+    assert_eq!(scan.imports[0].specifier, "../b.rl");
+}
+
 /* ------------------------------------------------------------------ */
 /* symbol API                                                          */
 /* ------------------------------------------------------------------ */

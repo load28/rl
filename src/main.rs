@@ -16,10 +16,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use rlc::{EnumSymbol, ExternEnum, ImportRewrite, Options, RlImportNames, compile};
+use rlc::{
+    EnumSymbol, ExternEnum, ImportRewrite, ModuleScan, Options, RlImport, RlImportNames, compile,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -37,6 +41,9 @@ imports \"@rl/std\". Types come from the same sources via --types.
 
 Options:
   -o, --out-dir <dir>   write outputs under <dir> (mirrors input paths)
+  -j, --jobs <n>        compile n files at a time (default: one per core;
+                        1 compiles sequentially). Output is identical
+                        either way.
   -w, --watch           keep running; recompile inputs (and their importers)
                         as they change
   --check               compile only; write nothing (syntax check)
@@ -508,30 +515,76 @@ fn json_str(s: &str) -> String {
     out
 }
 
+/// Declaration tables of the `.rl` modules a run imports, shared by every
+/// job.
+///
+/// The same module is typically imported by many files, and each import
+/// used to mean another disk read and another full parse of that module.
+/// Here every module is read and parsed at most once per run, and modules
+/// that are themselves inputs are served from the sources the run already
+/// holds — no second read at all.
+struct ExternCache<'a> {
+    /// The run's own input sources, keyed by path.
+    inputs: HashMap<&'a Path, &'a str>,
+    /// Exported declarations per imported path, filled on first use. An
+    /// unreadable module caches as an empty table: module resolution is
+    /// tsc's domain (`TS2307`), so its enums simply stay unknown.
+    decls: Mutex<HashMap<PathBuf, Arc<Vec<ExternEnum>>>>,
+}
+
+impl<'a> ExternCache<'a> {
+    fn new(inputs: HashMap<&'a Path, &'a str>) -> Self {
+        ExternCache {
+            inputs,
+            decls: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn exported_enums(&self, path: &Path) -> Arc<Vec<ExternEnum>> {
+        if let Some(hit) = self.decls.lock().expect("extern cache").get(path) {
+            return Arc::clone(hit);
+        }
+        // Parsed outside the lock: a slow miss must not stall other jobs.
+        // Two jobs racing on the same module both parse it once; the first
+        // insertion wins and both see the same table.
+        let decls = Arc::new(match self.inputs.get(path) {
+            Some(source) => rlc::exported_enums(source),
+            None => match fs::read_to_string(path) {
+                Ok(source) => rlc::exported_enums(&source),
+                Err(_) => Vec::new(),
+            },
+        });
+        Arc::clone(
+            self.decls
+                .lock()
+                .expect("extern cache")
+                .entry(path.to_path_buf())
+                .or_insert(decls),
+        )
+    }
+}
+
 /// Collects enum declarations from the file's direct relative `.rl`
 /// imports, so matches over imported enums get exhaustiveness-checked
 /// (module graph phase 2). One hop, import declarations only — re-exports
 /// bring nothing into scope. A specifier that cannot be read is skipped
 /// silently: module resolution is tsc's domain (`TS2307`), and an unknown
 /// enum simply stays unchecked, exactly as before.
-fn collect_extern_enums(file: &Path, source: &str) -> Vec<ExternEnum> {
+fn collect_extern_enums(file: &Path, imports: &[RlImport], cache: &ExternCache) -> Vec<ExternEnum> {
     let dir = file.parent().unwrap_or(Path::new("."));
     let mut externs: Vec<ExternEnum> = Vec::new();
-    for import in rlc::rl_imports(source) {
+    for import in imports {
         if matches!(import.names, RlImportNames::None) {
             continue;
         }
-        let Ok(imported_src) = fs::read_to_string(dir.join(&import.specifier)) else {
-            continue;
-        };
-        let decls = rlc::exported_enums(&imported_src);
+        let decls = cache.exported_enums(&dir.join(&import.specifier));
         let from = Some(import.specifier.clone());
         match &import.names {
             RlImportNames::Namespace(ns) => {
-                externs.extend(decls.into_iter().map(|d| ExternEnum {
+                externs.extend(decls.iter().map(|d| ExternEnum {
                     name: format!("{ns}.{}", d.name),
+                    tags: d.tags.clone(),
                     from: from.clone(),
-                    ..d
                 }));
             }
             RlImportNames::Named(entries) => {
@@ -549,6 +602,84 @@ fn collect_extern_enums(file: &Path, source: &str) -> Vec<ExternEnum> {
         }
     }
     externs
+}
+
+/// One input, read and scanned once for the whole run — or the diagnostic
+/// its read failed with.
+struct Loaded {
+    source: String,
+    scan: ModuleScan,
+}
+
+/// Reads and scans every job's source, in parallel.
+fn load_jobs(jobs: &[Job], jobs_limit: Option<usize>) -> Vec<Result<Loaded, String>> {
+    par_map(jobs, jobs_limit, |job| {
+        let source =
+            fs::read_to_string(&job.file).map_err(|e| format!("{}: {e}", job.file.display()))?;
+        let scan = rlc::scan_module(&source);
+        Ok(Loaded { source, scan })
+    })
+}
+
+/// How many worker threads a parallel phase should use: the `--jobs` value
+/// when given, otherwise one per available core. Never more than there is
+/// work for.
+fn worker_count(items: usize, jobs_limit: Option<usize>) -> usize {
+    let want = jobs_limit.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
+    want.clamp(1, items.max(1))
+}
+
+/// Maps `f` over `items` across worker threads, returning the results in
+/// input order — so diagnostics and outputs stay byte-identical to a
+/// sequential run whatever order the work actually finished in.
+///
+/// Compilation is per-file and shares nothing mutable, which is what makes
+/// this the compiler's main lever on large trees; the ordered result is
+/// what keeps the CLI deterministic.
+fn par_map<T, R>(items: &[T], jobs_limit: Option<usize>, f: impl Fn(&T) -> R + Sync) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+{
+    let workers = worker_count(items.len(), jobs_limit);
+    if workers <= 1 || items.len() <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let f = &f;
+    let batches: Vec<Vec<(usize, R)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let next = &next;
+                scope.spawn(move || {
+                    let mut done: Vec<(usize, R)> = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        match items.get(i) {
+                            Some(item) => done.push((i, f(item))),
+                            None => return done,
+                        }
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    });
+    let mut slots: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    for (i, r) in batches.into_iter().flatten() {
+        slots[i] = Some(r);
+    }
+    slots
+        .into_iter()
+        .map(|r| r.expect("every index is produced exactly once"))
+        .collect()
 }
 
 fn main() -> ExitCode {
@@ -574,6 +705,7 @@ fn main() -> ExitCode {
     let mut sidecar_dir: Option<PathBuf> = None;
     let mut node: Option<PathBuf> = None;
     let mut rewrite_imports = ImportRewrite::default();
+    let mut jobs_limit: Option<usize> = None;
 
     let mut it = argv.iter();
     while let Some(a) = it.next() {
@@ -599,6 +731,17 @@ fn main() -> ExitCode {
                 Some(dir) => sidecar_dir = Some(PathBuf::from(dir)),
                 None => {
                     eprintln!("rlc: --sidecar requires a directory of tsc-emitted .d.ts files");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "-j" | "--jobs" => match it.next().map(|n| n.parse::<usize>()) {
+                Some(Ok(n)) if n >= 1 => jobs_limit = Some(n),
+                Some(_) => {
+                    eprintln!("rlc: --jobs expects a positive number of parallel compiles");
+                    return ExitCode::FAILURE;
+                }
+                None => {
+                    eprintln!("rlc: --jobs requires a value");
                     return ExitCode::FAILURE;
                 }
             },
@@ -674,6 +817,7 @@ fn main() -> ExitCode {
             out_dir: out_dir.unwrap_or_else(|| PathBuf::from(TYPES_DIR)),
             node,
             verify,
+            jobs: jobs_limit,
         };
         return if watch {
             types_watch(&inputs, &opts)
@@ -714,6 +858,7 @@ fn main() -> ExitCode {
         verify,
         rewrite_imports,
         out_dir: out_dir.clone(),
+        jobs: jobs_limit,
     };
 
     if watch {
@@ -737,15 +882,22 @@ struct BuildOptions {
     /// Output root, when `-o` was given — also where the standard library
     /// module is written if an input imports it.
     out_dir: Option<PathBuf>,
+    /// Worker threads for the parallel phases (`--jobs`); `None` means one
+    /// per available core.
+    jobs: Option<usize>,
 }
 
 /// Where the standard library goes when an input imports `@rl/std`: the
 /// output root (`-o`), or the common ancestor of the outputs when compiling
 /// in place. `None` when nothing imports it.
-fn std_placement(jobs: &[Job], out_dir: Option<&Path>) -> Option<PathBuf> {
-    let needed = jobs
+fn std_placement(
+    jobs: &[Job],
+    loaded: &[Result<Loaded, String>],
+    out_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let needed = loaded
         .iter()
-        .any(|job| fs::read_to_string(&job.file).is_ok_and(|src| rlc::imports_std(&src)));
+        .any(|l| l.as_ref().is_ok_and(|l| l.scan.imports_std));
     if !needed {
         return None;
     }
@@ -860,13 +1012,30 @@ fn same_file(a: &Path, b: &Path) -> bool {
     matches!((canon(a), canon(b)), (Ok(x), Ok(y)) if x == y)
 }
 
+/// What compiling one job produced: the diagnostics it wants printed (in
+/// job order), whether it failed, and any text the parent still has to hand
+/// out — stdout under `-p`, or an output file whose path more than one job
+/// claims, which only the parent can serialize deterministically.
+#[derive(Default)]
+struct Outcome {
+    messages: Vec<String>,
+    failed: bool,
+    pending: Option<String>,
+}
+
 /// Compiles every job. Returns true if any of them failed.
+///
+/// The run is staged so each input is touched once: read and scanned in
+/// parallel, then compiled in parallel against a shared table of imported
+/// declarations. Diagnostics are collected per job and printed in job
+/// order, so the output of a parallel run is identical to a sequential one.
 fn compile_jobs(jobs: &[Job], opts: &BuildOptions) -> bool {
     let mut failed = false;
+    let loaded = load_jobs(jobs, opts.jobs);
 
     // The standard library is written out for the project, not per file:
     // one module the outputs point at.
-    let std_file = std_placement(jobs, opts.out_dir.as_deref());
+    let std_file = std_placement(jobs, &loaded, opts.out_dir.as_deref());
     if let Some(file) = &std_file
         && !opts.check
         && !opts.print
@@ -898,66 +1067,122 @@ fn compile_jobs(jobs: &[Job], opts: &BuildOptions) -> bool {
         }
     }
 
+    // Two inputs can claim one output path (`x.rl` and a hand-written
+    // `x.ts` both emit `x.ts`), and the later job wins. Those writes go
+    // back to the parent so the winner stays the same as in a sequential
+    // run; every other job writes itself, straight from its worker.
+    let mut claims: HashMap<&Path, usize> = HashMap::with_capacity(jobs.len());
     for job in jobs {
-        let filename = job.file.display().to_string();
-        // A pass-through `.ts` compiled in place would land on top of its
-        // own source (with specifiers rewritten) — refuse rather than
-        // destroy hand-written code.
-        if !opts.print && !opts.check && same_file(&job.file, &job.out_path) {
-            eprintln!("rlc: {filename}: output would overwrite the input — pass -o <dir>");
-            failed = true;
+        *claims.entry(job.out_path.as_path()).or_default() += 1;
+    }
+    let contested = |job: &Job| claims[job.out_path.as_path()] > 1;
+
+    let cache = ExternCache::new(
+        jobs.iter()
+            .zip(&loaded)
+            .filter_map(|(job, l)| Some((job.file.as_path(), l.as_ref().ok()?.source.as_str())))
+            .collect(),
+    );
+
+    let outcomes = par_map(
+        &jobs.iter().zip(&loaded).collect::<Vec<_>>(),
+        opts.jobs,
+        |(job, loaded)| {
+            let mut out = Outcome::default();
+            let filename = job.file.display().to_string();
+            // A pass-through `.ts` compiled in place would land on top of
+            // its own source (with specifiers rewritten) — refuse rather
+            // than destroy hand-written code.
+            if !opts.print && !opts.check && same_file(&job.file, &job.out_path) {
+                out.messages.push(format!(
+                    "rlc: {filename}: output would overwrite the input — pass -o <dir>"
+                ));
+                out.failed = true;
+                return out;
+            }
+            let loaded = match loaded {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    out.messages.push(format!("rlc: {e}"));
+                    out.failed = true;
+                    return out;
+                }
+            };
+            let extern_enums = collect_extern_enums(&job.file, &loaded.scan.imports, &cache);
+            let std_import = std_file
+                .as_ref()
+                .and_then(|file| std_specifier(job, file, opts.rewrite_imports));
+            let options = Options {
+                filename: Some(&filename),
+                verify: opts.verify,
+                rewrite_imports: opts.rewrite_imports,
+                extern_enums: &extern_enums,
+                std_import: std_import.as_deref(),
+            };
+            let mut code = match compile(&loaded.source, &options) {
+                Ok(c) => c,
+                Err(e) => {
+                    out.messages.push(format!("rlc: {e}"));
+                    out.failed = true;
+                    return out;
+                }
+            };
+            if opts.banner {
+                let base = job.file.file_name().unwrap().to_string_lossy();
+                code = format!("// @generated from {base} by rlc — do not edit directly.\n{code}");
+            }
+            if opts.print || (!opts.check && contested(job)) {
+                out.pending = Some(code);
+                return out;
+            }
+            if !opts.check {
+                if let Err(e) = write_output(&job.out_path, &code) {
+                    out.messages.push(e);
+                    out.failed = true;
+                    return out;
+                }
+                out.messages.push(format!(
+                    "rlc: {} → {}",
+                    job.file.display(),
+                    job.out_path.display()
+                ));
+            }
+            out
+        },
+    );
+
+    for (job, outcome) in jobs.iter().zip(outcomes) {
+        for message in &outcome.messages {
+            eprintln!("{message}");
+        }
+        failed |= outcome.failed;
+        let Some(code) = outcome.pending else {
             continue;
-        }
-        let source = match fs::read_to_string(&job.file) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("rlc: {filename}: {e}");
-                failed = true;
-                continue;
-            }
         };
-        let extern_enums = collect_extern_enums(&job.file, &source);
-        let std_import = std_file
-            .as_ref()
-            .and_then(|file| std_specifier(job, file, opts.rewrite_imports));
-        let options = Options {
-            filename: Some(&filename),
-            verify: opts.verify,
-            rewrite_imports: opts.rewrite_imports,
-            extern_enums: &extern_enums,
-            std_import: std_import.as_deref(),
-        };
-        let mut code = match compile(&source, &options) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("rlc: {e}");
-                failed = true;
-                continue;
-            }
-        };
-        if opts.banner {
-            let base = job.file.file_name().unwrap().to_string_lossy();
-            code = format!("// @generated from {base} by rlc — do not edit directly.\n{code}");
-        }
         if opts.print {
             print!("{code}");
-        } else if !opts.check {
-            if let Some(parent) = job.out_path.parent()
-                && let Err(e) = fs::create_dir_all(parent)
-            {
-                eprintln!("rlc: {}: {e}", parent.display());
+            continue;
+        }
+        match write_output(&job.out_path, &code) {
+            Ok(()) => eprintln!("rlc: {} → {}", job.file.display(), job.out_path.display()),
+            Err(e) => {
+                eprintln!("{e}");
                 failed = true;
-                continue;
             }
-            if let Err(e) = fs::write(&job.out_path, &code) {
-                eprintln!("rlc: {}: {e}", job.out_path.display());
-                failed = true;
-                continue;
-            }
-            eprintln!("rlc: {} → {}", job.file.display(), job.out_path.display());
         }
     }
     failed
+}
+
+/// Writes one compiled output, creating its directory. The error is already
+/// formatted as a diagnostic line.
+fn write_output(out_path: &Path, code: &str) -> Result<(), String> {
+    if let Some(parent) = out_path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        return Err(format!("rlc: {}: {e}", parent.display()));
+    }
+    fs::write(out_path, code).map_err(|e| format!("rlc: {}: {e}", out_path.display()))
 }
 
 /// How often `--watch` re-reads the inputs' timestamps.
@@ -1065,6 +1290,8 @@ struct TypesOptions {
     /// Explicit `node` binary (`--node`); otherwise `node` on PATH.
     node: Option<PathBuf>,
     verify: bool,
+    /// Worker threads for the compile phase (`--jobs`).
+    jobs: Option<usize>,
 }
 
 /// One module handed to the host: the text a `.rl` file compiles to, keyed
@@ -1098,16 +1325,16 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
     let mut modules: Vec<VirtualModule> = Vec::new();
     let mut rl_map: Vec<(String, String)> = Vec::new();
     let mut sources: Vec<String> = Vec::new();
-    let mut needs_std = false;
 
-    for job in &jobs {
-        if job.file.extension().is_none_or(|e| e != "rl") {
-            // Hand-written TypeScript: the host reads it in place. It still
-            // joins the program by path so its own type errors surface.
-            sources.push(slash_path(&job.file));
-            continue;
-        }
-        // A virtual module must not shadow a real file of the same name.
+    // Hand-written TypeScript: the host reads it in place. It still joins
+    // the program by path so its own type errors surface.
+    let (rl_jobs, ts_jobs): (Vec<Job>, Vec<Job>) = jobs
+        .into_iter()
+        .partition(|job| job.file.extension().is_some_and(|e| e == "rl"));
+    sources.extend(ts_jobs.iter().map(|job| slash_path(&job.file)));
+
+    // A virtual module must not shadow a real file of the same name.
+    for job in &rl_jobs {
         if job.out_path.exists() {
             eprintln!(
                 "rlc: {} would shadow {} — rename one of them",
@@ -1116,27 +1343,42 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
             );
             return Err(ExitCode::FAILURE);
         }
-        let filename = job.file.display().to_string();
-        let source = match fs::read_to_string(&job.file) {
-            Ok(text) => text,
-            Err(e) => {
-                eprintln!("rlc: {filename}: {e}");
-                failed = true;
-                continue;
-            }
-        };
-        needs_std |= rlc::imports_std(&source);
-        let extern_enums = collect_extern_enums(&job.file, &source);
-        let options = Options {
-            filename: Some(&filename),
-            verify: opts.verify,
-            // Declaration emit preserves specifiers, and the sidecars must
-            // carry the ones the consumer resolves — the originals.
-            rewrite_imports: ImportRewrite::Off,
-            extern_enums: &extern_enums,
-            std_import: None,
-        };
-        match compile(&source, &options) {
+    }
+
+    let loaded = load_jobs(&rl_jobs, opts.jobs);
+    let needs_std = loaded
+        .iter()
+        .any(|l| l.as_ref().is_ok_and(|l| l.scan.imports_std));
+    let cache = ExternCache::new(
+        rl_jobs
+            .iter()
+            .zip(&loaded)
+            .filter_map(|(job, l)| Some((job.file.as_path(), l.as_ref().ok()?.source.as_str())))
+            .collect(),
+    );
+
+    let compiled = par_map(
+        &rl_jobs.iter().zip(&loaded).collect::<Vec<_>>(),
+        opts.jobs,
+        |(job, loaded)| {
+            let filename = job.file.display().to_string();
+            let loaded = loaded.as_ref().map_err(|e| format!("rlc: {e}"))?;
+            let extern_enums = collect_extern_enums(&job.file, &loaded.scan.imports, &cache);
+            let options = Options {
+                filename: Some(&filename),
+                verify: opts.verify,
+                // Declaration emit preserves specifiers, and the sidecars
+                // must carry the ones the consumer resolves — the originals.
+                rewrite_imports: ImportRewrite::Off,
+                extern_enums: &extern_enums,
+                std_import: None,
+            };
+            compile(&loaded.source, &options).map_err(|e| format!("rlc: {e}"))
+        },
+    );
+
+    for (job, text) in rl_jobs.iter().zip(compiled) {
+        match text {
             Ok(text) => {
                 let path = slash_path(&job.out_path);
                 rl_map.push((slash_path(&job.file), path.clone()));
@@ -1146,8 +1388,8 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
                     source: Some(job.file.clone()),
                 });
             }
-            Err(e) => {
-                eprintln!("rlc: {e}");
+            Err(message) => {
+                eprintln!("{message}");
                 failed = true;
             }
         }

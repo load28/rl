@@ -30,9 +30,9 @@ use rope::Rope;
 
 /// A trailing line comment would swallow whatever codegen appends on the
 /// same line — rescue it with a newline (same rule as match arm bodies).
-fn guard_line_comment(rope: Rope) -> Rope {
+fn guard_line_comment(rope: Rope<'_>) -> Rope<'_> {
     let mut rope = rope;
-    if rope.text().rsplit('\n').next().unwrap_or("").contains("//") {
+    if rope.last_line_has_line_comment() {
         rope.push_lit("\n");
     }
     rope
@@ -93,14 +93,14 @@ pub(super) struct Emitter<'a> {
     used_pipe: Cell<bool>,
 }
 
-impl Emitter<'_> {
+impl<'a> Emitter<'a> {
     /// The source slice of a byte range, with its offset — the unit of
     /// verbatim copying.
-    fn src_slice(&self, start: usize, end: usize) -> (&str, usize) {
+    fn src_slice(&self, start: usize, end: usize) -> (&'a str, usize) {
         (&self.src[start..end], start)
     }
 
-    pub(super) fn emit_program(&self, program: &Program) -> Rope {
+    pub(super) fn emit_program(&self, program: &Program) -> Rope<'a> {
         let mut out = Rope::new();
         for segment in &program.segments {
             match segment {
@@ -125,7 +125,7 @@ impl Emitter<'_> {
     /// Emits a `try` statement: evaluate once, early-return the `Err` from
     /// the enclosing function, then bind the `Ok` value (declaration form).
     /// Emitted on one line so source lines keep lining up roughly.
-    fn emit_try(&self, stmt: &TryStmt) -> Rope {
+    fn emit_try(&self, stmt: &TryStmt) -> Rope<'a> {
         let n = self.try_seq.get();
         self.try_seq.set(n + 1);
         let tmp = format!("$rl_t{n}");
@@ -145,14 +145,14 @@ impl Emitter<'_> {
     /// `try`, emitted on one line into the enclosing scope; the diverging
     /// `else` block is what lets tsc narrow the temporary to the matched
     /// case for the destructuring — no type-level tricks.
-    fn emit_let_else(&self, stmt: &LetElseStmt) -> Rope {
+    fn emit_let_else(&self, stmt: &LetElseStmt) -> Rope<'a> {
         let n = self.try_seq.get();
         self.try_seq.set(n + 1);
         let tmp = format!("$rl_t{n}");
         let expr = self.emit_program(&stmt.expr).trim();
         let body = self.emit_program(&stmt.else_body).trim();
         // a trailing line comment would swallow the closing brace
-        let nl = if body.text().rsplit('\n').next().unwrap_or("").contains("//") {
+        let nl = if body.last_line_has_line_comment() {
             "\n"
         } else {
             ""
@@ -184,7 +184,7 @@ impl Emitter<'_> {
     /// the temporary through the condition, so no type tricks. The whole
     /// thing is a block statement (no IIFE, no `return` of its own), which
     /// is why it is valid in any statement position.
-    fn emit_if_let(&self, stmt: &IfLetStmt) -> Rope {
+    fn emit_if_let(&self, stmt: &IfLetStmt) -> Rope<'a> {
         let n = self.try_seq.get();
         self.try_seq.set(n + 1);
         let tmp = format!("$rl_t{n}");
@@ -222,7 +222,7 @@ impl Emitter<'_> {
     /// Putting each step in argument position is what gives it a contextual
     /// type, so curried combinator steps infer fully (the fp-ts `pipe`
     /// mechanism — see docs/design/pipeline-operator.md §4.1).
-    fn emit_pipe(&self, pipe: &PipeExpr) -> Rope {
+    fn emit_pipe(&self, pipe: &PipeExpr) -> Rope<'a> {
         self.used_pipe.set(true);
         let head = guard_line_comment(self.emit_program(&pipe.head).trim());
         let mut acc = Rope::new();
@@ -254,7 +254,7 @@ impl Emitter<'_> {
     /// is a quoted string whose content ends in `.rl`, so the last four
     /// bytes are `.rl` plus the closing quote. The untouched prefix keeps
     /// its source mapping even when the extension is rewritten.
-    fn emit_rl_import(&self, span: Span, kind: RlSpecifier, out: &mut Rope) {
+    fn emit_rl_import(&self, span: Span, kind: RlSpecifier, out: &mut Rope<'a>) {
         let (spec, at) = self.src_slice(span.start, span.end);
 
         // The standard library is not on disk until rlc writes it, so its
@@ -283,7 +283,7 @@ impl Emitter<'_> {
         }
     }
 
-    fn emit_template(&self, template: &Template, out: &mut Rope) {
+    fn emit_template(&self, template: &Template, out: &mut Rope<'a>) {
         for chunk in &template.chunks {
             match chunk {
                 TemplateChunk::Raw(span) => {
