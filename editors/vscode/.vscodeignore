@@ -14,4 +14,10 @@ node_modules/**
 !server/node_modules/vscode-languageserver-types/**
 !server/node_modules/vscode-jsonrpc/**
 !server/node_modules/vscode-uri/**
+# The language server type-checks with TypeScript at runtime: it needs the
+# module and the lib.*.d.ts files it checks against, but none of the other
+# entry points (tsc, tsserver, ...) that make up most of the package.
+!server/node_modules/typescript/package.json
+!server/node_modules/typescript/lib/typescript.js
+!server/node_modules/typescript/lib/lib.*.d.ts
 .gitignore

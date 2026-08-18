@@ -139,7 +139,11 @@ const PIPE_SOURCE = [
 
 /** A buffer served as a virtual document, with the std fallback wired in
  * exactly as the server wires it. */
-async function stdProject(source: string): Promise<{
+async function stdProject(
+  source: string,
+  /** Passed through to `TsProject` — null runs without a default library. */
+  defaultLib?: string | null,
+): Promise<{
   file: string;
   mapped: MappedDoc;
   ts: TsProject;
@@ -156,6 +160,7 @@ async function stdProject(source: string): Promise<{
     () => [file],
     dir,
     () => stdModulePath(COMPILER),
+    defaultLib,
   );
   return { file, mapped, ts };
 }
@@ -339,3 +344,46 @@ test("raw .rl text is never type-checked", { skip }, async () => {
   );
   assert.deepEqual(ts.diagnosticsFor(file), []);
 });
+
+/* --------------------------------------------------------------------------
+ * TASK-058: the type environment itself must be sound before anything is
+ * reported. Without TypeScript's lib.*.d.ts the program has no globals, so
+ * `Array` has no `[Symbol.iterator]` and TS2488 lands on a tuple
+ * destructuring the user wrote — while the errors that would explain it
+ * (`Cannot find name 'Error'`/`'JSON'`) fall inside generated glue and are
+ * dropped by the span mapping. One invented error on correct code is all
+ * that reaches the editor.
+ * -------------------------------------------------------------------- */
+
+const TUPLE_SOURCE = [
+  'import { Result } from "@rl/std";',
+  "",
+  "type Evaluated = Result<number, string>;",
+  "type Operands = Result<[number, number], string>;",
+  "",
+  "export const applyP =",
+  "  (f: (a: number, b: number) => number) =>",
+  "  (ops: Operands): Evaluated =>",
+  "    Result.map(ops, ([a, b]) => f(a, b));",
+  "",
+].join("\n");
+
+test("tuple destructuring over the std module reports nothing", { skip }, async () => {
+  const { file, ts } = await stdProject(TUPLE_SOURCE);
+  assert.equal(ts.typeEnvironmentError(), null);
+  assert.deepEqual(ts.diagnosticsFor(file), []);
+});
+
+test(
+  "a program without the default library reports nothing",
+  { skip },
+  async () => {
+    const { file, ts } = await stdProject(TUPLE_SOURCE, null);
+    assert.notEqual(
+      ts.typeEnvironmentError(),
+      null,
+      "a missing default library must be reported as an environment error",
+    );
+    assert.deepEqual(ts.diagnosticsFor(file), []);
+  },
+);

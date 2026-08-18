@@ -629,6 +629,9 @@ async function validate(doc: TextDocument): Promise<void> {
   void connection.sendDiagnostics({ uri: doc.uri, diagnostics });
 }
 
+/** One warning per session when the TS environment cannot type-check. */
+let typeEnvironmentWarned = false;
+
 /**
  * TypeScript's type errors for a buffer, moved onto the `.rl` source.
  *
@@ -642,6 +645,18 @@ async function validate(doc: TextDocument): Promise<void> {
 function typeDiagnostics(doc: TextDocument, fsPath: string): Diagnostic[] {
   const mapped = activeVirtual(fsPath, doc.version);
   if (!mapped) return [];
+
+  // A program without TypeScript's own lib.d.ts reports errors that are
+  // artifacts of the missing globals, not of the buffer. `diagnosticsFor`
+  // returns nothing in that state; say so once so it is not silent.
+  const broken = getTsProject().typeEnvironmentError();
+  if (broken !== null) {
+    if (!typeEnvironmentWarned) {
+      typeEnvironmentWarned = true;
+      connection.console.warn(`rl: ${broken}`);
+    }
+    return [];
+  }
 
   const text = doc.getText();
   const out: Diagnostic[] = [];
