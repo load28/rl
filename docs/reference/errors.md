@@ -145,6 +145,8 @@ source or an rlc bug; use --no-verify to bypass.
 | `--emit-std takes no inputs (the build materializes @rl/std itself)` | stdout 전용 단독 모드 — 빌드에서는 자동 방출이 대신합니다 |
 | `--types does not combine with -p, --check, --symbols, or --sidecar` | `--types`는 자체 파이프라인 (`-w`는 조합 가능) |
 | `unknown option <옵션>` | 알 수 없는 `-` 시작 인자. `rlc -h` 참조 |
+| `` unknown help topic "<주제>" (run `rlc help` for the list) `` | `rlc help <주제>`의 주제가 목록에 없음. `rlc help`로 주제·별칭 확인 |
+| `` help takes at most one topic (run `rlc help` for the list) `` | `rlc help`에 주제를 둘 이상 넘김 |
 | `no such file or directory: <경로>` | 입력 경로가 없음 |
 | `no sources found` | 입력에서 컴파일할 파일을 찾지 못함 |
 | `<경로>: output would overwrite the input — pass -o <dir>` | 통과 `.ts`를 제자리 컴파일하면 소스를 덮어씀. `-o`로 출력 트리를 분리 |

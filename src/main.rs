@@ -28,6 +28,7 @@ fn usage() {
         "rlc v{VERSION} — rl to TypeScript compiler
 
 Usage: rlc [options] <file | dir> ...
+       rlc help [topic]      language & workflow reference (topics: rlc help)
 
 Builds a complete TypeScript tree: .rl files are compiled, hand-written
 .ts files pass through byte-for-byte (with relative .rl import specifiers
@@ -68,6 +69,104 @@ Tooling options (bundler plugins, editors):
                         rl-level checks, .rl specifiers untouched) — the
                         editor's virtual-document feed (for language tooling)"
     );
+}
+
+/// The language & workflow guide (docs/ai/rl.md), embedded so `rlc help`
+/// serves documentation offline. The file is the source of truth; `##`
+/// headings are the topic boundaries.
+const GUIDE: &str = include_str!("../docs/ai/rl.md");
+
+/// Help topics: (name, aliases, `##` heading prefix in GUIDE). An empty
+/// prefix selects the preamble (everything before the first `## `).
+const HELP_TOPICS: &[(&str, &[&str], &str)] = &[
+    ("overview", &["contracts", "intro"], ""),
+    ("enum", &["enums"], "## enum"),
+    ("match", &["tuple", "patterns"], "## match"),
+    ("try", &[], "## try"),
+    ("let-else", &["letelse"], "## let-else"),
+    ("if-let", &["iflet"], "## if let"),
+    ("pipe", &["pipeline", "|>"], "## |>"),
+    ("std", &["option", "result"], "## @rl/std"),
+    ("modules", &["imports"], "## Modules"),
+    ("install", &["update"], "## Install"),
+    ("setup", &["init"], "## Setup"),
+    ("workflow", &["dev", "build"], "## Workflow"),
+    ("errors", &[], "## Errors"),
+    ("checklist", &[], "## Checklist"),
+];
+
+/// The slice of GUIDE for one topic: from its heading line up to the next
+/// `## ` heading. An empty `heading` returns the preamble.
+fn guide_section(heading: &str) -> &'static str {
+    let start = if heading.is_empty() {
+        0
+    } else {
+        match GUIDE
+            .lines()
+            .scan(0usize, |off, line| {
+                let at = *off;
+                *off += line.len() + 1;
+                Some((at, line))
+            })
+            .find(|(_, line)| line.starts_with(heading))
+        {
+            Some((at, _)) => at,
+            None => return "",
+        }
+    };
+    let body = &GUIDE[start..];
+    // A section's own heading sits at offset 0 (no leading newline), so
+    // searching for "\n## " only ever finds the NEXT heading.
+    match body.find("\n## ") {
+        Some(end) => &body[..end + 1],
+        None => body,
+    }
+}
+
+/// `rlc help [topic]` — print the embedded guide (whole, one section, or
+/// the topic list).
+fn run_help(args: &[String]) -> ExitCode {
+    let topic = match args {
+        [] => {
+            println!(
+                "rlc help <topic> — rl language & workflow reference\n\n\
+                 Topics:\n  {}\n\n\
+                 `rlc help all` prints the whole guide; `rlc -h` shows CLI options.",
+                HELP_TOPICS
+                    .iter()
+                    .map(|(name, aliases, _)| if aliases.is_empty() {
+                        (*name).to_string()
+                    } else {
+                        format!("{name} ({})", aliases.join(", "))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
+            return ExitCode::SUCCESS;
+        }
+        [topic] => topic.to_lowercase(),
+        _ => {
+            eprintln!("rlc: help takes at most one topic (run `rlc help` for the list)");
+            return ExitCode::FAILURE;
+        }
+    };
+    if topic == "all" || topic == "guide" {
+        print!("{GUIDE}");
+        return ExitCode::SUCCESS;
+    }
+    let found = HELP_TOPICS
+        .iter()
+        .find(|(name, aliases, _)| *name == topic || aliases.contains(&topic.as_str()));
+    match found {
+        Some((_, _, heading)) => {
+            print!("{}", guide_section(heading));
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("rlc: unknown help topic \"{topic}\" (run `rlc help` for the list)");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Extensions a directory walk picks up when hand-written TypeScript rides
@@ -454,6 +553,12 @@ fn collect_extern_enums(file: &Path, source: &str) -> Vec<ExternEnum> {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+
+    // `rlc help [topic]` — only as the first argument, so a file that
+    // happens to be named "help" can still be passed as `./help`.
+    if argv.first().is_some_and(|a| a == "help") {
+        return run_help(&argv[1..]);
+    }
 
     let mut inputs: Vec<String> = Vec::new();
     let mut out_dir: Option<PathBuf> = None;
@@ -1499,4 +1604,45 @@ fn with_dependents(jobs: &[Job], changed: &[PathBuf]) -> HashSet<PathBuf> {
         }
     }
     targets
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+
+    #[test]
+    fn every_topic_resolves_to_a_nonempty_section() {
+        for (name, _, heading) in HELP_TOPICS {
+            let section = guide_section(heading);
+            assert!(
+                !section.trim().is_empty(),
+                "topic {name}: heading {heading:?} not found in docs/ai/rl.md"
+            );
+            if !heading.is_empty() {
+                assert!(section.starts_with(heading), "topic {name}: wrong slice");
+            }
+        }
+    }
+
+    #[test]
+    fn sections_stop_at_the_next_heading() {
+        let section = guide_section("## match");
+        assert!(section.contains("or-pattern"));
+        assert!(!section.contains("\n## try"), "section leaked past its end");
+        let preamble = guide_section("");
+        assert!(preamble.contains("CONTRACTS"));
+        assert!(!preamble.contains("\n## "));
+    }
+
+    #[test]
+    fn topic_names_and_aliases_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, aliases, _) in HELP_TOPICS {
+            assert!(seen.insert(*name), "duplicate topic {name}");
+            for alias in *aliases {
+                assert!(seen.insert(*alias), "duplicate alias {alias}");
+            }
+        }
+        assert!(!seen.contains("all") && !seen.contains("guide"));
+    }
 }
