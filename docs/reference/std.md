@@ -21,8 +21,8 @@ import { Option, Result } from "@rl/std";
 
 ## 값의 형태 계약
 
-모듈 안의 선언은 아래 rl enum을 컴파일한 결과와 **바이트 단위로 같은 형태**입니다
-(컴파일러 테스트로 보장).
+모듈이 만드는 **값**은 아래 rl enum을 컴파일한 결과와 **바이트 단위로 같은
+형태**입니다 (컴파일러 테스트로 보장).
 
 ```rl
 export enum Option<T> { Some(value: T), None }
@@ -35,6 +35,57 @@ match 바인딩은 이름 기준이므로 `Some(value)`·`Err(error)` 또는 별
 `Some(value: v)`로 씁니다. 콤비네이터는 **데이터-우선 정적 함수**가 기본이고
 (메서드 체이닝 없음), 파이프라인 연산자 `|>`용으로 **data-last 커링 변형**이
 `P` 접미사로 함께 제공됩니다 ([§파이프라인 변형](#파이프라인-변형-p)).
+
+`Result`는 두 케이스에 각각 이름이 붙어 있고, 생성자는 자기 케이스가 실제로
+담는 타입만 받습니다.
+
+```ts
+export type Ok<T> = { kind: "Ok"; value: T };
+export type Err<E> = { kind: "Err"; error: E };
+export type Result<T, E> = Ok<T> | Err<E>;
+
+Result.Ok(123)     // Ok<number>
+Result.Err("bad")  // Err<string>
+```
+
+`Result<T, E>`가 곧 `Ok<T> | Err<E>`이므로 개별 변종은 `Result`가 필요한 자리에
+그대로 들어갑니다.
+
+```rl
+const r: Result<number, string> = Result.Ok(1);     // OK
+const e: Result<number, string> = Result.Err("bad"); // OK
+
+function parse(value: string): Result<number, string> {
+  if (value.length === 0) {
+    return Result.Err("empty");
+  }
+  return Result.Ok(Number(value));
+}
+```
+
+`Ok`/`Err`는 타입만 내보냅니다 (`import type { Ok, Err } from "@rl/std";`).
+값 생성은 `Result.Ok`/`Result.Err`로만 합니다.
+
+### 여러 `try`의 에러 타입
+
+생성자가 없는 타입을 지어내지 않으므로, 반환 타입을 적지 않은 함수의 추론이
+정확해집니다. `try`는 `Err`를 그대로 둘러싼 함수에서 return하므로
+([`language.md` §5.3](./language.md#53-컴파일-결과)) 반환 경로가 곧 변종의
+합집합입니다.
+
+```rl
+function load() {
+  const user = try getUser();     // Result<User, UserError>
+  const config = try getConfig(); // Result<Config, ConfigError>
+  return Result.Ok({ user, config });
+}
+// 추론: Ok<Data> | Err<UserError> | Err<ConfigError>
+//     = Result<Data, UserError | ConfigError>
+```
+
+Rust처럼 하나의 에러 타입으로 `From` 변환을 강요하지 않고, 실제 에러 집합을
+유니언으로 유지합니다. rlc는 에러 타입을 모으거나 유니언을 만들지 않습니다 —
+lowering은 평범한 TypeScript 반환문이고, 추론은 tsc가 합니다.
 
 ## `Option<T>`
 
@@ -63,10 +114,10 @@ match 바인딩은 이름 기준이므로 `Some(value)`·`Err(error)` 또는 별
 
 | 함수 | 시그니처 | 설명 |
 |------|----------|------|
-| `Ok` | `<T, E>(value: T) => Result<T, E>` | 성공 케이스 생성 |
-| `Err` | `<T, E>(error: E) => Result<T, E>` | 실패 케이스 생성 |
-| `isOk` | `(r: Result<T, E>) => boolean` | `Ok`이면 true (타입 내로잉 가드) |
-| `isErr` | `(r: Result<T, E>) => boolean` | `Err`이면 true (타입 내로잉 가드) |
+| `Ok` | `<T>(value: T) => Ok<T>` | 성공 케이스 생성 |
+| `Err` | `<E>(error: E) => Err<E>` | 실패 케이스 생성 |
+| `isOk` | `(r: Result<T, E>) => r is Ok<T>` | `Ok`이면 true (타입 내로잉 가드) |
+| `isErr` | `(r: Result<T, E>) => r is Err<E>` | `Err`이면 true (타입 내로잉 가드) |
 | `map` | `(r, f: (T) => U) => Result<U, E>` | `Ok` 값에 `f` 적용 |
 | `mapErr` | `(r, f: (E) => F) => Result<T, F>` | `Err` 에러에 `f` 적용 |
 | `andThen` | `(r, f: (T) => Result<U, E>) => Result<U, E>` | `Result`를 반환하는 계산 연결 |
@@ -81,6 +132,11 @@ match 바인딩은 이름 기준이므로 `Some(value)`·`Err(error)` 또는 별
 | `flatten` | `(r: Result<Result<T, E>, E>) => Result<T, E>` | 중첩 한 겹 풀기 |
 | `transpose` | `(r: Result<Option<T>, E>) => Option<Result<T, E>>` | 층 교환: `Ok(None)`→`None`, `Err(e)`→`Some(Err(e))` |
 | `collect` | `(items: readonly Result<T, E>[]) => Result<T[], E>` | 전부 `Ok`이면 값 배열, 아니면 첫 `Err` |
+
+생성자 외의 콤비네이터는 전부 `Result<T, E>`를 그대로 쓰므로 변종 타입을
+의식할 일이 없습니다. 전체 `Result` 타입이 필요하면 주변 문맥(변수 주석,
+함수 반환 타입)에서 지정하세요 — `Result.Ok<number, string>(1)`처럼 두 개의
+타입 인자를 넘기는 형태는 더 이상 없습니다 (`Result.Ok<number>(1)`).
 
 `Result`를 반환하는 연산을 여러 단계 잇는 코드는 `andThen`을 중첩하는 대신
 `result` 계산 블록으로 평탄하게 씁니다

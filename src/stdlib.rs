@@ -3,10 +3,14 @@
 //! rl itself adds no runtime — the standard library is a single TypeScript
 //! module that users write out once (`rlc --emit-std <file>`) and import
 //! like any other module; the import passes through the compiler untouched,
-//! so the passthrough contract is unaffected. The declarations inside are
+//! so the passthrough contract is unaffected. The values inside are
 //! byte-identical to what the corresponding rl `enum`s would compile to
 //! (guarded by `tests/stdlib.rs`), which is what makes `match` — and the
-//! built-in exhaustiveness check below — work on these values.
+//! built-in exhaustiveness check below — work on them. `Result`'s two
+//! constructors are the one deliberate deviation: they are typed by the
+//! variant each builds (`Ok<T>` / `Err<E>`) rather than by the whole
+//! `Result<T, E>`, so a function with several `try`s infers a union of the
+//! real error types instead of `unknown` (see `docs/reference/std.md`).
 
 /// TypeScript source of the rl standard library module: `Option<T>`,
 /// `Result<T, E>` and their functional combinators (`map`, `andThen`,

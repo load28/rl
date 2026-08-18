@@ -8,6 +8,29 @@
 
 ### Changed
 
+- **`Result` 생성자가 자기 변종의 타입만 받는다** (TASK-065). 표준
+  라이브러리가 두 케이스에 이름을 주고(`Ok<T>`/`Err<E>`, 타입만 export)
+  `Result<T, E>`를 그 합으로 정의한다:
+
+  ```ts
+  Result.Ok(123)     // Ok<number>
+  Result.Err("bad")  // Err<string>
+  ```
+
+  - 이전에는 `Ok`/`Err`가 제네릭을 둘 받아 값에 없는 타입까지 요구했다.
+    `Result.Ok(1)`은 `E`를 추론할 정보가 없어 `Result<number, unknown>`이
+    됐고, 그 때문에 반환 타입을 적지 않고 `try`를 여러 번 쓴 함수가
+    `Result<T, E1 | E2>`에 대입되지 않았다 (`TS2322`). 이제 추론 결과가
+    `Ok<T> | Err<E1> | Err<E2>`라 그대로 대입된다 — 에러 타입 수집은
+    여전히 rlc가 아니라 tsc가 한다.
+  - **파괴적 변경**: 타입 인자를 두 개 넘기던 호출은
+    `Result.Ok<number, string>(1)` → `Result.Ok<number>(1)`,
+    `Result.Err<number, string>("x")` → `Result.Err<string>("x")`.
+    타입 인자를 넘기지 않던 코드는 그대로 동작한다. 전체 `Result` 타입은
+    변수 주석·함수 반환 타입 등 주변 문맥에서 지정한다.
+  - 콤비네이터 시그니처와 **방출되는 런타임 값은 바이트 단위로 그대로**다
+    (`match`·소진성 검사·`JSON.stringify` 영향 없음).
+
 - 대규모 소스 트리를 전제로 컴파일러 처리량을 끌어올렸다 — 방출 바이트와
   진단 메시지는 그대로다 (TASK-056):
   - 파일 단위 **병렬 컴파일**이 기본이 됐다 (코어 수만큼 동시에, `-j <n>`으로
