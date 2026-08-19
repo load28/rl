@@ -188,6 +188,18 @@ rlc --types -w src/       # 감시하며 갱신
   글루(switch IIFE, `$rl_ap` 헬퍼 등)에 걸린 진단은 원본 대응이 없으므로
   바로 뒤따르는 원본 조각의 위치로 보고됩니다. 애초에 방출물 때문에 tsc
   에러가 나면 그건 rlc의 버그입니다 (`docs/reference/errors.md` 에러 계층).
+- **리터럴 match의 소진성도 여기서 검사합니다.** 같은 프로그램의 타입
+  체커에게 `_` 없는 리터럴 match의 스크루티니 타입을 물어, 그 타입이 유한한
+  리터럴 유니언으로 확정될 때만 빠진 리터럴을 보고합니다. 기본 컴파일
+  경로는 이 검사를 하지 않습니다 (런타임 가드만).
+
+  ```
+  rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
+       (add the missing arms or a final `_` arm)
+  ```
+
+  위치는 원본 `.rl`의 `match` 키워드입니다. 규칙과 검사/비검사 타입 목록은
+  [`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types).
 
 소비 측 `tsconfig.json`은 두 가지만 선언하면 됩니다.
 

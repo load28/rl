@@ -1,7 +1,10 @@
 //! rl `match` emission.
 //!
 //! A guard-free match becomes a `switch` IIFE discriminating on the `kind`
-//! field. A match with at least one guarded arm becomes an if-chain IIFE
+//! field — or on the scrutinee value itself when the arms are literal
+//! patterns, which is the only difference between the two match kinds
+//! (sema guarantees they never mix).
+//! A match with at least one guarded arm becomes an if-chain IIFE
 //! instead — switch fallthrough cannot express "guard failed, try the next
 //! arm". The if-chain reproduces the switch's semantics exactly: expression
 //! bodies `return`, block bodies exit via `break $rl_b` out of a labeled
@@ -15,7 +18,9 @@
 
 use super::Emitter;
 use super::rope::Rope;
-use crate::ast::{Arm, Binding, MatchExpr, Pattern, TagPattern, TupleMatchExpr, TuplePattern};
+use crate::ast::{
+    Arm, Binding, LiteralPattern, MatchExpr, Pattern, TagPattern, TupleMatchExpr, TuplePattern,
+};
 use crate::scanner::contains_await;
 
 /// True when the alternative carries a nested pattern — the arm then needs
@@ -30,6 +35,23 @@ fn alt_has_nested(alt: &TagPattern) -> bool {
 
 fn arm_has_nested(arm: &Arm) -> bool {
     matches!(&arm.pattern, Pattern::Tags(alts) if alts.iter().any(alt_has_nested))
+}
+
+/// True when the match discriminates on the scrutinee value rather than on
+/// its `kind` field. sema rejects mixing, so one literal arm settles it; a
+/// match whose only arm is `_` keeps the tag shape it always had.
+fn is_literal_match(arms: &[Arm]) -> bool {
+    arms.iter()
+        .any(|a| matches!(a.pattern, Pattern::Literals(_)))
+}
+
+/// The scrutinee text a literal match's runtime guard reports.
+fn unexpected(literal: bool) -> &'static str {
+    if literal {
+        "    default: { throw new Error(\"rl match: unexpected literal \" + JSON.stringify($rl_m)); }\n"
+    } else {
+        "    default: { throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m)); }\n"
+    }
 }
 
 pub(super) fn emit_match<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
@@ -167,54 +189,78 @@ fn expr_body_text<'a>(
 }
 
 fn emit_switch<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
+    let literal = is_literal_match(&expr.arms);
     let mut cases = Rope::new();
     let mut has_wildcard = false;
     for arm in &expr.arms {
-        let label = match &arm.pattern {
+        // The case label, its alternatives sharing one body via switch
+        // fallthrough. A literal's own bytes are copied from the source, so
+        // `0xff` stays `0xff` — and a tsc diagnostic over the case label
+        // maps back to the literal the user wrote.
+        let mut label = Rope::new();
+        label.push_lit("    ");
+        match &arm.pattern {
             Pattern::Wildcard => {
                 has_wildcard = true;
-                "default".to_string()
+                label.push_lit("default");
             }
-            // or-pattern alternatives share one body via switch fallthrough
-            Pattern::Tags(alts) => alts
-                .iter()
-                .map(|t| format!("case \"{}\"", t.tag))
-                .collect::<Vec<_>>()
-                .join(": "),
-        };
+            Pattern::Tags(alts) => label.push_lit(
+                alts.iter()
+                    .map(|t| format!("case \"{}\"", t.tag))
+                    .collect::<Vec<_>>()
+                    .join(": "),
+            ),
+            Pattern::Literals(alts) => {
+                for (i, alt) in alts.iter().enumerate() {
+                    label.push_lit(if i == 0 { "case " } else { ": case " });
+                    label.append(literal_text(e, alt));
+                }
+            }
+        }
 
         let bind = match &arm.pattern {
             Pattern::Tags(alts) => bind_str(&alts[0].bindings),
-            Pattern::Wildcard => String::new(),
+            Pattern::Wildcard | Pattern::Literals(_) => String::new(),
         };
 
+        cases.append(label);
         if arm.block {
             let body = e.emit_program(&arm.body).trim();
             // `break` (not `return`) so an arm whose block always returns doesn't
             // widen the match's type with `undefined`; if the block doesn't return,
             // the arm evaluates to undefined, which the inferred type then reflects.
-            cases.push_lit(format!("    {}: {{ {}", label, bind));
+            cases.push_lit(format!(": {{ {bind}"));
             cases.append(body);
             cases.push_lit("\n      break; }\n");
         } else {
             let (body, nl) = expr_body(e, arm, "    ");
-            cases.push_lit(format!("    {}: {{ {}return (", label, bind));
+            cases.push_lit(format!(": {{ {bind}return ("));
             cases.append(body);
             cases.push_lit(format!("{nl}); }}\n"));
         }
     }
 
     if !has_wildcard {
-        cases.push_lit(
-            "    default: { throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m)); }\n",
-        );
+        cases.push_lit(unexpected(literal));
     }
 
     let mut out = Rope::new();
-    out.push_lit("  switch ($rl_m.kind) {\n");
+    out.push_lit(if literal {
+        "  switch ($rl_m) {\n"
+    } else {
+        "  switch ($rl_m.kind) {\n"
+    });
     out.append(cases);
     out.push_lit("  }\n");
     out
+}
+
+/// A literal pattern's source bytes, kept as a mapped chunk.
+fn literal_text<'a>(e: &Emitter<'a>, alt: &LiteralPattern) -> Rope<'a> {
+    let (text, at) = e.src_slice(alt.span.start, alt.span.end);
+    let mut rope = Rope::new();
+    rope.push_src(text, at);
+    rope
 }
 
 /// Tuple match emission: each scrutinee is evaluated once into its own
@@ -370,6 +416,7 @@ fn arm_exit<'a>(
 
 fn emit_if_chain<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
     // `break $rl_b` is only needed by block bodies; skip the label otherwise
+    let literal = is_literal_match(&expr.arms);
     let needs_label = expr.arms.iter().any(|a| a.block);
     let mut out = Rope::new();
     if needs_label {
@@ -397,6 +444,24 @@ fn emit_if_chain<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
                 out.append(exit);
                 out.push_lit(" }\n");
             }
+            Pattern::Literals(alts) => {
+                // `===` per alternative — the if-chain's answer to switch
+                // fallthrough, with the same strict comparison.
+                let mut cond = Rope::new();
+                for (i, alt) in alts.iter().enumerate() {
+                    cond.push_lit(if i == 0 {
+                        "$rl_m === "
+                    } else {
+                        " || $rl_m === "
+                    });
+                    cond.append(literal_text(e, alt));
+                }
+                out.push_lit("  if (");
+                out.append(cond);
+                out.push_lit(") { ");
+                out.append(exit);
+                out.push_lit(" }\n");
+            }
             Pattern::Wildcard => {
                 has_wildcard = true;
                 out.push_lit("  ");
@@ -407,9 +472,11 @@ fn emit_if_chain<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
     }
 
     if !has_wildcard {
-        out.push_lit(
-            "  throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m));\n",
-        );
+        out.push_lit(if literal {
+            "  throw new Error(\"rl match: unexpected literal \" + JSON.stringify($rl_m));\n"
+        } else {
+            "  throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m));\n"
+        });
     }
     if needs_label {
         out.push_lit("  }\n");

@@ -76,7 +76,8 @@
 | TASK-066 | `Result` 에러 타입 합성 — `andThen`/`andThenP`의 유니언 누적 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-066](./TASK-066-result-error-union-composition.md) |
 | TASK-067 | unplugin-rl 타입 선언 — 소비자의 `vite.config.ts` 타입 검사 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-067](./TASK-067-unplugin-type-declarations.md) |
 | TASK-068 | AGENTS.md와 리터럴 패턴 설계 문서 편입 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-068](./TASK-068-agents-guide-and-literal-pattern-design.md) |
+| TASK-069 | match 리터럴 패턴 — 문자열/숫자/불리언 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-069](./TASK-069-match-literal-patterns.md) |
 
 ## 다음 태스크 번호
 
-**TASK-069**
+**TASK-070**

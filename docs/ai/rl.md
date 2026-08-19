@@ -34,12 +34,22 @@ const area = match (shape) {
 - Bindings by field name, NEVER position; subset ok, any order.
 - Arm body: expr, or block `{ ... return v; }` (no return → undefined). Object literal body needs parens: `Tag => ({a: 1})`.
 - `_` arm must be LAST.
-- NO literal patterns (`1 =>`, `"a" =>` invalid) — tags and `_` only; use switch/if for literals.
+- Literal patterns: string/number/boolean literals match the scrutinee VALUE (`===`), e.g. `match (dir) { "north" => "N", _ => "?" }`. NEVER mix tag and literal patterns in one match (compile error); `_` works in both. See "literal match" below.
 - or-pattern: `A | B => body` (never `||`); all alternatives must bind same (field,name) set.
 - guard: `Some(v) if v > 0 => v`; guard false → falls to next arm; guarded arms may repeat a tag; re-matching a tag already covered by an unguarded arm = duplicate-arm error.
 - nested: `Ok(value: Some(v)) => v`; inner UNIT case needs parens `field: None()` (`field: name` = alias); no combining with or-patterns; same binding name twice in a pattern = error (alias one); inner mismatch falls through.
 - Exhaustiveness: match without `_` is checked; missing case = compile error. Enum resolution: local decl > direct (1-hop) relative-`.rl`-import > built-in Option/Result. GUARDED and NESTED arms NEVER count as covering — add unguarded arm or `_`. With `_`: unchecked. Unknown union: compiles unchecked, runtime default throws on unexpected kind.
 - await allowed in scrutinee/guards/bodies → async IIFE, awaited. Detection is token-level: await inside a nested callback also triggers async — avoid in non-async contexts.
+
+Literal match (`switch ($rl_m)` instead of `$rl_m.kind`):
+```rl
+match (code) { 200 | 201 => "success", 404 => "not found", _ => "other" }
+match (flag) { true => "yes", false => "no" }
+```
+- Literals: string (`"a"`/`'a'`), number (`404`, `-1`, `0xff`, `1_000`, `1.5e2`, `10n`), `true`/`false`. No bindings. or-pattern alternatives must all be the SAME kind (`"a" | 1` = error). Guards allowed, same rules as tags.
+- Duplicates compared BY VALUE: `200` and `0xc8` are the same arm → duplicate-arm error. `1n` ≠ `1`.
+- NOT allowed inside tuple patterns (v1) — tuple elements are tag patterns or `_`.
+- Exhaustiveness: the DEFAULT compile path does NOT check it (rlc has no TS types) — `_`-less literal match just gets a runtime `throw` guard. `rlc --types` DOES check it via the TypeScript checker, but only when the scrutinee type is a finite literal union (`"a" | "b"`, `1 | 2`, `boolean`, `typeof arr[number]`); `string`/`number`/`unknown`/`any`/`T`/`"a" | string` are never diagnosed. Reported at the `.rl` `match` keyword.
 
 Tuple match (product exhaustiveness — missing COMBINATIONS are errors):
 ```rl
@@ -163,7 +173,8 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 
 ## Errors
 
-- `rlc: file:line:col: msg` — e.g. `match on enum X is not exhaustive: missing "Y"` (add arms or `_`), `duplicate arm`, `or-pattern alternatives must bind the same fields`, else-block-must-diverge, try-position-restriction (extract helper).
+- `rlc: file:line:col: msg` — e.g. `match on enum X is not exhaustive: missing "Y"` (add arms or `_`), `duplicate arm`, `or-pattern alternatives must bind the same fields`, `cannot mix tag patterns and literal patterns`, else-block-must-diverge, try-position-restriction (extract helper).
+- `rlc --types` also prints `match on literal union is not exhaustive: missing "..."` for `_`-less literal matches over finite literal unions.
 - Type errors come from tsc, reported at the **`.rl` source** position — `rlc --types` prints `rlc: src/x.rl:12:31: <tsc message>` (exit 1, sidecars still written), and the VSCode extension shows them inline (`source: ts`, `rl.typeDiagnostics` to disable). Applies inside `match` arms and `|>` pipelines too.
 - A `|>` step's combinator inferring `unknown` (e.g. `Result.mapP((n) => n)` with `n: unknown`) means the pipeline **head** has no usable type — it is not a `Result`, or the head is an unannotated parameter. Fix the head, not the step.
 - tsc errors on output containing literal `match`/`try` → silent passthrough; recheck semicolons/parens/reserved words.
@@ -171,4 +182,4 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 
 ## Checklist
 
-match parens + `_` last + object arms `({...})`; bind by field name not position; no literal patterns; `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check src` + `tsc --noEmit`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.
+match parens + `_` last + object arms `({...})`; bind by field name not position; literal patterns are values (never mixed with tags, none in tuple elements); `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check src` + `tsc --noEmit`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.

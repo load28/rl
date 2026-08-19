@@ -2118,3 +2118,236 @@ function outer() {
         "{out}"
     );
 }
+
+/* ------------------------------------------------------------------ */
+/* literal match patterns                                             */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn literal_string_match_switches_on_the_scrutinee_itself() {
+    let out = ok(r#"
+const label = match (dir) {
+  "north" => "N",
+  "south" => "S",
+  _ => "?",
+};
+"#);
+    assert!(out.contains("const $rl_m = (dir);"));
+    assert!(out.contains("switch ($rl_m) {"));
+    assert!(!out.contains("$rl_m.kind"));
+    assert!(out.contains(r#"case "north": { return ("N"); }"#));
+    assert!(out.contains(r#"case "south": { return ("S"); }"#));
+    assert!(out.contains(r#"default: { return ("?"); }"#));
+}
+
+#[test]
+fn literal_number_match_emits_number_cases() {
+    let out = ok(r#"
+const message = match (status) {
+  200 => "ok",
+  404 => "not found",
+  500 => "error",
+  _ => "unknown",
+};
+"#);
+    assert!(out.contains("switch ($rl_m) {"));
+    assert!(out.contains(r#"case 200: { return ("ok"); }"#));
+    assert!(out.contains(r#"case 404: { return ("not found"); }"#));
+    assert!(out.contains(r#"case 500: { return ("error"); }"#));
+}
+
+#[test]
+fn literal_boolean_match_emits_true_and_false_cases() {
+    let out = ok("const v = match (flag) { true => 1, false => 0 };");
+    assert!(out.contains("switch ($rl_m) {"));
+    assert!(out.contains("case true: { return (1); }"));
+    assert!(out.contains("case false: { return (0); }"));
+}
+
+#[test]
+fn literal_or_pattern_shares_one_body_via_fallthrough() {
+    let out = ok(r#"
+const kind = match (code) {
+  200 | 201 | 204 => "success",
+  400 | 404 => "client error",
+  _ => "unknown",
+};
+"#);
+    assert!(out.contains(r#"case 200: case 201: case 204: { return ("success"); }"#));
+    assert!(out.contains(r#"case 400: case 404: { return ("client error"); }"#));
+    // one body per arm, never duplicated per alternative
+    assert_eq!(out.matches(r#"return ("success")"#).count(), 1);
+}
+
+#[test]
+fn literal_match_keeps_the_number_spelling_of_the_source() {
+    let out = ok("const v = match (x) { 0xff => 1, 1_000 => 2, 1.5e2 => 3, -1 => 4, _ => 0 };");
+    assert!(out.contains("case 0xff:"));
+    assert!(out.contains("case 1_000:"));
+    assert!(out.contains("case 1.5e2:"));
+    assert!(out.contains("case -1:"));
+}
+
+#[test]
+fn literal_match_without_a_wildcard_gets_a_runtime_guard() {
+    let out = ok(r#"const label = match (dir) { "a" => 1, "b" => 2 };"#);
+    assert!(out.contains(
+        r#"default: { throw new Error("rl match: unexpected literal " + JSON.stringify($rl_m)); }"#
+    ));
+}
+
+#[test]
+fn literal_match_evaluates_the_scrutinee_once() {
+    let out = ok(r#"const v = match (getValue()) { "a" => foo(), _ => bar() };"#);
+    assert_eq!(out.matches("getValue()").count(), 1);
+    assert!(out.contains("const $rl_m = (getValue());"));
+}
+
+#[test]
+fn literal_match_block_bodies_break_out_of_the_switch() {
+    let out = ok(r#"const v = match (s) { "a" => { return 1; }, _ => 0 };"#);
+    assert!(out.contains(r#"case "a": { return 1;"#));
+    assert!(out.contains("break; }"));
+}
+
+#[test]
+fn literal_match_with_a_guard_becomes_an_if_chain() {
+    let out = ok("const v = match (code) { 200 if ok => 1, 200 => 2, _ => 3 };");
+    assert!(!out.contains("switch ("));
+    assert!(out.contains("if ($rl_m === 200) { if ((ok)) return (1); }"));
+    assert!(out.contains("if ($rl_m === 200) { return (2); }"));
+}
+
+#[test]
+fn literal_or_pattern_if_chain_tests_each_alternative() {
+    let out = ok(r#"const v = match (s) { "a" | "b" if ok => 1, _ => 2 };"#);
+    assert!(out.contains(r#"if ($rl_m === "a" || $rl_m === "b")"#));
+}
+
+#[test]
+fn literal_match_without_a_wildcard_has_no_if_chain_case_guard() {
+    let out = ok("const v = match (code) { 200 if ok => 1, 404 => 2 };");
+    assert!(
+        out.contains(
+            r#"throw new Error("rl match: unexpected literal " + JSON.stringify($rl_m));"#
+        )
+    );
+}
+
+#[test]
+fn literal_duplicate_arm_is_error() {
+    let e = err(r#"const v = match (x) { "a" => 1, "a" => 2 };"#);
+    assert!(e.message.contains(r#"duplicate arm "a""#), "{}", e.message);
+    assert_eq!((e.line, e.col), (1, 33));
+}
+
+#[test]
+fn literal_duplicate_across_or_alternatives_is_error() {
+    let e = err(r#"const v = match (x) { "a" | "b" => 1, "b" | "c" => 2 };"#);
+    assert!(e.message.contains(r#"duplicate arm "b""#), "{}", e.message);
+    assert_eq!((e.line, e.col), (1, 39));
+}
+
+#[test]
+fn literal_duplicate_compares_values_not_spellings() {
+    // `200`, `0xc8` and `2e2` are one `switch` case — `===` says so.
+    let e = err("const v = match (x) { 200 => 1, 0xc8 => 2 };");
+    assert!(e.message.contains("duplicate arm 200"), "{}", e.message);
+    let e = err(r#"const v = match (x) { "a" => 1, '\x61' => 2 };"#);
+    assert!(e.message.contains(r#"duplicate arm "a""#), "{}", e.message);
+    let e = err("const v = match (x) { true => 1, true => 2 };");
+    assert!(e.message.contains("duplicate arm true"), "{}", e.message);
+}
+
+#[test]
+fn literal_duplicate_is_allowed_between_guarded_arms() {
+    // A guard may be false, so a guarded arm covers nothing — the same rule
+    // tag patterns follow.
+    let out = ok("const v = match (x) { 1 if a => 1, 1 if b => 2, 1 => 3, _ => 4 };");
+    assert_eq!(out.matches("$rl_m === 1").count(), 3);
+}
+
+#[test]
+fn literal_and_tag_patterns_cannot_be_mixed() {
+    let e = err(r#"const v = match (x) { Some(v) => v, "none" => 0 };"#);
+    assert!(
+        e.message
+            .contains("cannot mix tag patterns and literal patterns"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (1, 37));
+}
+
+#[test]
+fn literal_and_tag_patterns_cannot_be_mixed_in_either_order() {
+    let e = err(r#"const v = match (x) { "none" => 0, Some(v) => v };"#);
+    assert!(
+        e.message
+            .contains("cannot mix tag patterns and literal patterns"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn literal_or_pattern_alternatives_must_share_a_kind() {
+    let e = err(r#"const v = match (x) { "a" | 1 => 1, _ => 2 };"#);
+    assert!(e.message.contains("same kind of literal"), "{}", e.message);
+    assert_eq!((e.line, e.col), (1, 29));
+}
+
+#[test]
+fn literal_match_wildcard_must_be_last() {
+    let e = err(r#"const v = match (x) { _ => 0, "a" => 1 };"#);
+    assert!(e.message.contains("must be the last arm"), "{}", e.message);
+    assert_eq!((e.line, e.col), (1, 23));
+}
+
+#[test]
+fn literal_match_is_not_checked_against_enums() {
+    // A literal match carries no tags, so the tag exhaustiveness pass must
+    // not adopt it — `Option`/`Result` are always in the candidate table.
+    let out = ok(r#"const v = match (x) { "Some" => 1, "None" => 2 };"#);
+    assert!(out.contains("switch ($rl_m) {"));
+}
+
+#[test]
+fn literal_patterns_nest_inside_arm_bodies() {
+    let out = ok(r#"
+const v = match (a) {
+  "x" => match (b) { 1 => "one", _ => "other" },
+  _ => "none",
+};
+"#);
+    assert_eq!(out.matches("switch ($rl_m) {").count(), 2);
+}
+
+#[test]
+fn literal_match_with_await_becomes_an_async_iife() {
+    let out = ok(r#"async function f() { return match (s) { "a" => await g(), _ => null }; }"#);
+    assert!(out.contains("(await (async () => {"));
+}
+
+#[test]
+fn tuple_patterns_do_not_accept_literals() {
+    // v1 keeps literals out of tuple positions (design §18): the arms fail
+    // the tuple parse, and — with no `=>`-terminated single-match reading
+    // either — the whole construct passes through untouched. (The text is
+    // not valid TypeScript, so the output self-check is skipped here.)
+    let opts = Options {
+        verify: false,
+        ..Options::default()
+    };
+    let src = r#"const v = match (a, b) { ("x", 1) => 1, _ => 0 };"#;
+    assert_eq!(compile(src, &opts).unwrap(), src);
+}
+
+#[test]
+fn a_block_of_literals_is_not_a_match() {
+    // A call to a function named `match` followed by a block statement:
+    // the arms have no `=>`, so the candidate is not claimed and the bytes
+    // pass through.
+    let src = "match (x)\n{ 1 }\n";
+    assert_eq!(ok(src), src);
+}

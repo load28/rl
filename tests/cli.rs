@@ -195,3 +195,140 @@ fn help_only_triggers_as_the_first_argument() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("no such file or directory"), "{stderr}");
 }
+
+/* ------------------------------------------------------------------ */
+/* --types: typed exhaustiveness for literal matches                   */
+/* ------------------------------------------------------------------ */
+
+fn have(cmd: &str) -> bool {
+    Command::new(cmd)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Runs `rlc --types` over a one-file project and returns rlc's stderr.
+fn types_stderr(source: &str) -> String {
+    let dir = tmpdir();
+    let src = dir.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("main.rl"), source).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .args(["--types", "src", "-o", ".rl-types"])
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run rlc");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+macro_rules! require_types_toolchain {
+    () => {
+        if !have("node") || !have("tsc") {
+            eprintln!("skipping: node/tsc not available");
+            return;
+        }
+    };
+}
+
+#[test]
+fn types_reports_a_missing_literal_of_a_finite_union() {
+    require_types_toolchain!();
+    let err = types_stderr(
+        "type Direction = \"north\" | \"south\";\n\
+         export function short(dir: Direction) {\n\
+         \x20 return match (dir) { \"north\" => \"N\" };\n\
+         }\n",
+    );
+    assert!(
+        err.contains("match on literal union is not exhaustive: missing \"south\""),
+        "{err}"
+    );
+    // reported at the `match` keyword of the .rl source, not in the
+    // generated TypeScript
+    assert!(err.contains("src/main.rl:3:10:"), "{err}");
+}
+
+#[test]
+fn types_is_silent_when_the_literal_match_is_exhaustive() {
+    require_types_toolchain!();
+    let err = types_stderr(
+        "type Direction = \"north\" | \"south\";\n\
+         export function short(dir: Direction) {\n\
+         \x20 return match (dir) { \"north\" => \"N\", \"south\" => \"S\" };\n\
+         }\n",
+    );
+    assert!(!err.contains("not exhaustive"), "{err}");
+}
+
+#[test]
+fn types_does_not_guess_when_the_scrutinee_type_is_open() {
+    require_types_toolchain!();
+    // string / number / unknown / any / a type parameter / a widened union
+    // are not finite literal sets — no diagnostic, by design.
+    let err = types_stderr(
+        "export const a = (x: string) => match (x) { \"a\" => 1, \"b\" => 2 };\n\
+         export const b = (x: number) => match (x) { 1 => 1, 2 => 2 };\n\
+         export const c = (x: unknown) => match (x) { \"a\" => 1 };\n\
+         export const d = (x: any) => match (x) { \"a\" => 1 };\n\
+         export const e = <T extends string>(x: T) => match (x) { \"a\" => 1 };\n\
+         export const f = (x: \"a\" | string) => match (x) { \"a\" => 1 };\n\
+         export const g = (x: string | number) => match (x) { \"a\" => 1 };\n",
+    );
+    assert!(!err.contains("not exhaustive"), "{err}");
+}
+
+#[test]
+fn types_checks_a_union_derived_from_as_const() {
+    require_types_toolchain!();
+    // The kind of type rlc could never resolve on its own — the checker can.
+    let err = types_stderr(
+        "const values = [\"north\", \"south\"] as const;\n\
+         type D = (typeof values)[number];\n\
+         export const pick = (x: D) => match (x) { \"north\" => 1 };\n",
+    );
+    assert!(err.contains("not exhaustive: missing \"south\""), "{err}");
+}
+
+#[test]
+fn types_skips_a_literal_match_with_a_wildcard() {
+    require_types_toolchain!();
+    let err = types_stderr(
+        "type D = \"north\" | \"south\";\n\
+         export const pick = (x: D) => match (x) { \"north\" => 1, _ => 0 };\n",
+    );
+    assert!(!err.contains("not exhaustive"), "{err}");
+}
+
+#[test]
+fn types_does_not_count_a_guarded_arm_as_covering() {
+    require_types_toolchain!();
+    let err = types_stderr(
+        "export const pick = (x: \"a\" | \"b\", ok: boolean) =>\n\
+         \x20 match (x) { \"a\" if ok => 1, \"b\" => 2 };\n",
+    );
+    assert!(err.contains("not exhaustive: missing \"a\""), "{err}");
+}
+
+#[test]
+fn types_checks_boolean_and_number_unions() {
+    require_types_toolchain!();
+    let err = types_stderr(
+        "export const b = (x: boolean) => match (x) { true => 1 };\n\
+         export const n = (x: 200 | 404) => match (x) { 200 => 1 };\n",
+    );
+    assert!(err.contains("not exhaustive: missing false"), "{err}");
+    assert!(err.contains("not exhaustive: missing 404"), "{err}");
+}
+
+#[test]
+fn types_maps_a_bad_case_literal_back_to_the_rl_source() {
+    require_types_toolchain!();
+    // The `case` label is copied from the source, so tsc's complaint about
+    // it lands on the literal the user wrote.
+    let err = types_stderr(
+        "export const pick = (x: \"a\" | \"b\") => match (x) { \"a\" => 1, \"c\" => 2, \"b\" => 3 };\n",
+    );
+    assert!(err.contains("src/main.rl:1:61:"), "{err}");
+    assert!(err.contains("is not comparable to type"), "{err}");
+}
