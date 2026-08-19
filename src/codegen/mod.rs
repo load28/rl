@@ -257,7 +257,14 @@ impl<'a> Emitter<'a> {
                     code.push_lit(format!("const {tmp} = ("));
                     code.append(guard_line_comment(self.emit_program(&bind.expr).trim()));
                     code.push_lit(format!("); if ({tmp}.kind !== \"Ok\") return {tmp};"));
-                    code.push_lit(format!(" {} {} = {tmp}.value;", bind.kw, bind.binding));
+                    // The binding is copied from the source, not rebuilt, so
+                    // the emitted declaration carries a mapping back to the
+                    // name the user wrote.
+                    code.push_lit(format!(" {} ", bind.kw));
+                    let (binding, at) =
+                        self.src_slice(bind.binding_span.start, bind.binding_span.end);
+                    code.push_src(binding, at);
+                    code.push_lit(format!(" = {tmp}.value;"));
                 }
             }
         }

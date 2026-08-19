@@ -7,6 +7,7 @@
 //! are already on disk, where the compiler reads them. That is what makes a
 //! `.ts` file and an `.rl` file see each other.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rlc::{EmitMapping, MappedEmit, Options};
@@ -51,20 +52,31 @@ impl Lowered {
 /// Lowers every `.rl` file for the project graph. A file that fails an
 /// rl-level check is returned as an error with its own position — rl
 /// diagnostics come first and are never delegated.
-pub(crate) fn lower(files: &[PathBuf]) -> Result<Vec<Lowered>, (PathBuf, rlc::CompileError)> {
+/// `overlay` substitutes text for a file's contents on disk, keyed by the
+/// canonical path. It is how an editor has the buffer it is showing checked
+/// as part of the project it belongs to: the module keeps its real path — so
+/// its imports, and the imports that name it, resolve exactly as they do on
+/// disk — and only its text is the unsaved one.
+pub(crate) fn lower(
+    files: &[PathBuf],
+    overlay: &HashMap<PathBuf, String>,
+) -> Result<Vec<Lowered>, (PathBuf, rlc::CompileError)> {
     let mut out = Vec::with_capacity(files.len());
     for file in files {
-        let source = std::fs::read_to_string(file).map_err(|e| {
-            (
-                file.clone(),
-                rlc::CompileError {
-                    message: format!("cannot read: {e}"),
-                    filename: Some(file.display().to_string()),
-                    line: 0,
-                    col: 0,
-                },
-            )
-        })?;
+        let source = match overlay.get(file) {
+            Some(text) => text.clone(),
+            None => std::fs::read_to_string(file).map_err(|e| {
+                (
+                    file.clone(),
+                    rlc::CompileError {
+                        message: format!("cannot read: {e}"),
+                        filename: Some(file.display().to_string()),
+                        line: 0,
+                        col: 0,
+                    },
+                )
+            })?,
+        };
         let options = Options {
             filename: Some(file.to_str().unwrap_or("<input>")),
             // Exhaustiveness and `val`'s pairing are the checker's answers

@@ -196,3 +196,29 @@ fn val_modifier_is_dropped_and_the_rest_keeps_mapping() {
     assert_eq!(m.code, "function read(user: User) { return user.name; }\n");
     assert_mapping_invariants(src, &m);
 }
+
+#[test]
+fn result_block_bindings_are_mapped_to_emitted_declarations() {
+    let src = r#"import { Result, Ok } from "@rl/std";
+function load(): Result<number, string> { return Ok(1); }
+const total = result {
+  const first <- load();
+  let { a, b }: { a: number; b: number } <- load2();
+  first + a + b
+};
+"#;
+    let m = emit_mapped(src);
+    assert_mapping_invariants(src, &m);
+
+    // A plain binding name reaches the emitted declaration.
+    let first = src.find("const first <-").unwrap() + "const ".len();
+    let out = map_offset(&m, first).expect("binding name is mapped");
+    assert_eq!(&m.code[out..out + "first".len()], "first");
+
+    // So does a destructuring pattern with a type annotation — the whole
+    // trimmed span, annotation included, is copied from the source.
+    let pattern = "{ a, b }: { a: number; b: number }";
+    let at = src.find(pattern).unwrap();
+    let out = map_offset(&m, at).expect("destructuring binding is mapped");
+    assert_eq!(&m.code[out..out + pattern.len()], pattern);
+}
