@@ -67,7 +67,7 @@ pub use error::CompileError;
 pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};
 pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
-pub use val::{Mutation, ValBinding, ValMethodCall, ValPass, ValProbes};
+pub use val::{Mutation, ValBinding, ValMethodCall, ValPass, ValProbes, is_builtin_mutator_name};
 
 use error::RlError;
 
@@ -464,6 +464,16 @@ pub fn val_method_calls(source: &str) -> Vec<ValMethodCall> {
 /// // not decided here.
 /// assert_eq!(probes.mutations.len(), 2);
 /// assert_eq!(probes.mutations[1].name, "ys");
+/// ```
+///
+/// Method calls are collected whatever the method is called — whether one
+/// mutates is the verdict's half (the checker's built-in answer plus
+/// [`is_builtin_mutator_name`]), not collection's:
+///
+/// ```
+/// let probes = rlc::val_probes("val const d = mk();\nd.at(0);\n");
+/// assert_eq!(probes.mutations.len(), 1);
+/// assert_eq!(probes.mutations[0].method.as_ref().unwrap().0, "at");
 /// ```
 pub fn val_probes(source: &str) -> ValProbes {
     let tokens = lexer::lex(source, 0, source.len());

@@ -16,6 +16,16 @@ HEAD(`c6b013f5`)에 실제로 대조해 검증한 결과로 고쳐 쓴 것이다
 
 > RL owns syntax and RL-only semantics. TypeScript owns TypeScript semantics.
 
+**구현 상태 (TASK-083).** §3의 P1(host batch화 + metadata builtin 판정)과
+P2(mutator 정책의 판정 시점 이동)는 구현됐다 — 방출 TypeScript와 진단이
+바이트 단위로 불변임을 변경 전후 바이너리의 stderr diff로 확인했고, 측정치는
+TASK-083에 있다. P2에는 한 가지 정련이 붙었다: 정책을 통과할 수 없는 메서드
+호출은 **query 조립 단계에서 질문 자체를 생략**한다(답이 정해진 질문은
+왕복할 가치가 없다 — correctness는 여전히 verdict의 것). P3은 §10.5의 규범
+("같은 이름 다른 시그니처는 검사 제외")의 판정 결과를 바꾸므로 "동작 불변"
+제약과 양립하지 않아 **보류** — 규범 갱신을 동반하는 별도 태스크가 필요하다.
+P4(공개 API 제거)도 같은 이유로 보류.
+
 ---
 
 ## 0. 현재 구현 기준선 — 원안이 놓친 것

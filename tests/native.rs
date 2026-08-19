@@ -627,6 +627,70 @@ fn an_any_receiver_is_never_called_a_mutation() {
 }
 
 #[test]
+fn a_non_mutating_builtin_method_is_not_a_mutation() {
+    // Collection asks about every method call through a `val` path; the
+    // verdict is two halves — the checker's (a built-in's method) and rl's
+    // policy (one of the mutating ones). A built-in read fails the second,
+    // so widening collection must never widen what is reported.
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/read.rl",
+        "export function go(): void {\n\
+         \x20 val const m = new Map<string, number>();\n\
+         \x20 m.get(\"a\");\n\
+         \x20 m.has(\"a\");\n\
+         \x20 val const items: number[] = [];\n\
+         \x20 items.at(0);\n\
+         \x20 items.includes(1);\n\
+         }\n",
+    )]);
+    assert_eq!(
+        check(&dir, &root),
+        "",
+        "a built-in method outside rl's mutator policy reads, it does not mutate"
+    );
+}
+
+#[test]
+fn batched_answers_land_on_their_own_questions() {
+    // One ask carries every module's questions; the host groups them by
+    // module for the checker's batch endpoints and scatters the answers
+    // back by index. Each diagnostic must land on its own file and line,
+    // whichever module its group ran under.
+    let root = require_tsgo!();
+    let dir = project(&[
+        (
+            "src/a.rl",
+            "declare const x: \"a\" | \"b\";\n\
+             export const va = match (x) { \"a\" => 1 };\n\
+             export function fa(): void {\n\
+             \x20 val const ua = { n: 0 };\n\
+             \x20 ua.n = 1;\n\
+             }\n",
+        ),
+        (
+            "src/b.rl",
+            "declare const y: \"c\" | \"d\";\n\
+             export const vb = match (y) { \"c\" => 1 };\n\
+             export function fb(): void {\n\
+             \x20 val const ub = { m: 0 };\n\
+             \x20 ub.m = 1;\n\
+             }\n",
+        ),
+    ]);
+    let out = check(&dir, &root);
+    for (file, line) in [
+        ("src/a.rl:2:", "missing \"b\""),
+        ("src/b.rl:2:", "missing \"d\""),
+        ("src/a.rl:5:3", "cannot mutate through val binding `ua`"),
+        ("src/b.rl:5:3", "cannot mutate through val binding `ub`"),
+    ] {
+        let landed = out.lines().any(|l| l.contains(file) && l.contains(line));
+        assert!(landed, "expected {line} at {file}: {out}");
+    }
+}
+
+#[test]
 fn a_type_error_is_reported_at_its_position_in_the_rl_source() {
     let root = require_tsgo!();
     let dir = project(&[(

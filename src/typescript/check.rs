@@ -348,9 +348,14 @@ impl Pass<'_> {
             }
             if let Some(method) = mutation.method {
                 match symbols.get(&method) {
-                    Some(resolution) if resolution.builtin => {}
-                    // A user-defined method, or one the checker could not
-                    // resolve: rl says nothing.
+                    // Two halves make the verdict: the checker's — the
+                    // method is one of TypeScript's own — and rl's policy —
+                    // that method is one of the mutating ones. A built-in
+                    // `get` fails the second; a user-defined `set`, or a
+                    // method the checker could not resolve, fails the first.
+                    Some(resolution)
+                        if resolution.builtin && rlc::is_builtin_mutator_name(&resolution.name) => {
+                    }
                     _ => continue,
                 }
             }

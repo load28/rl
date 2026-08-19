@@ -1099,7 +1099,9 @@ state.user.profile.name = "Lee";  // 에러 — 경로의 루트가 val
 `rlc --check-types`/`--types`는 낮춘 모듈을 실제 TypeScript 프로젝트에 넣으므로,
 `val` 경로로 호출된 메서드의 **심볼**을 조회할 수 있습니다. 이름이 아래 표에
 있고 그 심볼의 선언이 **전부 TypeScript 자신의 lib**일 때만 에러입니다 —
-이름은 질문을 고르는 필터이고, 판정은 컴파일러가 합니다.
+심볼의 소속은 컴파일러의 답이고, built-in의 어떤 메서드를 변경 연산으로 볼지는
+rl의 정책(아래 표)입니다. 두 판정 모두 호출을 수집한 뒤에 내려지므로, 표에
+없는 이름이 오탐을 만들 수는 없습니다 — 표의 누락은 미탐으로만 남습니다.
 
 ```
 rlc: src/main.rl:2:1: cannot call mutating method `set` through val binding `map`

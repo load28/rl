@@ -159,19 +159,23 @@ pub(crate) fn modifier_end(src: &str, keyword_end: usize) -> usize {
     end
 }
 
-/// Method names that *may* name a built-in mutator — the filter deciding
-/// which calls are worth asking a type checker about.
+/// Whether `name` is a method rl treats as **mutating when it is a
+/// built-in's** — half of the typed verdict on a method call through a
+/// `val` path.
 ///
-/// It is a question filter, never a verdict: whether `q.set(k)` mutates
-/// depends on what `q` is, and rlc has no types. The verdict is made in
-/// `rlc --check-types`, where the checker resolves the method's symbol and
-/// only the one case it can prove is reported — a method TypeScript itself
-/// declares on `Array`/`Map`/`Set`/`WeakMap`/`WeakSet`/a TypedArray. A
-/// user-defined `set` never reaches that verdict.
+/// TypeScript has no effect system, so which of its own methods mutate is
+/// rl's policy, and this list is that policy (`Array#push`, `Map#set`, ...
+/// — `docs/reference/language.md` §10.4). The other half is the checker's:
+/// whether the method's symbol is declared entirely in TypeScript's own
+/// lib files. `rlc --check-types` reports a call only when **both** hold,
+/// so a user-defined `set` is never a mutation and a built-in `get` never
+/// becomes one.
 ///
-/// Keep this a **superset** of every name that host judges; a name missing
-/// here is a mutation the typed path can no longer see.
-fn is_builtin_mutator_name(name: &str) -> bool {
+/// The policy is applied at the verdict, not at collection: [`probes`]
+/// collects every method call through an access path, so a name missing
+/// here can only be a (documented) miss, never a wrong report. Only the
+/// legacy candidate collector ([`method_calls`]) still uses it as a filter.
+pub fn is_builtin_mutator_name(name: &str) -> bool {
     matches!(
         name,
         "push"
@@ -394,7 +398,8 @@ pub struct Mutation {
     /// The root identifier's text, for the message.
     pub name: String,
     /// For a method call, the method and the byte offset of its name; the
-    /// call mutates only if that name resolves to a built-in's method.
+    /// call mutates only if the name resolves to a built-in's method **and**
+    /// is one rl's policy treats as mutating ([`is_builtin_mutator_name`]).
     /// `None` for an assignment, an increment or a `delete`, which mutate on
     /// syntax alone.
     pub method: Option<(String, usize)>,
@@ -1235,17 +1240,23 @@ impl<'a> Checker<'a> {
         // type. rlc never answers it from the name — it records the call
         // for `rlc --types`, where the real checker decides.
         if let (Some(method), Some(tok)) = (path.last_prop, path.last_prop_tok)
-            && is_builtin_mutator_name(method)
             && punct_at(tokens, path.end, b'(')
         {
             match self.sink {
-                Sink::Calls(sink) => sink.borrow_mut().push(ValMethodCall {
-                    offset,
-                    binding: name.to_string(),
-                    method: method.to_string(),
-                    name: tokens[tok].span.start,
-                    name_end: tokens[tok].span.end,
-                }),
+                // The candidate list is this legacy collector's own filter.
+                Sink::Calls(sink) if is_builtin_mutator_name(method) => {
+                    sink.borrow_mut().push(ValMethodCall {
+                        offset,
+                        binding: name.to_string(),
+                        method: method.to_string(),
+                        name: tokens[tok].span.start,
+                        name_end: tokens[tok].span.end,
+                    })
+                }
+                Sink::Calls(_) => {}
+                // Every call is collected; which ones count is the verdict's
+                // business ([`is_builtin_mutator_name`]), so a name outside
+                // the policy can never hide a question from the checker.
                 Sink::Probes(sink) => sink.borrow_mut().mutations.push(Mutation {
                     root: offset,
                     name: name.to_string(),

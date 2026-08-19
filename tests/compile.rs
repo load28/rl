@@ -2695,6 +2695,34 @@ m.get(\"a\");
 }
 
 #[test]
+fn val_probes_collect_every_method_call_for_the_verdict() {
+    // The delegated form collects method calls whatever they are called:
+    // the mutator-name policy is applied at the verdict, beside the
+    // checker's built-in answer, so a name outside the policy can never
+    // hide a question — and never make a report on its own.
+    const SRC: &str = "\
+val const d = mk();
+d.setHours(1);
+d.at(0);
+d.count = 2;
+";
+    let probes = rlc::val_probes(SRC);
+    let seen: Vec<(&str, Option<&str>)> = probes
+        .mutations
+        .iter()
+        .map(|m| (m.name.as_str(), m.method.as_ref().map(|(n, _)| n.as_str())))
+        .collect();
+    assert_eq!(
+        seen,
+        [("d", Some("setHours")), ("d", Some("at")), ("d", None),]
+    );
+    // The policy half of the verdict, stated as the library's own answer.
+    assert!(rlc::is_builtin_mutator_name("push"));
+    assert!(!rlc::is_builtin_mutator_name("at"));
+    assert!(!rlc::is_builtin_mutator_name("get"));
+}
+
+#[test]
 fn a_type_argument_list_does_not_declare_a_val_binding() {
     // `<...>` is not a bracket the scanner matches, so the comma in
     // `Map<string, number>` used to look like a declarator separator and

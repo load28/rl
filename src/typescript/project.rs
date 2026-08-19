@@ -196,6 +196,17 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
             probes.val_bindings.push(query.symbols.len() - 1);
         }
         for mutation in val.mutations {
+            // A method call outside rl's mutator policy can never be
+            // reported — the verdict needs the checker's `builtin` *and*
+            // the policy name — so nothing is asked about it. The policy
+            // itself lives at the verdict ([`rlc::is_builtin_mutator_name`],
+            // applied in `check.rs`); skipping here is only the observation
+            // that a question whose answer is settled is not worth asking.
+            if let Some((name, _)) = &mutation.method
+                && !rlc::is_builtin_mutator_name(name)
+            {
+                continue;
+            }
             let Some(root) = anchor(&file.emit, mutation.root) else {
                 continue;
             };

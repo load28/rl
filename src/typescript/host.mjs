@@ -39,6 +39,12 @@
  * space. Mapping them back to `.rl` byte positions is rlc's job (`mapper`),
  * not this host's.
  *
+ * Inside one `ask` the per-position questions are batched by module through
+ * the checker's array overloads (`getTypesAtPositions`,
+ * `getSymbolsAtPositions`, `getTypeOfSymbol[]`), falling back to one call
+ * per question on a client without them — see `batched`. The protocol above
+ * and the meaning of every answer are the same either way.
+ *
  * Exit codes: 0 = ran (type errors, if any, are in `diagnostics`),
  * 2 = the TypeScript API could not be loaded, 3 = malformed job,
  * 5 = the resolved TypeScript has no declaration emit API.
@@ -215,39 +221,96 @@ async function main() {
     }
 
     const checker = project.checker;
-    /** Whether a declaration lives in one of TypeScript's own lib files. */
+    /**
+     * Whether a declaration lives in one of TypeScript's own lib files.
+     * Answered from the program's per-file metadata when the client has it
+     * — a small, cached query — rather than by fetching the whole source
+     * file just to ask about it.
+     */
     const isDefaultLibrary = (declaration) => {
-      const file = declaration.path && project.program.getSourceFile(String(declaration.path));
+      if (!declaration.path) return false;
+      if (typeof project.program.getSourceFileMetadata === "function") {
+        const metadata = project.program.getSourceFileMetadata(String(declaration.path));
+        return metadata ? metadata.isDefaultLibrary === true : false;
+      }
+      const file = project.program.getSourceFile(String(declaration.path));
       return file ? project.program.isSourceFileDefaultLibrary(file) : false;
     };
 
-    // Literal-match exhaustiveness: the type TypeScript computes AT the
-    // scrutinee — narrowing included — decides what the arms miss.
-    (job.literalChecks ?? []).forEach((check, index) => {
-      const type = checker.getTypeAtPosition(check.module, check.start);
-      const missing = missingLiterals(type, check.covered);
-      if (missing) out.literalMissing.push({ index, missing });
-    });
+    // The per-position questions, batched by module: the checker's position
+    // APIs take an array of positions for one file, so a project's worth of
+    // questions costs one round trip per module per kind instead of one per
+    // question. The batch is an implementation detail of this host — the
+    // job's own indices are what every answer is keyed by, and `perModule`
+    // scatters each answer back onto the entry it was asked for.
 
-    // Tag-match exhaustiveness: an rl enum lowers to a discriminated union,
-    // so the same question is "which `kind` values does the scrutinee's type
-    // still allow?" — again at the match, so a case an earlier guard removed
-    // is not demanded back.
-    (job.tagChecks ?? []).forEach((check, index) => {
-      const type = checker.getTypeAtPosition(check.module, check.start);
-      const missing = missingTags(checker, type, check.covered);
-      if (missing) out.tagMissing.push({ index, missing });
+    // Literal- and tag-match exhaustiveness share one type question: the
+    // type TypeScript computes AT the scrutinee — narrowing included —
+    // decides what the arms miss.
+    const typeChecks = [
+      ...(job.literalChecks ?? []).map((check, index) => ({ check, index, tag: false })),
+      ...(job.tagChecks ?? []).map((check, index) => ({ check, index, tag: true })),
+    ];
+    const types = perModule(typeChecks, (module, positions) =>
+      batched(
+        "typesAtPositions",
+        () => checker.getTypeAtPosition(module, positions),
+        () => positions.map((p) => checker.getTypeAtPosition(module, p)),
+      ));
+    // A tag check needs a second round: the `kind` property's type of every
+    // constituent. The property lookups are per constituent, but the types
+    // of all their symbols — across every tag check — are one batch.
+    const tagWork = [];
+    typeChecks.forEach((entry, at) => {
+      if (!entry.tag) {
+        const missing = missingLiterals(types[at], entry.check.covered);
+        if (missing) out.literalMissing.push({ index: entry.index, missing });
+        return;
+      }
+      // An rl enum lowers to a discriminated union, so the question is
+      // "which `kind` values does the scrutinee's type still allow?" —
+      // again at the match, so a case an earlier guard removed is not
+      // demanded back.
+      const symbols = tagKindSymbols(checker, types[at]);
+      if (symbols) tagWork.push({ index: entry.index, covered: entry.check.covered, symbols });
     });
+    if (tagWork.length > 0) {
+      const all = tagWork.flatMap((work) => work.symbols);
+      const kinds = batched(
+        "typesOfSymbols",
+        () => checker.getTypeOfSymbol(all),
+        () => all.map((symbol) => checker.getTypeOfSymbol(symbol)),
+      );
+      let cursor = 0;
+      for (const work of tagWork) {
+        const tags = work.symbols.map((_, i) => literalValue(kinds[cursor + i]));
+        cursor += work.symbols.length;
+        // Every constituent must carry a single string-literal `kind`;
+        // anything less definite makes the whole question indefinite, and
+        // an indefinite question gets no answer.
+        if (tags.some((tag) => typeof tag !== "string")) continue;
+        const seen = new Set(work.covered);
+        const missing = tags.filter((tag) => !seen.has(tag));
+        if (missing.length > 0) out.tagMissing.push({ index: work.index, missing });
+      }
+    }
 
     // Resolution: the primitive rl's `val` is built from. Which binding an
     // identifier names, and whether a method is a built-in, are both "what
     // symbol is this?" — asked here, interpreted by rl.
-    (job.symbolChecks ?? []).forEach((check, index) => {
-      const symbol = checker.getSymbolAtPosition(check.module, check.start);
+    const symbolChecks = (job.symbolChecks ?? []).map((check, index) => ({ check, index }));
+    const symbols = perModule(symbolChecks, (module, positions) =>
+      batched(
+        "symbolsAtPositions",
+        () => checker.getSymbolAtPosition(module, positions),
+        () => positions.map((p) => checker.getSymbolAtPosition(module, p)),
+      ));
+    symbolChecks.forEach((entry, at) => {
+      const symbol = symbols[at];
       if (!symbol) return; // `any`, unresolved — never a verdict
       const declarations = symbol.declarations ?? [];
       out.symbols.push({
-        index,
+        index: entry.index,
         id: symbol.id,
         name: symbol.name,
         // Whether this is one of TypeScript's own declarations is the
@@ -326,27 +389,71 @@ function missingLiterals(type, covered) {
 }
 
 /**
- * The case tags of `type` that `covered` does not, or `null` when the type is
- * not a definite union of tagged object types. Every constituent must carry a
- * `kind` that is a single string literal — anything else (a bare object, a
- * type parameter, `any`) makes the whole question indefinite, and an
- * indefinite question gets no answer.
+ * The `kind` property symbols of `type`'s constituents, or `null` when the
+ * type is not a union of tagged object types — a bare object, a type
+ * parameter or `any` makes the whole question indefinite, and an indefinite
+ * question gets no answer. Whether each `kind` is a single string literal is
+ * the caller's half, batched over every tag check at once.
  */
-function missingTags(checker, type, covered) {
+function tagKindSymbols(checker, type) {
   if (!type) return null;
   const constituents = type.isUnionType?.() ? type.getTypes() : [type];
-  const tags = [];
+  const symbols = [];
   for (const c of constituents) {
     const kind = checker.getPropertyOfType(c, "kind");
     if (!kind) return null;
-    const kindType = checker.getTypeOfSymbol(kind);
-    const value = kindType && literalValue(kindType);
-    if (typeof value !== "string") return null;
-    tags.push(value);
+    symbols.push(kind);
   }
-  const seen = new Set(covered);
-  const missing = tags.filter((t) => !seen.has(t));
-  return missing.length > 0 ? missing : null;
+  return symbols;
+}
+
+/**
+ * Runs `ask(module, positions)` once per module over `entries` — each
+ * `{ check: { module, start } }` — and returns the answers aligned with
+ * `entries`' own order. The grouping is invisible to the caller: entry `i`'s
+ * answer is at `i`, whatever module it was grouped under.
+ */
+function perModule(entries, ask) {
+  const byModule = new Map();
+  entries.forEach((entry, at) => {
+    let group = byModule.get(entry.check.module);
+    if (!group) byModule.set(entry.check.module, (group = []));
+    group.push(at);
+  });
+  const answers = new Array(entries.length);
+  for (const [module, group] of byModule) {
+    const batch = ask(module, group.map((at) => entries[at].check.start));
+    group.forEach((at, i) => (answers[at] = batch[i]));
+  }
+  return answers;
+}
+
+/**
+ * Whether each batched checker endpoint is served by the resolved client,
+ * discovered on first use. A released client older than the batch overloads
+ * still answers — one position at a time.
+ */
+const batchable = {};
+
+/**
+ * `batch()` when the client supports it, `single()` otherwise. The two
+ * compute the same answers; only the number of round trips differs, so a
+ * client without the batch endpoint changes no verdict.
+ */
+function batched(name, batch, single) {
+  if (batchable[name] !== false) {
+    try {
+      const result = batch();
+      if (Array.isArray(result)) {
+        batchable[name] = true;
+        return result;
+      }
+    } catch {
+      // fall through — an endpoint the server does not serve
+    }
+    batchable[name] = false;
+  }
+  return single();
 }
 
 /** The value of a literal type, or `undefined` when it is not one. */
