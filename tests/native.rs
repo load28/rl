@@ -130,6 +130,44 @@ fn declarations_are_emitted_by_the_compiler_itself() {
 }
 
 #[test]
+fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/parse.rl",
+        "import { Result } from \"@rl/std\";\n\
+         export function parse(text: string): Result<number, string> {\n\
+         \x20 const n = Number(text);\n\
+         \x20 return Number.isNaN(n) ? Result.Err(\"not a number\") : Result.Ok(n);\n\
+         }\n",
+    )]);
+    let out_dir = dir.join("out");
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .args(["--native-check", "src", "-o"])
+        .arg(&out_dir)
+        .current_dir(&dir)
+        .env("RLC_TSGO_ROOT", root)
+        .output()
+        .expect("rlc runs");
+    assert!(
+        out.status.success(),
+        "@rl/std has to resolve, and its types have to check: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // The library is one more module of the project, named relatively — no
+    // `paths` entry and no resolver hook.
+    let declaration = fs::read_to_string(out_dir.join("src/parse.d.ts")).expect("a .d.ts");
+    assert!(
+        declaration.contains("__rl_std__"),
+        "the declaration points at the library module: {declaration}"
+    );
+    assert!(
+        out_dir.join("__rl_std__.d.ts").is_file(),
+        "and the library's own declarations are emitted beside it"
+    );
+}
+
+#[test]
 fn a_ts_file_and_an_rl_file_share_one_project_graph() {
     let root = require_tsgo!();
     let dir = project(&[

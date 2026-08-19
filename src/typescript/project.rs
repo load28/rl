@@ -39,7 +39,10 @@ impl Lowered {
 /// Lowers every `.rl` file for the project graph. A file that fails an
 /// rl-level check is returned as an error with its own position — rl
 /// diagnostics come first and are never delegated.
-pub(crate) fn lower(files: &[PathBuf]) -> Result<Vec<Lowered>, (PathBuf, rlc::CompileError)> {
+pub(crate) fn lower(
+    files: &[PathBuf],
+    root: &Path,
+) -> Result<Vec<Lowered>, (PathBuf, rlc::CompileError)> {
     let mut out = Vec::with_capacity(files.len());
     for file in files {
         let source = std::fs::read_to_string(file).map_err(|e| {
@@ -53,8 +56,14 @@ pub(crate) fn lower(files: &[PathBuf]) -> Result<Vec<Lowered>, (PathBuf, rlc::Co
                 },
             )
         })?;
+        // `@rl/std` is not a package: the standard library enters the graph
+        // as one more module of the project, and the importing file points at
+        // it by relative path. No resolver hook, no `paths` entry.
+        let std_import = rlc::imports_std(&source)
+            .then(|| relative_specifier(file.parent().unwrap_or(root), &root.join(STD_MODULE)));
         let options = Options {
             filename: Some(file.to_str().unwrap_or("<input>")),
+            std_import: std_import.as_deref(),
             // Exhaustiveness and `val`'s pairing are the checker's answers
             // here — see `Options::defer_to_checker`.
             defer_to_checker: true,
@@ -74,14 +83,53 @@ pub(crate) fn lower(files: &[PathBuf]) -> Result<Vec<Lowered>, (PathBuf, rlc::Co
     Ok(out)
 }
 
+/// The standard library's file name in the project graph. It is emitted
+/// only when something imports it, and it sits at the project root so every
+/// module can name it relatively.
+pub(crate) const STD_MODULE: &str = "__rl_std__.ts";
+
+/// A specifier for `target` as written in a file living in `from`: always
+/// relative, always with the `.ts` extension the lowered modules use.
+fn relative_specifier(from: &Path, target: &Path) -> String {
+    let mut from_parts: Vec<_> = from.components().collect();
+    let mut target_parts: Vec<_> = target.components().collect();
+    let shared = from_parts
+        .iter()
+        .zip(target_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    from_parts.drain(..shared);
+    target_parts.drain(..shared);
+    let mut specifier = String::new();
+    for _ in 0..from_parts.len() {
+        specifier.push_str("../");
+    }
+    if specifier.is_empty() {
+        specifier.push_str("./");
+    }
+    let tail: Vec<_> = target_parts
+        .iter()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect();
+    specifier.push_str(&tail.join("/"));
+    specifier
+}
+
 /// Builds the batch of questions the whole project asks in one round trip.
 ///
 /// Every question is anchored at a byte the compiler can see: a probe whose
 /// anchor did not survive lowering as verbatim text (a nested rl construct)
 /// is dropped rather than asked about at an approximate position.
-pub(crate) fn query(lowered: &[Lowered]) -> (Query, Probes) {
+pub(crate) fn query(lowered: &[Lowered], root: &Path) -> (Query, Probes) {
     let mut query = Query::default();
     let mut probes = Probes::default();
+
+    if lowered.iter().any(|f| rlc::imports_std(&f.source)) {
+        query.modules.push(Module {
+            path: root.join(STD_MODULE),
+            text: rlc::STD_SOURCE.to_string(),
+        });
+    }
 
     for file in lowered {
         query.modules.push(Module {
@@ -237,6 +285,22 @@ fn mappings(emit: &MappedEmit) -> &[EmitMapping] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_specifier_is_relative_to_the_importing_file() {
+        assert_eq!(
+            relative_specifier(Path::new("/p/src"), Path::new("/p/__rl_std__.ts")),
+            "../__rl_std__.ts",
+        );
+        assert_eq!(
+            relative_specifier(Path::new("/p"), Path::new("/p/__rl_std__.ts")),
+            "./__rl_std__.ts",
+        );
+        assert_eq!(
+            relative_specifier(Path::new("/p/a/b"), Path::new("/p/__rl_std__.ts")),
+            "../../__rl_std__.ts",
+        );
+    }
 
     #[test]
     fn a_lowered_module_takes_its_source_path_with_a_ts_extension() {

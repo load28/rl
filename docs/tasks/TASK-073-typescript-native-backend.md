@@ -101,6 +101,19 @@ Codex가 제시한 설계 초안의 전제 중 몇 가지가 사실과 달라, �
   또 import한 enum은 선언 수집 없이 타입만으로 풀린다.
   기존 경로는 그대로 두고 `Options::defer_to_checker`로 갈랐다.
 
+### 결정 7: `@rl/std`는 프로젝트의 모듈 하나로 들어간다
+
+- **상황**: 레거시 `--types` 호스트는 `@rl/std`를 위해 **모듈 해석 훅**을
+  구현했다(`resolveModuleNames`에서 bare 지정자를 가로챈다). TS 7 API는
+  파일시스템만 열어주고 해석 훅은 없다.
+- **검토한 대안**: (A) 사용자 tsconfig에 `paths`를 주입 — 사용자 설정을
+  건드린다. (B) 표준 라이브러리를 프로젝트 루트의 모듈
+  (`__rl_std__.ts`)로 얹고, lowering이 `@rl/std`를 그 **상대 경로**로
+  재작성한다(`Options::std_import`가 원래 그 용도다).
+- **선택과 근거**: (B). 해석 훅이 필요 없어지고, 방출된 `.d.ts`도
+  `../__rl_std__.ts`를 가리켜 사이드카 트리가 그 자체로 일관된다. 실측:
+  사이드카 트리에 소비자 `.ts`를 놓고 tsgo를 돌려 종료 코드 0 확인.
+
 ### 결정 6: `val`의 binding resolution도 심볼 동일성으로
 
 - **상황**: `val.rs`는 토큰 스트림 위의 자체 스코프 모델로 "이 경로가 어느
@@ -175,6 +188,9 @@ valMutations:
 - 2026-08-19: 선언 emit — host의 `emitDeclarations`, `-o <dir>`로 기록.
   `.rl`의 enum이 컴파일러가 emit한 `.d.ts`에서 유니언 타입 + 생성자 const로
   나오는 것을 확인.
+- 2026-08-19: `@rl/std` — lowering이 상대 경로로 재작성하고, 프로젝트 그래프에
+  `__rl_std__.ts` 모듈을 얹는다(결정 7). 선언 emit에도 포함돼
+  `out/__rl_std__.d.ts`가 함께 나온다.
 - 2026-08-19: `tests/native.rs` 5건 추가 (단일 프로젝트 그래프 / narrowed
   소진성 / `val` 심볼 판정 / `any` 무판정 / 타입 에러 위치 매핑). tsgo 트리가
   빌드돼 있지 않으면 조용히 skip한다 — 가드는 컴파일러의 해석 규칙을
@@ -216,7 +232,7 @@ valMutations:
 
 - [x] `cargo fmt --check`
 - [x] `cargo clippy --all-targets -- -D warnings`
-- [x] `cargo test` (기존 전량 + `tests/native.rs` 11건)
+- [x] `cargo test` (기존 전량 + `tests/native.rs` 12건)
 
 ## 결과
 

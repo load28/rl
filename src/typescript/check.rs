@@ -51,7 +51,8 @@ pub(crate) fn run(
     };
     let tsconfig = tsconfig.canonicalize().unwrap_or(tsconfig);
 
-    let lowered = match project::lower(&files) {
+    let root = tsconfig.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let lowered = match project::lower(&files, &root) {
         Ok(lowered) => lowered,
         Err((file, error)) => {
             eprintln!(
@@ -73,7 +74,7 @@ pub(crate) fn run(
         }
     };
 
-    let (mut query, probes) = project::query(&lowered);
+    let (mut query, probes) = project::query(&lowered, &root);
     query.emit_declarations = out_dir.is_some();
     let answers = match backend.ask(&tsconfig, &query) {
         Ok(answers) => answers,
