@@ -1,9 +1,24 @@
 /* --------------------------------------------------------------------------
- * rl language server — LSP over Node IPC (official VS Code LSP pattern).
+ * rl language server — a protocol adapter over the rl engine.
  *
- * Diagnostics run the real compiler (`rlc --check`); completion, hover,
- * definitions, symbols and quick fixes come from the lightweight structural
- * analysis in analysis.ts.
+ * The server owns the LSP surface: capabilities, document sync with the
+ * client, debouncing, configuration, and presentation. Language semantics
+ * live elsewhere and are consumed, not implemented, here:
+ *
+ * - The **engine** (`rlc --server`, engine.ts) is the authoritative project
+ *   state. The editor's buffers are forwarded to it (didOpen/didChange/
+ *   didClose), and every TypeScript-backed answer — hover, definition,
+ *   references, completion with its incomplete-source probe, rename,
+ *   signature help, type diagnostics — comes back from it already in `.rl`
+ *   coordinates. No projection, source mapping, TypeScript session or
+ *   probe logic lives in this process.
+ * - The **rl syntax layer** (analysis.ts) answers what needs no types and
+ *   must work on a buffer mid-keystroke: enum/case structure, match-arm
+ *   completion, document symbols, quick fixes. It is deliberately
+ *   diagnostic-free — a near-miss can lose a convenience, never invent an
+ *   error.
+ * - Diagnostics run the real compiler through rlc.ts (`--check`, and the
+ *   typed layer via the engine's `typedCheck`).
  * ----------------------------------------------------------------------- */
 import {
   CodeAction,
@@ -33,17 +48,11 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { URI } from "vscode-uri";
 
 import * as analysis from "./analysis";
+import * as engine from "./engine";
 import * as rlc from "./rlc";
-import * as fs from "node:fs";
 import * as path from "node:path";
 
-import * as probe from "./probe";
 import * as sidecar from "./sidecar";
-import { positionAt as positionOf } from "./lsp";
-import { RENAME_PLACEHOLDER } from "./tstypes";
-import type * as tsproject from "./tstypes";
-import { TsgoProject } from "./tsgo";
-import * as virtual from "./virtual";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -169,495 +178,36 @@ function analyze(doc: TextDocument): Analyzed {
   return result;
 }
 
-// ----------------------------------------- virtual documents (TASK-050)
+// ------------------------------------------------------------- the engine
 
-/* The compiler's emitted TypeScript for each open .rl buffer, refreshed on
- * the validation cadence (`rlc --emit-map`). When current, it is what the
- * TypeScript language service sees instead of the raw .rl text — the
- * emitted code is plain TypeScript, so inference works inside match arms,
- * scrutinees and the other rl constructs. Offsets are translated through
- * the emit mappings in both directions; while the entry lags the buffer
- * (or the compiler is missing) the raw text is served and offsets pass
- * through unchanged — the pre-TASK-050 error-recovery behavior. */
-
-interface VirtualEntry {
-  version: number;
-  doc: virtual.MappedDoc;
-}
-
-const virtualDocs = new Map<string, VirtualEntry>();
-
-/** The buffer's mapped virtual document, when it matches `version`. */
-function activeVirtual(
-  fsPath: string,
-  version: number,
-): virtual.MappedDoc | null {
-  const entry = virtualDocs.get(fsPath);
-  return entry && entry.version === version ? entry.doc : null;
-}
-
-/* An imported `.rl` module the editor does not have open is served the same
- * way (TASK-055) — compiled synchronously on first use and cached until its
- * mtime changes. Serving the raw source instead would hand TypeScript a file
- * it can only error-recover through: an rl `enum` reads as a misparsed TS
- * `enum`, so every value flowing across the import loses its type. */
-
-interface DiskEntry {
-  /** Compiler path and mtime the entry was compiled from — a failed compile
-   * is cached too, so keying on the compiler lets a session that only later
-   * resolves one (settings arriving after the first request) try again. */
-  key: string;
-  /** null: the compiler could not produce an emit map for it. */
-  doc: virtual.MappedDoc | null;
-}
-
-const diskVirtuals = new Map<string, DiskEntry>();
-
-/** The compiler path last resolved from settings — the synchronous paths
- * (disk modules, the std module) have no place to await settings. */
+/** The compiler path last resolved from settings — the engine session is
+ * keyed by it, and the synchronous paths (document sync) cannot await
+ * settings. */
 let servedCompiler: string | null = null;
 
 function currentCompiler(): string {
   return servedCompiler ?? rlc.findCompiler("", workspaceRoots);
 }
 
-/** The emitted document of an `.rl` file on disk, or null when it is not a
- * compilable `.rl` file (the caller then serves the disk text as-is). */
-function diskVirtualEntry(fsPath: string): DiskEntry | null {
-  if (!fsPath.endsWith(".rl")) return null;
+const logEngine = (message: string) => connection.console.warn(message);
+
+/** A fresh engine session starts with the disk's view of the world; hand it
+ * every buffer the editor holds open. Runs on first spawn and on respawn
+ * after a crash — recovery the old in-process pipeline never had. */
+engine.setOnSessionStart(() => {
   const compiler = currentCompiler();
-  let key: string;
-  try {
-    key = `${compiler}@${fs.statSync(fsPath).mtimeMs}`;
-  } catch {
-    diskVirtuals.delete(fsPath);
-    return null;
-  }
-  const cached = diskVirtuals.get(fsPath);
-  if (cached && cached.key === key) return cached;
-
-  let doc: virtual.MappedDoc | null = null;
-  const result = rlc.runEmitMapFileSync(compiler, fsPath);
-  if (result) {
-    try {
-      doc = new virtual.MappedDoc(
-        fs.readFileSync(fsPath, "utf8"),
-        result.code,
-        result.mappings,
-      );
-    } catch {
-      doc = null;
-    }
-  }
-  const entry: DiskEntry = { key, doc };
-  diskVirtuals.set(fsPath, entry);
-  return entry;
-}
-
-function diskVirtual(fsPath: string): virtual.MappedDoc | null {
-  return diskVirtualEntry(fsPath)?.doc ?? null;
-}
-
-/** Bring the buffer's virtual document up to date and wait for it. The
- * validation cadence refreshes it on a debounce; a request that arrives
- * inside that window would otherwise be answered off the raw text, where
- * TypeScript cannot parse a pipeline or a match arm at all and answers
- * `any`. Concurrent requests for the same version share one compiler run. */
-const pendingVirtual = new Map<string, Promise<void>>();
-
-async function ensureVirtual(doc: TextDocument): Promise<void> {
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return;
-  if (activeVirtual(uri.fsPath, doc.version)) return;
-
-  const key = `${doc.uri}@${doc.version}`;
-  const existing = pendingVirtual.get(key);
-  if (existing) {
-    await existing;
-    return;
-  }
-  const run = (async () => {
-    const settings = await getSettings(doc.uri);
-    const compiler = rlc.findCompiler(settings.compilerPath, workspaceRoots);
-    servedCompiler = compiler;
-    await refreshVirtual(doc, compiler);
-  })().finally(() => pendingVirtual.delete(key));
-  pendingVirtual.set(key, run);
-  await run;
-}
-
-async function refreshVirtual(
-  doc: TextDocument,
-  compiler: string,
-): Promise<void> {
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return;
-  const version = doc.version;
-  const text = doc.getText();
-  const result = await rlc.runEmitMap(compiler, text, uri.fsPath);
-  const current = documents.get(doc.uri);
-  if (!current || current.version !== version) return; // stale
-  if (result) {
-    virtualDocs.set(uri.fsPath, {
-      version,
-      doc: new virtual.MappedDoc(text, result.code, result.mappings),
-    });
-  } else {
-    virtualDocs.delete(uri.fsPath);
-  }
-}
-
-/** The open document for a filesystem path, if any. */
-function openDocByPath(fsPath: string): TextDocument | null {
   for (const doc of documents.all()) {
     const uri = URI.parse(doc.uri);
-    if (uri.scheme === "file" && uri.fsPath === fsPath) return doc;
-  }
-  return null;
-}
-
-/** A source offset translated into the text the service currently sees
- * for this buffer — identity while the raw text is served, mapped when
- * the virtual document is. Null: the position is compiler glue. */
-function toServiceOffset(
-  fsPath: string,
-  doc: TextDocument,
-  offset: number,
-): number | null {
-  const mapped = activeVirtual(fsPath, doc.version);
-  return mapped ? mapped.srcToOut(offset) : offset;
-}
-
-/** A service-space span start translated back to source coordinates, with
- * the text LSP positions should be computed against. Null: the span has no
- * source counterpart (compiler glue). */
-function fromServiceOffset(
-  fileName: string,
-  fileText: string,
-  offset: number,
-): { text: string; offset: number } | null {
-  const doc = openDocByPath(fileName);
-  if (!doc) {
-    const disk = diskVirtual(fileName);
-    if (!disk) return { text: fileText, offset }; // served raw
-    const src = disk.outToSrc(offset);
-    return src === null ? null : { text: disk.srcText, offset: src };
-  }
-  const mapped = activeVirtual(fileName, doc.version);
-  if (!mapped) return { text: doc.getText(), offset };
-  const src = mapped.outToSrc(offset);
-  return src === null ? null : { text: doc.getText(), offset: src };
-}
-
-/** [`fromServiceOffset`] over a span; null when either end is unmapped. */
-function fromServiceSpan(
-  fileName: string,
-  fileText: string,
-  start: number,
-  length: number,
-): { text: string; start: number; end: number } | null {
-  const s = fromServiceOffset(fileName, fileText, start);
-  const e = fromServiceOffset(fileName, fileText, start + length);
-  if (!s || !e || e.offset < s.offset) return null;
-  return { text: s.text, start: s.offset, end: e.offset };
-}
-
-// -------------------------------------------- TypeScript language service
-
-/* An .rl file is TypeScript plus six constructs, so symbols the rl
- * analysis does not own — variables, functions, types, imported values —
- * are answered by the real TypeScript language service (tsproject.ts) over
- * the virtual documents above (or the raw sources while one lags). Used as
- * the fallback for definitions and hover, and — over a virtual document
- * only — for the type diagnostics `validate` merges into rlc's own. */
-
-let tsProjectInstance: TsgoProject | null = null;
-
-function getTsProject(): TsgoProject {
-  if (tsProjectInstance === null) {
-    // The language server reads modules from disk, so the standard library
-    // has to be somewhere it can find — see `ensureStdModule`.
-    const root = workspaceRoots[0];
-    if (root) rlc.ensureStdModule(currentCompiler(), root);
-  }
-  tsProjectInstance ??= new TsgoProject(
-    rlc.findTsgo(workspaceRoots),
-    workspaceRoots[0] ?? process.cwd(),
-    (fileName) => {
-      // A probe stands in for the buffer while one is installed — the
-      // completion path below serves the emitted TypeScript of a source
-      // the user has not finished typing (see `probeFor`).
-      if (installedProbe && installedProbe.fsPath === fileName) {
-        return { text: installedProbe.code, version: installedProbe.version };
-      }
-      for (const doc of documents.all()) {
-        const uri = URI.parse(doc.uri);
-        if (uri.scheme === "file" && uri.fsPath === fileName) {
-          const mapped = activeVirtual(fileName, doc.version);
-          if (mapped) {
-            return { text: mapped.code, version: `${doc.version}:emitted` };
-          }
-          return { text: doc.getText(), version: `${doc.version}:raw` };
-        }
-      }
-      const disk = diskVirtualEntry(fileName);
-      if (disk?.doc) {
-        return { text: disk.doc.code, version: `disk-${disk.key}:emitted` };
-      }
-      return null;
-    },
-    (message) => connection.console.warn(message),
-  );
-  return tsProjectInstance;
-}
-
-/* ------------------------------------------------------------- probes --
- *
- * Completion at a trailing `.` needs a type for what precedes it, and inside
- * an rl construct those types exist only over the emitted TypeScript — a
- * `|>` pipeline or a `match` arm binding is nothing the TS parser can make
- * sense of in the raw source. But at that exact moment the buffer is not a
- * member access the compiler can emit either: `x |> .` has no member yet, so
- * the file passes through unchanged, the service is handed raw rl text, and
- * it offers nothing at all. That is the whole of the reported symptom — and
- * since the editor caches the list it got when `.` was typed, the members do
- * not appear later either.
- *
- * probe.ts builds the mended source (`x |> .$rl_probe`) and locates the
- * placeholder in the emitted output; here it is compiled and installed —
- * around the synchronous language-service call that reads it, and never any
- * longer, so no diagnostic can be computed from text the user did not write.
- * ---------------------------------------------------------------------- */
-
-interface InstalledProbe extends probe.Probe {
-  fsPath: string;
-  /** Snapshot version, unique per probe so the service re-reads the text. */
-  version: string;
-}
-
-/** Non-null only inside [`withProbe`]. */
-let installedProbe: InstalledProbe | null = null;
-let probeCount = 0;
-
-/** The probe the last completion list was answered from, kept so resolving
- * one of its items can install it again — an item's detail has to come from
- * the same text and position the item was listed from. */
-let lastProbe: InstalledProbe | null = null;
-
-/**
- * A probe for the cursor, or null when there is nothing to mend: the cursor
- * is not at a member access without a member, or the compiler cannot emit
- * from the probe source either.
- *
- * Note what does *not* gate this: whether a virtual document exists. An
- * unfinished pipeline is not an emit error — `--emit-map` passes the file
- * through unchanged — so the buffer does have a virtual document, one whose
- * text is the raw source. That is exactly the case the probe is for.
- */
-async function probeFor(
-  doc: TextDocument,
-  offset: number,
-): Promise<InstalledProbe | null> {
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return null;
-
-  const version = doc.version;
-  const built = await probe.buildProbe(doc.getText(), offset, (source) =>
-    // A doc name of its own: `runEmitMap` derives the temp file it compiles
-    // from this, and sharing it with the buffer's own runs would let the
-    // two overwrite each other.
-    rlc.runEmitMap(currentCompiler(), source, `${uri.fsPath}.probe`),
-  );
-  if (!built) return null;
-  // The buffer may have moved on while rlc ran; its offsets rule.
-  const current = documents.get(doc.uri);
-  if (!current || current.version !== version) return null;
-
-  return { ...built, fsPath: uri.fsPath, version: `probe-${++probeCount}` };
-}
-
-/** Runs `query` with `p` standing in for its buffer. Synchronous by
- * construction — nothing but `query` may see the probe's text. */
-/** Queries run one at a time: a probe is installed for the duration of one,
- * and the buffer it stands in for must not change under another. */
-let queries: Promise<unknown> = Promise.resolve();
-
-function serialize<T>(query: () => Promise<T>): Promise<T> {
-  const next = queries.then(query, query);
-  queries = next.catch(() => undefined);
-  return next;
-}
-
-function withProbe<T>(p: InstalledProbe, query: () => Promise<T>): Promise<T> {
-  return serialize(async () => {
-    installedProbe = p;
-    try {
-      return await query();
-    } finally {
-      installedProbe = null;
+    if (uri.scheme === "file") {
+      engine.openDocument(compiler, uri.fsPath, doc.getText());
     }
-  });
-}
-
-async function tsDefinitions(
-  doc: TextDocument,
-  offset: number,
-): Promise<Location[] | null> {
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return null;
-  const at = toServiceOffset(uri.fsPath, doc, offset);
-  if (at === null) return null;
-  const definitions = await getTsProject().definitionsAt(uri.fsPath, at);
-  const locations: Location[] = [];
-  for (const d of definitions) {
-    const span = fromServiceSpan(d.fileName, d.fileText, d.start, d.length);
-    if (!span) continue;
-    locations.push(
-      Location.create(URI.file(d.fileName).toString(), {
-        start: positionOf(span.text, span.start),
-        end: positionOf(span.text, span.end),
-      }),
-    );
   }
-  return locations.length > 0 ? locations : null;
-}
+});
 
-/** TypeScript ScriptElementKind strings → LSP completion kinds. */
-const TS_COMPLETION_KINDS: Record<string, CompletionItemKind> = {
-  var: CompletionItemKind.Variable,
-  let: CompletionItemKind.Variable,
-  const: CompletionItemKind.Variable,
-  "local var": CompletionItemKind.Variable,
-  parameter: CompletionItemKind.Variable,
-  alias: CompletionItemKind.Reference,
-  function: CompletionItemKind.Function,
-  "local function": CompletionItemKind.Function,
-  method: CompletionItemKind.Method,
-  property: CompletionItemKind.Property,
-  getter: CompletionItemKind.Property,
-  setter: CompletionItemKind.Property,
-  class: CompletionItemKind.Class,
-  interface: CompletionItemKind.Interface,
-  type: CompletionItemKind.TypeParameter,
-  enum: CompletionItemKind.Enum,
-  "enum member": CompletionItemKind.EnumMember,
-  module: CompletionItemKind.Module,
-  keyword: CompletionItemKind.Keyword,
-  string: CompletionItemKind.Constant,
-};
-
-/** What a TS-delegated completion item carries so its signature and
- * documentation can be fetched when the editor asks for that one entry
- * (`completionItem/resolve`). Positions are in source coordinates and
- * re-mapped at resolve time — the buffer may have moved on since. */
-interface TsCompletionData {
-  uri: string;
-  offset: number;
-  name: string;
-  source?: string;
-  entry?: unknown;
-  /** Version of the probe the entry was listed from, when it came from one
-   * — the detail must be fetched against that same text. */
-  probe?: string;
-}
-
-/** TS completions, sorted after the rl-specific items (`2` prefix; rl
- * items use `0`/`1`). Signature and docs are left to the resolve step:
- * TypeScript computes them per entry, so asking eagerly would type-check
- * every member of the type on every keystroke. */
-async function tsCompletions(
-  doc: TextDocument,
-  offset: number,
-  activeProbe: InstalledProbe | null = null,
-): Promise<{ items: CompletionItem[]; member: boolean }> {
+/** The open document's path when the engine can answer about it. */
+function enginePath(doc: TextDocument): string | null {
   const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return { items: [], member: false };
-
-  let list: tsproject.TsCompletionList;
-  if (activeProbe) {
-    list = await withProbe(activeProbe, () =>
-      getTsProject().completionsAt(activeProbe.fsPath, activeProbe.offset),
-    );
-    lastProbe = activeProbe;
-  } else {
-    const at = toServiceOffset(uri.fsPath, doc, offset);
-    if (at === null) return { items: [], member: false };
-    list = await getTsProject().completionsAt(uri.fsPath, at);
-  }
-
-  return {
-    member: list.member,
-    items: list.entries.map((entry) => ({
-      label: entry.name,
-      kind: TS_COMPLETION_KINDS[entry.kind] ?? CompletionItemKind.Text,
-      sortText: `2${entry.sortText}`,
-      data: {
-        uri: doc.uri,
-        offset,
-        name: entry.name,
-        source: entry.source,
-        entry: entry.data,
-        probe: activeProbe?.version,
-      } satisfies TsCompletionData,
-    })),
-  };
-}
-
-/**
- * TS completions, with a probe behind them when the cursor is at a member
- * access (`atMember`) that the ordinary path cannot answer.
- *
- * "Cannot answer" is not just an empty list. Recovering from rl syntax,
- * TypeScript may lose the dot and answer with the *global scope* instead —
- * `x |> n.` offers every name in scope, the compiler's own `$rl_ap` helper
- * among them. At a member access only a member answer means anything, so a
- * non-member one is discarded rather than shown, whether it came from the
- * buffer or from the probe.
- */
-async function tsCompletionsProbed(
-  doc: TextDocument,
-  offset: number,
-  atMember: boolean,
-): Promise<CompletionItem[]> {
-  const plain = await tsCompletions(doc, offset);
-  if (!atMember) return plain.items;
-  if (plain.member && plain.items.length > 0) return plain.items;
-
-  const built = await probeFor(doc, offset);
-  if (!built) return plain.member ? plain.items : [];
-  const probed = await tsCompletions(doc, offset, built);
-  return probed.member ? probed.items : [];
-}
-
-async function tsHover(doc: TextDocument, offset: number) {
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return null;
-  const at = toServiceOffset(uri.fsPath, doc, offset);
-  if (at === null) return null;
-  const info = await getTsProject().quickInfoAt(uri.fsPath, at);
-  if (!info || info.signature === "") return null;
-  const mapped = activeVirtual(uri.fsPath, doc.version);
-  let start = info.start;
-  let end = info.start + info.length;
-  if (mapped) {
-    const s = mapped.outToSrc(start);
-    const e = mapped.outToSrc(end);
-    if (s === null || e === null || e < s) return null;
-    start = s;
-    end = e;
-  }
-  const value =
-    "```ts\n" +
-    info.signature +
-    "\n```" +
-    (info.documentation ? `\n${info.documentation}` : "");
-  return {
-    contents: { kind: MarkupKind.Markdown, value },
-    range: {
-      start: doc.positionAt(start),
-      end: doc.positionAt(end),
-    },
-  };
+  return uri.scheme === "file" ? uri.fsPath : null;
 }
 
 // ------------------------------------------------- imported declarations
@@ -747,10 +297,9 @@ const VALIDATION_DELAY_MS = 300;
  *
  * `rlc --check` answers from the text; what needs a *type* to decide — a
  * mutation through a `val` binding, exhaustiveness over the type a scrutinee
- * actually has — is `rlc --check-types`' answer, and getting it means opening
- * the project and running the TypeScript compiler. That is far too slow to
- * ride the keystroke debounce, so it runs on its own longer one and publishes
- * again when it lands.
+ * actually has — is the engine's typed pass. Fast as the engine has made it,
+ * it still checks the whole project, so it runs on its own longer debounce
+ * and publishes again when it lands.
  *
  * Both layers are cached per document *version*. A typed answer computed for
  * an older version is not shown: its positions describe text that is no
@@ -767,7 +316,7 @@ interface VersionedDiagnostics {
 
 /** What `--check` and the TypeScript layer found, as last published. */
 const baseDiagnostics = new Map<string, VersionedDiagnostics>();
-/** What `--check-types --rl-only` found, for the version it ran on. */
+/** What the typed rl layer found, for the version it ran on. */
 const typedDiagnostics = new Map<string, VersionedDiagnostics>();
 let warnedTypedCheckUnavailable = false;
 
@@ -775,7 +324,7 @@ let warnedTypedCheckUnavailable = false;
  * Adds the typed diagnostics that say something new.
  *
  * The two passes overlap: enum exhaustiveness is decided from the text by
- * `--check` and from the type by `--check-types`, and both report it at the
+ * `--check` and from the type by the typed pass, and both report it at the
  * same place. One squiggle per position, and the pass that already ran wins
  * — its message is the one the user has been reading.
  */
@@ -830,7 +379,7 @@ async function typedCheck(doc: TextDocument, compiler: string): Promise<void> {
       connection.console.info(
         `rl: typed checks unavailable (${result.detail}). ` +
           "`val` mutations and typed exhaustiveness are reported by " +
-          "`rlc --check-types`, which needs a TypeScript install — set " +
+          "the typed pass, which needs a TypeScript install — set " +
           "rl.typedChecks to false to stop trying.",
       );
     }
@@ -862,13 +411,7 @@ async function validate(doc: TextDocument): Promise<void> {
   const compiler = rlc.findCompiler(settings.compilerPath, workspaceRoots);
   const uri = URI.parse(doc.uri);
   const docName = uri.scheme === "file" ? uri.fsPath : uri.path;
-
-  // The virtual document rides the same debounce; it degrades to raw-text
-  // serving on its own when the compiler is missing. Kept as a promise:
-  // the type diagnostics below need the emitted text, and awaiting the run
-  // already in flight beats starting a second one.
   servedCompiler = compiler;
-  const virtualReady = refreshVirtual(doc, compiler);
 
   const result = await rlc.runCheck(
     compiler,
@@ -908,11 +451,10 @@ async function validate(doc: TextDocument): Promise<void> {
   const diagnostics = result.diagnostics.map((d) => toDiagnostic(current, d));
 
   if (settings.typeDiagnostics) {
-    await virtualReady;
+    diagnostics.push(...(await typeDiagnostics(doc, compiler)));
     // Awaiting gave the buffer another chance to move on.
     const fresh = documents.get(doc.uri);
     if (!fresh || fresh.version !== doc.version) return;
-    diagnostics.push(...(await typeDiagnostics(fresh, docName)));
   }
 
   baseDiagnostics.set(doc.uri, { version: doc.version, diagnostics });
@@ -934,41 +476,29 @@ function forget(uri: string): void {
 }
 
 /**
- * TypeScript's type errors for a buffer, moved onto the `.rl` source.
+ * TypeScript's type errors for a buffer, already on the `.rl` source.
  *
- * Only over a virtual document: the service must be seeing the emitted
- * TypeScript, because rl syntax in the raw text is not TypeScript and every
- * error TS recovers from there would be a lie. Spans that map to compiler
- * glue are dropped for the same reason — rlc's emissions are the compiler's
+ * The engine computes them over the buffer's projection and drops anything
+ * landing in compiler glue — rlc's emissions are the compiler's
  * responsibility, never something to report at the user (CLAUDE.md, error
- * layers).
+ * layers). This side only converts and version-gates.
  */
 async function typeDiagnostics(
   doc: TextDocument,
-  fsPath: string,
+  compiler: string,
 ): Promise<Diagnostic[]> {
-  const mapped = activeVirtual(fsPath, doc.version);
-  if (!mapped) return [];
-
-  const text = doc.getText();
-  const out: Diagnostic[] = [];
-  for (const d of await getTsProject().diagnosticsFor(fsPath)) {
-    const span = fromServiceSpan(fsPath, mapped.code, d.start, d.length);
-    if (!span || span.text !== text) continue;
-    // An empty span (an error at a position, not over one) would render as
-    // an invisible squiggle; give it the character it points at.
-    const end = span.end > span.start ? span.end : span.start + 1;
-    out.push({
-      severity: d.warning
-        ? DiagnosticSeverity.Warning
-        : DiagnosticSeverity.Error,
-      range: { start: doc.positionAt(span.start), end: doc.positionAt(end) },
-      message: d.message,
-      code: d.code,
-      source: "ts",
-    });
-  }
-  return out;
+  const fsPath = enginePath(doc);
+  if (fsPath === null) return [];
+  const items = await engine.tsDiagnostics(compiler, fsPath, logEngine);
+  return items.map((d) => ({
+    severity: d.warning
+      ? DiagnosticSeverity.Warning
+      : DiagnosticSeverity.Error,
+    range: d.range,
+    message: d.message,
+    code: d.code,
+    source: "ts",
+  }));
 }
 
 function toDiagnostic(doc: TextDocument, d: rlc.RlcDiagnostic): Diagnostic {
@@ -997,7 +527,13 @@ function toDiagnostic(doc: TextDocument, d: rlc.RlcDiagnostic): Diagnostic {
   };
 }
 
-documents.onDidOpen((e) => scheduleValidation(e.document));
+documents.onDidOpen((e) => {
+  const fsPath = enginePath(e.document);
+  if (fsPath !== null) {
+    engine.openDocument(currentCompiler(), fsPath, e.document.getText());
+  }
+  scheduleValidation(e.document);
+});
 documents.onDidSave((e) => {
   void rebuildSidecar(e.document);
 });
@@ -1042,6 +578,10 @@ async function rebuildSidecar(doc: TextDocument): Promise<void> {
   }
 }
 documents.onDidChangeContent((e) => {
+  const fsPath = enginePath(e.document);
+  if (fsPath !== null) {
+    engine.updateDocument(currentCompiler(), fsPath, e.document.getText());
+  }
   // Editing one file can change what its siblings import — drop their
   // cached imported declarations (the edited doc's own entry refreshes by
   // version).
@@ -1051,11 +591,13 @@ documents.onDidChangeContent((e) => {
   scheduleValidation(e.document);
 });
 documents.onDidClose((e) => {
+  const fsPath = enginePath(e.document);
+  if (fsPath !== null) {
+    engine.closeDocument(currentCompiler(), fsPath);
+  }
   analysisCache.delete(e.document.uri);
   importedCache.delete(e.document.uri);
   forget(e.document.uri);
-  const uri = URI.parse(e.document.uri);
-  if (uri.scheme === "file") virtualDocs.delete(uri.fsPath);
   const pending = pendingValidation.get(e.document.uri);
   if (pending !== undefined) {
     clearTimeout(pending);
@@ -1142,10 +684,89 @@ const KEYWORD_SNIPPETS: CompletionItem[] = [
   },
 ];
 
+/** TypeScript element-kind strings → LSP completion kinds. */
+const TS_COMPLETION_KINDS: Record<string, CompletionItemKind> = {
+  var: CompletionItemKind.Variable,
+  let: CompletionItemKind.Variable,
+  const: CompletionItemKind.Variable,
+  "local var": CompletionItemKind.Variable,
+  parameter: CompletionItemKind.Variable,
+  alias: CompletionItemKind.Reference,
+  function: CompletionItemKind.Function,
+  "local function": CompletionItemKind.Function,
+  method: CompletionItemKind.Method,
+  property: CompletionItemKind.Property,
+  getter: CompletionItemKind.Property,
+  setter: CompletionItemKind.Property,
+  class: CompletionItemKind.Class,
+  interface: CompletionItemKind.Interface,
+  type: CompletionItemKind.TypeParameter,
+  enum: CompletionItemKind.Enum,
+  "enum member": CompletionItemKind.EnumMember,
+  module: CompletionItemKind.Module,
+  keyword: CompletionItemKind.Keyword,
+  string: CompletionItemKind.Constant,
+};
+
+/** What a TS-delegated completion item carries so its signature and
+ * documentation can be fetched when the editor asks for that one entry
+ * (`completionItem/resolve`). Positions are in source coordinates and the
+ * engine re-maps at resolve time — the buffer may have moved on since. */
+interface TsCompletionData {
+  uri: string;
+  offset: number;
+  name: string;
+  /** The engine's probe the entry was listed from, when it came from one —
+   * the detail must be fetched against that same text. */
+  probe?: number;
+}
+
+/**
+ * True when `offset` sits right after a member-access dot. `masked` is the
+ * masked source (analysis.ts), so a `.` inside a string, comment or regex
+ * is not one.
+ */
+function atMemberAccess(masked: string, offset: number): boolean {
+  return offset > 0 && masked[offset - 1] === ".";
+}
+
+/**
+ * TypeScript completions from the engine, sorted after the rl-specific
+ * items (`2` prefix; rl items use `0`/`1`). The engine applies the whole
+ * member/probe policy: at a member access only a member answer comes back,
+ * probed from the mended source when the buffer's own text cannot answer.
+ */
+async function tsCompletions(
+  doc: TextDocument,
+  offset: number,
+  atMember: boolean,
+): Promise<CompletionItem[]> {
+  const fsPath = enginePath(doc);
+  if (fsPath === null) return [];
+  const list = await engine.completion(
+    currentCompiler(),
+    fsPath,
+    doc.positionAt(offset),
+    atMember,
+    logEngine,
+  );
+  if (!list) return [];
+  return list.items.map((entry) => ({
+    label: entry.label,
+    kind: TS_COMPLETION_KINDS[entry.kind] ?? CompletionItemKind.Text,
+    sortText: `2${entry.sortText}`,
+    data: {
+      uri: doc.uri,
+      offset,
+      name: entry.label,
+      probe: list.probe ?? undefined,
+    } satisfies TsCompletionData,
+  }));
+}
+
 connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
-  await ensureVirtual(doc);
   const { masked, enums, matches } = analyze(doc);
   const offset = doc.offsetAt(params.position);
   const visible = analysis.visibleEnums(enums, await importedEnums(doc));
@@ -1161,7 +782,7 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const base = analysis.memberAccessAt(masked, offset);
   if (base !== null) {
     const e = visible.find((x) => x.name === base);
-    const members = await tsCompletionsProbed(doc, offset, true);
+    const members = await tsCompletions(doc, offset, true);
     if (!e) return members;
     const items = e.cases.map((c) => constructorItem(e, c));
     const tags = new Set(items.map((i) => i.label));
@@ -1171,8 +792,8 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   // A `.` with no identifier in front of it is a member access all the same
   // (`x |> .`, `f().`, `(a + b).`): members belong there, and nothing else —
   // no enum names, no keyword snippets.
-  if (probe.atMemberAccess(masked, offset)) {
-    return tsCompletionsProbed(doc, offset, true);
+  if (atMemberAccess(masked, offset)) {
+    return tsCompletions(doc, offset, true);
   }
 
   const ctx = analysis.armContextAt(masked, matches, offset);
@@ -1250,9 +871,7 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const rlItems = items.concat(KEYWORD_SNIPPETS);
   const seen = new Set(rlItems.map((i) => i.label));
   return rlItems.concat(
-    (await tsCompletionsProbed(doc, offset, false)).filter(
-      (i) => !seen.has(i.label),
-    ),
+    (await tsCompletions(doc, offset, false)).filter((i) => !seen.has(i.label)),
   );
 });
 
@@ -1269,25 +888,16 @@ connection.onCompletionResolve(
     if (!data || typeof data.uri !== "string") return item;
     const doc = documents.get(data.uri);
     if (!doc) return item;
-    const uri = URI.parse(doc.uri);
-    if (uri.scheme !== "file") return item;
-    // An entry listed from a probe must be resolved against that probe:
-    // the buffer it was computed from is the one with the placeholder.
-    const from =
-      data.probe && lastProbe?.version === data.probe ? lastProbe : null;
-    let detail: tsproject.TsCompletionDetail | null;
-    if (from) {
-      detail = await withProbe(from, () =>
-        getTsProject().completionDetail(from.fsPath, from.offset, data.name),
-      );
-    } else if (data.probe) {
-      return item; // its probe is gone; the buffer has moved on
-    } else {
-      await ensureVirtual(doc);
-      const at = toServiceOffset(uri.fsPath, doc, data.offset);
-      if (at === null) return item;
-      detail = await getTsProject().completionDetail(uri.fsPath, at, data.name);
-    }
+    const fsPath = enginePath(doc);
+    if (fsPath === null) return item;
+    const detail = await engine.completionResolve(
+      currentCompiler(),
+      fsPath,
+      doc.positionAt(data.offset),
+      data.name,
+      data.probe,
+      logEngine,
+    );
     if (!detail) return item;
     if (detail.signature !== "") item.detail = detail.signature;
     if (detail.documentation !== "") {
@@ -1304,21 +914,22 @@ connection.onCompletionResolve(
 
 /**
  * Parameter hints while a call is being written, delegated wholesale to
- * TypeScript over the virtual document — so the arguments of a standard
- * library combinator (`Result.andThen(r, f)`) are typed as they are typed,
- * including inside a `match` arm or a `|>` pipeline, where the raw text is
- * not TypeScript at all. rl syntax that has no call at the cursor simply
- * yields nothing.
+ * the engine — so the arguments of a standard library combinator
+ * (`Result.andThen(r, f)`) are typed as they are typed, including inside a
+ * `match` arm or a `|>` pipeline, where the raw text is not TypeScript at
+ * all. rl syntax that has no call at the cursor simply yields nothing.
  */
 connection.onSignatureHelp(async (params): Promise<SignatureHelp | null> => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return null;
-  await ensureVirtual(doc);
-  const at = toServiceOffset(uri.fsPath, doc, doc.offsetAt(params.position));
-  if (at === null) return null;
-  const help = await getTsProject().signatureHelpAt(uri.fsPath, at);
+  const fsPath = enginePath(doc);
+  if (fsPath === null) return null;
+  const help = await engine.signatureHelp(
+    currentCompiler(),
+    fsPath,
+    params.position,
+    logEngine,
+  );
   if (!help || help.signatures.length === 0) return null;
   return {
     signatures: help.signatures.map(
@@ -1368,7 +979,6 @@ function constructorItem(
 connection.onHover(async (params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
-  await ensureVirtual(doc);
   const { text, masked, enums, matches } = analyze(doc);
   const offset = doc.offsetAt(params.position);
 
@@ -1398,7 +1008,7 @@ connection.onHover(async (params) => {
     await importedEnums(doc),
   );
   // Not an rl symbol — an ordinary TypeScript one, perhaps. Delegate.
-  if (!sym || !w) return tsHover(doc, offset);
+  if (!sym || !w) return tsHover(doc, params.position);
 
   const range = { start: doc.positionAt(w.start), end: doc.positionAt(w.end) };
   if (sym.kind === "enum") {
@@ -1434,12 +1044,31 @@ connection.onHover(async (params) => {
   };
 });
 
+/** Hover for everything the rl layer does not own, from the engine. */
+async function tsHover(
+  doc: TextDocument,
+  position: { line: number; character: number },
+) {
+  const fsPath = enginePath(doc);
+  if (fsPath === null) return null;
+  const info = await engine.hover(currentCompiler(), fsPath, position, logEngine);
+  if (!info || info.signature === "") return null;
+  const value =
+    "```ts\n" +
+    info.signature +
+    "\n```" +
+    (info.documentation ? `\n${info.documentation}` : "");
+  return {
+    contents: { kind: MarkupKind.Markdown, value },
+    range: info.range,
+  };
+}
+
 // -------------------------------------------------------------- definition
 
 connection.onDefinition(async (params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
-  await ensureVirtual(doc);
   const { text, masked, enums, matches } = analyze(doc);
   const offset = doc.offsetAt(params.position);
   const sym = analysis.symbolAt(
@@ -1487,8 +1116,19 @@ connection.onDefinition(async (params) => {
 
   // Everything else — ordinary TypeScript symbols, and built-in enum
   // names the user may have imported from the std module — is the
-  // TypeScript language service's answer.
-  return tsDefinitions(doc, offset);
+  // engine's answer, already in `.rl` coordinates.
+  const fsPath = enginePath(doc);
+  if (fsPath === null) return null;
+  const locations = await engine.definition(
+    currentCompiler(),
+    fsPath,
+    params.position,
+    logEngine,
+  );
+  if (locations.length === 0) return null;
+  return locations.map((l) =>
+    Location.create(URI.file(l.path).toString(), l.range),
+  );
 });
 
 // -------------------------------------------------- references and rename
@@ -1496,38 +1136,24 @@ connection.onDefinition(async (params) => {
 connection.onReferences(async (params): Promise<Location[] | null> => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return null;
-  await ensureVirtual(doc);
-  const offset = doc.offsetAt(params.position);
-  // Delegated wholesale to TypeScript: it resolves the passthrough region
-  // exactly, and rl-specific spans degrade to an empty result.
-  const at = toServiceOffset(uri.fsPath, doc, offset);
-  if (at === null) return null;
-  const references = (await getTsProject().referencesAt(uri.fsPath, at)).filter(
-    (r) => params.context.includeDeclaration || !r.isDefinition,
+  const fsPath = enginePath(doc);
+  if (fsPath === null) return null;
+  // Delegated wholesale to the engine: TypeScript resolves the passthrough
+  // region exactly, and rl-specific spans degrade to an empty result.
+  const references = (
+    await engine.references(currentCompiler(), fsPath, params.position, logEngine)
+  ).filter((r) => params.context.includeDeclaration || !r.isDefinition);
+  if (references.length === 0) return null;
+  return references.map((r) =>
+    Location.create(URI.file(r.path).toString(), r.range),
   );
-  const locations: Location[] = [];
-  for (const r of references) {
-    const span = fromServiceSpan(r.fileName, r.fileText, r.start, r.length);
-    if (!span) continue;
-    locations.push(
-      Location.create(URI.file(r.fileName).toString(), {
-        start: positionOf(span.text, span.start),
-        end: positionOf(span.text, span.end),
-      }),
-    );
-  }
-  return locations.length > 0 ? locations : null;
 });
 
 connection.onRenameRequest(async (params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return null;
-  await ensureVirtual(doc);
-  const offset = doc.offsetAt(params.position);
+  const fsPath = enginePath(doc);
+  if (fsPath === null) return null;
 
   // rl symbols (enums, case tags) are compiled into the emitted `kind`
   // strings — renaming them needs rl-aware rewriting, so refuse rather
@@ -1536,44 +1162,35 @@ connection.onRenameRequest(async (params) => {
   const sym = analysis.symbolAt(
     text,
     masked,
-    offset,
+    doc.offsetAt(params.position),
     enums,
     matches,
     await importedEnums(doc),
   );
   if (sym) return null;
 
-  const at = toServiceOffset(uri.fsPath, doc, offset);
-  if (at === null) return null;
-  const locations = await getTsProject().renameAt(uri.fsPath, at);
-  if (!locations || locations.length === 0) return null;
+  // The engine owns the safety rule: an edit that cannot be mapped back to
+  // source would corrupt the rename, so such a rename comes back null —
+  // whole or not at all.
+  const edits = await engine.rename(
+    currentCompiler(),
+    fsPath,
+    params.position,
+    logEngine,
+  );
+  if (!edits || edits.length === 0) return null;
   const changes: Record<string, TextEdit[]> = {};
-  for (const l of locations) {
-    const span = fromServiceSpan(l.fileName, l.fileText, l.start, l.length);
-    // A rename edit that cannot be mapped back would silently skip an
-    // occurrence and corrupt the rename — refuse the whole operation.
-    if (!span) return null;
-    // What TypeScript writes at this location, which is not always the bare
-    // name: a destructuring shorthand — what an rl pattern binding
-    // `Some(value)` compiles to — expands to `value: <new>`, and rl's
-    // pattern grammar spells an aliased binding the same way. Dropping the
-    // expansion would rebind a *different* field under the new name, so an
-    // answer whose shape we cannot account for refuses the rename instead.
-    let newText = params.newName;
-    if (l.newText !== undefined && l.newText !== RENAME_PLACEHOLDER) {
-      if (!l.newText.includes(RENAME_PLACEHOLDER)) return null;
-      newText = l.newText.split(RENAME_PLACEHOLDER).join(params.newName);
-    }
-    const target = URI.file(l.fileName).toString();
-    (changes[target] ??= []).push(
-      TextEdit.replace(
-        {
-          start: positionOf(span.text, span.start),
-          end: positionOf(span.text, span.end),
-        },
-        newText,
-      ),
-    );
+  for (const edit of edits) {
+    // What the engine wants written, which is not always the bare name: a
+    // destructuring shorthand — what an rl pattern binding `Some(value)`
+    // compiles to — expands to `value: <new>`, and dropping the expansion
+    // would rebind a *different* field under the new name.
+    const newText =
+      edit.newText === null
+        ? params.newName
+        : edit.newText.split(engine.RENAME_PLACEHOLDER).join(params.newName);
+    const target = URI.file(edit.path).toString();
+    (changes[target] ??= []).push(TextEdit.replace(edit.range, newText));
   }
   return { changes };
 });
@@ -1634,7 +1251,7 @@ connection.onCodeAction(async (params): Promise<CodeAction[]> => {
     const missing = [...m[2].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
     if (missing.length === 0) continue;
 
-    const { masked, enums, matches } = analyze(doc);
+    const { enums, matches } = analyze(doc);
     const offset = doc.offsetAt(diag.range.start);
     const match = analysis.matchKeywordAt(matches, offset);
     if (!match) continue;
@@ -1671,7 +1288,6 @@ connection.onCodeAction(async (params): Promise<CodeAction[]> => {
         },
       },
     });
-    void masked;
   }
   return actions;
 });

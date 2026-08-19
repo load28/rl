@@ -52,6 +52,7 @@
 
 mod ast;
 mod codegen;
+pub mod engine;
 mod error;
 mod lexer;
 mod parser;
@@ -60,6 +61,7 @@ mod scanner;
 mod sema;
 mod sidecar;
 mod stdlib;
+pub(crate) mod typescript;
 mod val;
 mod verify;
 
@@ -67,10 +69,7 @@ pub use error::CompileError;
 pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};
 pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
-pub use val::{
-    Mutation, ValBinding, ValFn, ValMethodCall, ValParam, ValPass, ValProbes,
-    is_builtin_mutator_name,
-};
+pub use val::{Mutation, ValBinding, ValFn, ValParam, ValPass, ValProbes, is_builtin_mutator_name};
 
 use error::RlError;
 
@@ -416,37 +415,6 @@ pub fn emit_mapped(source: &str) -> MappedEmit {
         mappings,
         scrutinee_temps,
     }
-}
-
-/// Every method call made through a `val` binding's access path, in source
-/// order — the typed half of `val`'s mutation analysis.
-///
-/// Whether such a call mutates depends on what the receiver *is*, which is
-/// a fact about a TypeScript type: rlc reports nothing on its own and
-/// collects the calls as questions, exactly as it does for literal
-/// [`match`] exhaustiveness ([`literal_matches`]). `rlc --types` resolves
-/// each one against the real checker and reports only the calls that land
-/// on a built-in mutator (`Array#push`, `Map#set`, ...). A same-named
-/// user-defined method is never a mutation.
-///
-/// ```
-/// let calls = rlc::val_method_calls("val const items: number[] = [];\nitems.push(1);\n");
-/// assert_eq!(calls.len(), 1);
-/// assert_eq!(calls[0].method, "push");
-/// assert_eq!(calls[0].binding, "items");
-/// ```
-///
-/// Only calls a checker could judge are collected — a path that is not
-/// rooted at a `val` binding, or a method no built-in mutates, is not a
-/// question worth asking:
-///
-/// ```
-/// assert!(rlc::val_method_calls("const items: number[] = [];\nitems.push(1);\n").is_empty());
-/// assert!(rlc::val_method_calls("val const items: number[] = [];\nitems.at(0);\n").is_empty());
-/// ```
-pub fn val_method_calls(source: &str) -> Vec<ValMethodCall> {
-    let tokens = lexer::lex(source, 0, source.len());
-    val::method_calls(source, &tokens)
 }
 
 /// Collects a file's `val` bindings and its mutations, **unpaired** — the

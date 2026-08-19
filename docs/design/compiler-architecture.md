@@ -162,6 +162,16 @@ AST에 남긴 원시 Span 위로 `scanner::contains_await`를 돌려 수행한�
   두 입력이 같은 출력 경로를 다투는 경우에만 쓰기를 부모 스레드로 되돌려
   순서를 지킨다 — **관측 가능한 결과는 스레드 수와 무관하게 동일하다.**
 
+## 타입 검사 실행 (엔진)
+
+typed 모드(`--check-types`/`--types`/`--server`)는 배치 드라이버가 아니라
+**엔진**(`src/engine/`)이 소유한다: `Project`(문서·projection 캐시·컴파일러
+세션)가 장수명 상태를 들고, `Snapshot`(불변)이 한 패스의 단위이며, 결과는
+RL-owned 타입으로 돌아온다. 설계 근거와 typescript-go 비교는
+[`engine-architecture.md`](./engine-architecture.md)에 있다. 배치 빌드가
+엔진 밖인 것은 tsgo가 배치 `tsc`를 project 시스템 밖에 두는 것과 같은
+분리다 — 상태가 필요 없는 1회 실행에 세션 기구를 태우지 않는다.
+
 ## 기능 추가 가이드
 
 | 변경 종류 | 손대는 단계 |

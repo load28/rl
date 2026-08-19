@@ -9,7 +9,7 @@
 //! emission — belongs to no `.rl` byte, and a diagnostic landing there is
 //! reported without a mapped position rather than at a made-up one.
 
-use rlc::EmitMapping;
+use crate::EmitMapping;
 
 /// Offset of `byte` in `text`, counted in UTF-16 code units — TypeScript's
 /// own coordinate space. An offset past the end clamps to the end.
@@ -49,6 +49,33 @@ pub(crate) fn to_source(mappings: &[EmitMapping], out: usize) -> Option<usize> {
     mappings
         .iter()
         .find(|m| out >= m.out && out < m.out + m.len)
+        .map(|m| m.src + (out - m.out))
+}
+
+/// [`to_output`], but a chunk's **end** offset belongs to it too — and when
+/// two chunks touch, the later one wins.
+///
+/// The language-service positions travel through this variant: a cursor sits
+/// *between* bytes, and completion or hover at the end of what was just
+/// typed names the boundary offset — exclusive lookup would call it glue and
+/// lose the answer. (Diagnostic spans keep the exclusive [`to_output`]:
+/// a byte either was copied or was not.)
+pub(crate) fn to_output_inclusive(mappings: &[EmitMapping], src: usize) -> Option<usize> {
+    mappings
+        .iter()
+        .filter(|m| m.src <= src)
+        .max_by_key(|m| m.src)
+        .filter(|m| src <= m.src + m.len)
+        .map(|m| m.out + (src - m.src))
+}
+
+/// The inverse of [`to_output_inclusive`], for answers coming back.
+pub(crate) fn to_source_inclusive(mappings: &[EmitMapping], out: usize) -> Option<usize> {
+    mappings
+        .iter()
+        .filter(|m| m.out <= out)
+        .max_by_key(|m| m.out)
+        .filter(|m| out <= m.out + m.len)
         .map(|m| m.src + (out - m.out))
 }
 

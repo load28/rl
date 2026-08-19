@@ -63,7 +63,7 @@ jobs:
           # covered by the `native` job below.
           test -f "$RLC_TSGO_API"
           cargo test --test native 2>&1 | tee /tmp/native.log
-          grep -q "19 passed" /tmp/native.log
+          grep -q "23 passed" /tmp/native.log
 
   extension:
     name: vscode extension
@@ -169,7 +169,7 @@ jobs:
           RLC_TSGO_ROOT: ${{ github.workspace }}/typescript-go
         run: |
           cargo test --test native 2>&1 | tee /tmp/native.log
-          grep -q "19 passed" /tmp/native.log
+          grep -q "23 passed" /tmp/native.log
 
       - name: Build the extension
         working-directory: editors/vscode

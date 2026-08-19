@@ -1,25 +1,30 @@
-/* End-to-end tests for the virtual-document pipeline (TASK-050): the real
- * `rlc --emit-map` output served to the TypeScript language server via
- * TsgoProject, with offsets translated through MappedDoc. These drive the
- * real compiler *and* a real tsgo, so they skip when either is missing. */
+/* End-to-end tests for TypeScript answers over rl constructs, through the
+ * engine session: hover inside match arms and pipelines, navigation out of
+ * an arm body, imported unopened `.rl` modules, `@rl/std`, and type errors
+ * mapped onto the source. The projection and every mapping live in the
+ * engine now; what these lock is the observable result — the same results
+ * the virtual-document pipeline (TASK-050/055/057/058/080) has always
+ * produced, asked for and answered in `.rl` coordinates.
+ *
+ * They drive the real compiler *and* a real TypeScript language server, so
+ * they skip when either is missing. */
 import * as assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { ensureStdModule, runEmitMap, runEmitMapFileSync } from "../rlc";
-import { MappedDoc } from "../virtual";
-import type { TsgoProject } from "../tsgo";
-import { openProject } from "./tracked";
+import * as engine from "../engine";
+import { positionAt, sliceOf } from "./positions";
 import { COMPILER, compilerAvailable, findTsgo } from "./toolchain";
 
-const TSGO = findTsgo();
 const skip = !compilerAvailable()
   ? "rlc not on PATH"
-  : TSGO === null
+  : findTsgo() === null
     ? "no tsgo executable"
     : false;
+
+after(() => engine.shutdownEngineServer());
 
 const SOURCE = [
   'import { disc } from "./helpers";',
@@ -42,70 +47,61 @@ const SOURCE = [
 ].join("\n");
 
 /** A hand-written TypeScript file the source imports, so a definition that
- * leaves an arm body lands somewhere an editor can actually open. The
- * compiler's own standard library is embedded in the executable and has no
- * file behind it. */
+ * leaves an arm body lands somewhere an editor can actually open. */
 const HELPERS = "export function disc(x: number): number {\n  return x * Math.PI;\n}\n";
 
-/** The source compiled and served as a virtual document. */
-async function virtualProject(): Promise<{
-  file: string;
-  mapped: MappedDoc;
-  ts: TsgoProject;
-}> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-emitmap-test-"));
-  const file = path.join(dir, "shapes.rl");
-  fs.writeFileSync(file, SOURCE);
-  fs.writeFileSync(path.join(dir, "helpers.ts"), HELPERS);
-  const result = await runEmitMap(COMPILER, SOURCE, file);
-  assert.ok(result, "rlc --emit-map failed");
-  const mapped = new MappedDoc(SOURCE, result!.code, result!.mappings);
-  const ts = openProject(TSGO as string, dir, (fileName) =>
-    fileName === file ? { text: mapped.code, version: "1:emitted" } : null,
-  );
-  return { file, mapped, ts };
+function fixture(name: string, files: Record<string, string>): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), name));
+  for (const [file, text] of Object.entries(files)) {
+    fs.writeFileSync(path.join(dir, file), text);
+  }
+  return dir;
 }
 
 test(
-  "hover inside a match arm body works on the virtual doc",
+  "hover inside a match arm body answers in source coordinates",
   { skip },
   async () => {
     // `radius` in the arm body is compiler-destructured in the emitted
-    // switch — the raw text could never answer this, the virtual doc can.
-    const { file, mapped, ts } = await virtualProject();
-    const src = SOURCE.indexOf("radius * radius");
-    const at = mapped.srcToOut(src);
-    assert.notEqual(at, null, "arm body must be mapped");
-    const info = await ts.quickInfoAt(file, at!);
+    // switch — the raw text could never answer this; the engine's
+    // projection does, and the span comes back in the arm body the user
+    // wrote.
+    const dir = fixture("rl-emitmap-test-", {
+      "shapes.rl": SOURCE,
+      "helpers.ts": HELPERS,
+    });
+    const file = path.join(dir, "shapes.rl");
+    const info = await engine.hover(
+      COMPILER,
+      file,
+      positionAt(SOURCE, SOURCE.indexOf("radius * radius")),
+    );
     assert.ok(info, "expected quick info");
     assert.ok(
       info!.signature.includes("radius: number"),
       `signature was: ${info!.signature}`,
     );
-    // The hover span maps back into the source arm body.
-    const back = mapped.outToSrc(info!.start);
-    assert.equal(SOURCE.slice(back!, back! + "radius".length), "radius");
+    assert.equal(sliceOf(SOURCE, info!.range), "radius");
   },
 );
 
 test(
-  "definition from an arm body maps back to source coordinates",
+  "definition from an arm body lands in the hand-written file",
   { skip },
   async () => {
-    // `disc` inside the arm body is declared in a hand-written `.ts`; the
-    // querying side goes through the mapping, the result side is a plain
-    // TS file, in its own coordinates.
-    const { file, mapped, ts } = await virtualProject();
-    const src = SOURCE.indexOf("disc(radius");
-    const at = mapped.srcToOut(src);
-    assert.notEqual(at, null);
-    const defs = await ts.definitionsAt(file, at!);
-    assert.equal(defs.length, 1, JSON.stringify(defs));
-    assert.equal(defs[0].fileName, path.join(path.dirname(file), "helpers.ts"));
-    assert.equal(
-      defs[0].fileText.slice(defs[0].start, defs[0].start + defs[0].length),
-      "disc",
+    const dir = fixture("rl-emitmap-test-", {
+      "shapes.rl": SOURCE,
+      "helpers.ts": HELPERS,
+    });
+    const file = path.join(dir, "shapes.rl");
+    const defs = await engine.definition(
+      COMPILER,
+      file,
+      positionAt(SOURCE, SOURCE.indexOf("disc(radius")),
     );
+    assert.equal(defs.length, 1, JSON.stringify(defs));
+    assert.equal(defs[0].path, path.join(dir, "helpers.ts"));
+    assert.equal(sliceOf(HELPERS, defs[0].range), "disc");
   },
 );
 
@@ -131,36 +127,14 @@ const PIPE_SOURCE = [
   "",
 ].join("\n");
 
-/** A buffer served as a virtual document, with the std fallback wired in
- * exactly as the server wires it. */
-async function stdProject(
-  source: string,
-  /** Passed through to `TsProject` — null runs without a default library. */
-  defaultLib?: string | null,
-): Promise<{
-  file: string;
-  mapped: MappedDoc;
-  ts: TsgoProject;
-}> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-std-test-"));
-  const file = path.join(dir, "calc.rl");
-  fs.writeFileSync(file, source);
-  const result = await runEmitMap(COMPILER, source, file);
-  assert.ok(result, "rlc --emit-map failed");
-  const mapped = new MappedDoc(source, result!.code, result!.mappings);
-  ensureStdModule(COMPILER, dir);
-  const ts = openProject(TSGO as string, dir, (fileName) =>
-    fileName === file ? { text: mapped.code, version: "1:emitted" } : null,
-  );
-  return { file, mapped, ts };
-}
-
 test("a pipeline step over the std module is not `any`", { skip }, async () => {
-  const { file, mapped, ts } = await stdProject(PIPE_SOURCE);
-  const src = PIPE_SOURCE.indexOf("andThenP");
-  const at = mapped.srcToOut(src);
-  assert.notEqual(at, null, "pipeline step must be mapped");
-  const info = await ts.quickInfoAt(file, at!);
+  const dir = fixture("rl-std-test-", { "calc.rl": PIPE_SOURCE });
+  const file = path.join(dir, "calc.rl");
+  const info = await engine.hover(
+    COMPILER,
+    file,
+    positionAt(PIPE_SOURCE, PIPE_SOURCE.indexOf("andThenP")),
+  );
   assert.ok(info, "expected quick info");
   assert.ok(
     info!.signature.includes("Result<number, string>"),
@@ -172,11 +146,13 @@ test(
   "a postfix pipeline step keeps its receiver's type",
   { skip },
   async () => {
-    const { file, mapped, ts } = await stdProject(PIPE_SOURCE);
-    const src = PIPE_SOURCE.indexOf("trim");
-    const at = mapped.srcToOut(src);
-    assert.notEqual(at, null, "postfix step must be mapped");
-    const info = await ts.quickInfoAt(file, at!);
+    const dir = fixture("rl-std-test-", { "calc.rl": PIPE_SOURCE });
+    const file = path.join(dir, "calc.rl");
+    const info = await engine.hover(
+      COMPILER,
+      file,
+      positionAt(PIPE_SOURCE, PIPE_SOURCE.indexOf("trim")),
+    );
     assert.ok(info, "expected quick info");
     assert.ok(
       info!.signature.includes("String.trim(): string"),
@@ -209,53 +185,34 @@ test(
   "an imported .rl module is served emitted, not raw",
   { skip },
   async () => {
-    // The importer is the open buffer; `shapes.rl` is only on disk, so it
-    // reaches the service through the synchronous compile the server does
-    // for imported modules. Served raw, TypeScript reads `enum Shape` as a
-    // TS enum and the arm bindings lose their types.
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-import-test-"));
-    const shapes = path.join(dir, "shapes.rl");
-    const main = path.join(dir, "main.rl");
-    fs.writeFileSync(shapes, IMPORTED_SHAPES);
-    fs.writeFileSync(main, IMPORTER);
-
-    const result = await runEmitMap(COMPILER, IMPORTER, main);
-    assert.ok(result, "rlc --emit-map failed");
-    const mapped = new MappedDoc(IMPORTER, result!.code, result!.mappings);
-    const onDisk = runEmitMapFileSync(COMPILER, shapes);
-    assert.ok(onDisk, "rlc --emit-map on the imported module failed");
-    const diskDoc = new MappedDoc(
-      IMPORTED_SHAPES,
-      onDisk!.code,
-      onDisk!.mappings,
-    );
-
-    ensureStdModule(COMPILER, dir);
-    const ts = openProject(TSGO as string, dir, (fileName) => {
-      if (fileName === main) return { text: mapped.code, version: "1:emitted" };
-      if (fileName === shapes) {
-        return { text: diskDoc.code, version: "disk-1:emitted" };
-      }
-      return null;
+    // The importer is the open buffer; `shapes.rl` is only on disk. The
+    // engine projects and serves it on its own — served raw, TypeScript
+    // would read `enum Shape` as a TS enum and the arm bindings would lose
+    // their types.
+    const dir = fixture("rl-import-test-", {
+      "shapes.rl": IMPORTED_SHAPES,
+      "main.rl": IMPORTER,
     });
-
-    const src = IMPORTER.indexOf("radius * radius");
-    const at = mapped.srcToOut(src);
-    assert.notEqual(at, null, "arm body must be mapped");
-    const info = await ts.quickInfoAt(main, at!);
+    const file = path.join(dir, "main.rl");
+    engine.openDocument(COMPILER, file, IMPORTER);
+    const info = await engine.hover(
+      COMPILER,
+      file,
+      positionAt(IMPORTER, IMPORTER.indexOf("radius * radius")),
+    );
     assert.ok(info, "expected quick info");
     assert.ok(
       info!.signature.includes("radius: number"),
       `signature was: ${info!.signature}`,
     );
+    engine.closeDocument(COMPILER, file);
   },
 );
 
 /* --------------------------------------------------------------------------
- * TASK-057: type errors inside rl syntax reach the editor. The service only
- * sees them over a virtual document — the raw text is not TypeScript — and
- * every span has to come back through the mapping, or it would point into
- * generated code.
+ * TASK-057: type errors inside rl syntax reach the editor, every span on
+ * the source the user wrote — a span that would land in generated code is
+ * dropped, never reported at a made-up position.
  * -------------------------------------------------------------------- */
 
 const BAD_PIPE = [
@@ -269,16 +226,13 @@ const BAD_PIPE = [
 ].join("\n");
 
 test("a type error inside a pipeline is reported", { skip }, async () => {
-  const { file, mapped, ts } = await stdProject(BAD_PIPE);
-  const diagnostics = await ts.diagnosticsFor(file);
+  const dir = fixture("rl-std-test-", { "calc.rl": BAD_PIPE });
+  const file = path.join(dir, "calc.rl");
+  const diagnostics = await engine.tsDiagnostics(COMPILER, file);
   assert.equal(diagnostics.length, 1, JSON.stringify(diagnostics));
   assert.equal(diagnostics[0].code, 2339); // property does not exist
   assert.match(diagnostics[0].message, /'length' does not exist on type/);
-
-  // The span maps back onto the source text the user wrote.
-  const start = mapped.outToSrc(diagnostics[0].start);
-  assert.notEqual(start, null, "the span must map back to the source");
-  assert.equal(BAD_PIPE.slice(start!, start! + "length".length), "length");
+  assert.equal(sliceOf(BAD_PIPE, diagnostics[0].range), "length");
 });
 
 const BAD_ARM = [
@@ -297,44 +251,42 @@ const BAD_ARM = [
 ].join("\n");
 
 test("a type error inside a match arm is reported", { skip }, async () => {
-  const { file, mapped, ts } = await stdProject(BAD_ARM);
-  const diagnostics = await ts.diagnosticsFor(file);
+  const dir = fixture("rl-std-test-", { "calc.rl": BAD_ARM });
+  const file = path.join(dir, "calc.rl");
+  const diagnostics = await engine.tsDiagnostics(COMPILER, file);
   assert.equal(diagnostics.length, 1, JSON.stringify(diagnostics));
   assert.equal(diagnostics[0].code, 2339);
-  const start = mapped.outToSrc(diagnostics[0].start);
-  assert.notEqual(start, null, "the span must map back to the source");
-  assert.equal(
-    BAD_ARM.slice(start!, start! + "toUpperCase".length),
-    "toUpperCase",
-  );
+  assert.equal(sliceOf(BAD_ARM, diagnostics[0].range), "toUpperCase");
 });
 
 test("clean rl syntax reports nothing", { skip }, async () => {
-  const { file, ts } = await stdProject(PIPE_SOURCE);
-  assert.deepEqual(await ts.diagnosticsFor(file), []);
+  const dir = fixture("rl-std-test-", { "calc.rl": PIPE_SOURCE });
+  assert.deepEqual(
+    await engine.tsDiagnostics(COMPILER, path.join(dir, "calc.rl")),
+    [],
+  );
 });
 
-test("raw .rl text is never type-checked", { skip }, async () => {
-  // The same buffer served raw instead of emitted: TypeScript cannot parse
-  // `match`, so its recovery would invent errors all over the file. The
-  // syntactic guard drops every one of them.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-rawdiag-test-"));
+test("a buffer mid-edit is never invented errors for", { skip }, async () => {
+  // An unfinished construct does not lower — the projection passes the raw
+  // text through — and TypeScript cannot parse rl syntax, so its recovery
+  // would invent errors all over the file. The parse-error guard drops
+  // every one of them: degrade to silence, never to lies.
+  const broken = [
+    "declare const shape: { kind: string };",
+    "const label = match (shape) {",
+    "  Circle(radius) => radius.",
+  ].join("\n");
+  const dir = fixture("rl-rawdiag-test-", { "shapes.rl": broken });
   const file = path.join(dir, "shapes.rl");
-  fs.writeFileSync(file, SOURCE);
-  const ts = openProject(TSGO as string, dir, (fileName) =>
-    fileName === file ? { text: SOURCE, version: "1:raw" } : null,
-  );
-  assert.deepEqual(await ts.diagnosticsFor(file), []);
+  engine.openDocument(COMPILER, file, broken);
+  assert.deepEqual(await engine.tsDiagnostics(COMPILER, file), []);
+  engine.closeDocument(COMPILER, file);
 });
 
 /* --------------------------------------------------------------------------
  * TASK-058: the type environment itself must be sound before anything is
- * reported. Without TypeScript's lib.*.d.ts the program has no globals, so
- * `Array` has no `[Symbol.iterator]` and TS2488 lands on a tuple
- * destructuring the user wrote — while the errors that would explain it
- * (`Cannot find name 'Error'`/`'JSON'`) fall inside generated glue and are
- * dropped by the span mapping. One invented error on correct code is all
- * that reaches the editor.
+ * reported — no invented TS2488 on a tuple destructuring the user wrote.
  * -------------------------------------------------------------------- */
 
 const TUPLE_SOURCE = [
@@ -351,17 +303,18 @@ const TUPLE_SOURCE = [
 ].join("\n");
 
 test("tuple destructuring over the std module reports nothing", { skip }, async () => {
-  const { file, ts } = await stdProject(TUPLE_SOURCE);
-  assert.deepEqual(await ts.diagnosticsFor(file), []);
+  const dir = fixture("rl-std-test-", { "calc.rl": TUPLE_SOURCE });
+  assert.deepEqual(
+    await engine.tsDiagnostics(COMPILER, path.join(dir, "calc.rl")),
+    [],
+  );
 });
-
 
 /* --------------------------------------------------------------------------
  * TASK-080: the names a construct *introduces* — a `try` declaration, a
  * let-else / if let / match pattern binding — are copied from the source
  * into the emitted declaration, so hovering one answers with its type
- * instead of nothing. They used to be rebuilt by the compiler, which left
- * them outside the map: the query never reached the service at all.
+ * instead of nothing.
  * -------------------------------------------------------------------- */
 
 const BINDING_SOURCE = [
@@ -388,44 +341,40 @@ const BINDING_SOURCE = [
 /** Hovers the `needle` written inside `context` and returns the signature
  * TypeScript answers with. */
 async function signatureOfBinding(
-  ts: TsgoProject,
   file: string,
-  mapped: MappedDoc,
   context: string,
   needle: string,
 ): Promise<string> {
   const src = BINDING_SOURCE.indexOf(context) + context.indexOf(needle);
-  const at = mapped.srcToOut(src);
-  assert.notEqual(at, null, `${needle} in ${context} must be mapped`);
-  const info = await ts.quickInfoAt(file, at!);
+  const info = await engine.hover(
+    COMPILER,
+    file,
+    positionAt(BINDING_SOURCE, src),
+  );
   assert.ok(info, `expected quick info for ${needle}`);
   return info!.signature;
 }
 
 test("a try declaration's binding hovers with its Ok type", { skip }, async () => {
-  const { file, mapped, ts } = await stdProject(BINDING_SOURCE);
-  const signature = await signatureOfBinding(
-    ts,
-    file,
-    mapped,
-    "total = try load()",
-    "total",
-  );
+  const dir = fixture("rl-std-test-", { "calc.rl": BINDING_SOURCE });
+  const file = path.join(dir, "calc.rl");
+  const signature = await signatureOfBinding(file, "total = try load()", "total");
   assert.match(signature, /total: number/);
 });
 
 test("let-else and if let bindings hover with the extracted type", { skip }, async () => {
-  const { file, mapped, ts } = await stdProject(BINDING_SOURCE);
+  const dir = fixture("rl-std-test-", { "calc.rl": BINDING_SOURCE });
+  const file = path.join(dir, "calc.rl");
   assert.match(
-    await signatureOfBinding(ts, file, mapped, "value: label)", "label"),
+    await signatureOfBinding(file, "value: label)", "label"),
     /label: string/,
   );
   assert.match(
-    await signatureOfBinding(ts, file, mapped, "value: shown)", "shown"),
+    await signatureOfBinding(file, "value: shown)", "shown"),
     /shown: string/,
   );
   assert.match(
-    await signatureOfBinding(ts, file, mapped, "value: text)", "text"),
+    await signatureOfBinding(file, "value: text)", "text"),
     /text: string/,
   );
 });

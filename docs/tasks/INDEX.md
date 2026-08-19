@@ -93,7 +93,10 @@
 | TASK-083 | host 질의 batch화와 mutator 정책의 판정 시점 이동 — 동작 불변 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-083](./TASK-083-host-batch-and-mutator-policy.md) |
 | TASK-084 | 큰 프로젝트에서의 host 스케일 — 응답 파이프 데드락 수정과 공유 타입 메모이제이션 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-084](./TASK-084-host-large-project-scale.md) |
 | TASK-085 | call-capability 검사의 callee를 symbol identity로 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-085](./TASK-085-callee-symbol-pairing.md) |
+| TASK-086 | Project/Snapshot 기반 Language Engine 아키텍처 재구성 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-086](./TASK-086-engine-architecture.md) |
+| TASK-087 | LSP 재설계 — 엔진 어댑터화와 TsgoProject 제거 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-087](./TASK-087-lsp-engine-adapter.md) |
+| TASK-088 | CI native 테스트 guard 개수 갱신 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-088](./TASK-088-ci-native-guard-count.md) |
 
 ## 다음 태스크 번호
 
-**TASK-086**
+**TASK-089**

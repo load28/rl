@@ -1,63 +1,39 @@
-/* Tests for completion over rl buffers (TASK-062).
- *
- * Two halves, both of which the editor used to lose:
+/* Tests for completion over rl buffers (TASK-062), through the engine
+ * session. Two halves, both of which the editor used to lose:
  *
  *  - the standard library's combinators behind `Result.`/`Option.`, which
- *    the language service types perfectly well — the server was returning
- *    the enum's case constructors *instead of* its answer, not alongside;
+ *    the language service types perfectly well;
  *  - members at a `.` the user has just typed inside rl syntax, where no
- *    compiled form of the buffer exists yet and a probe has to make one.
+ *    compiled form of the buffer exists yet and the engine's probe mends
+ *    one.
  *
- * These drive the real compiler binary, so they skip when it is not on
- * PATH — same rule as the sidecar and emit-map tests.
- */
+ * These drive the real compiler binary and a real TypeScript language
+ * server, so they skip when either is missing. */
 import * as assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { ensureStdModule, runEmitMap } from "../rlc";
-import { buildProbe } from "../probe";
-import { MappedDoc } from "../virtual";
-import { openProject } from "./tracked";
+import * as engine from "../engine";
+import { positionAt } from "./positions";
 import { COMPILER, compilerAvailable, findTsgo } from "./toolchain";
 
-const TSGO = findTsgo();
 const skip = !compilerAvailable()
   ? "rlc not on PATH"
-  : TSGO === null
+  : findTsgo() === null
     ? "no tsgo executable"
     : false;
 
-/** A buffer served to the language service the way the server serves it:
- * the emitted TypeScript when the source compiles into one, otherwise the
- * raw text. `text` is what the service is given; `at` maps a source offset
- * into it. */
-async function project(source: string) {
+after(() => engine.shutdownEngineServer());
+
+/** A buffer in a workspace of its own, open in the engine. */
+function project(source: string): { file: string; done: () => void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-completion-"));
   const file = path.join(dir, "main.rl");
   fs.writeFileSync(file, source);
-
-  const result = await runEmitMap(COMPILER, source, file);
-  assert.ok(result, "rlc --emit-map failed");
-  const mapped = new MappedDoc(source, result!.code, result!.mappings);
-  const text = mapped.code;
-
-  let served = { text, version: "1" };
-  ensureStdModule(COMPILER, dir);
-  const ts = openProject(TSGO as string, dir, (fileName) =>
-    fileName === file ? served : null,
-  );
-  return {
-    file,
-    ts,
-    at: (offset: number) => mapped.srcToOut(offset),
-    /** Serve different text for the file — how the server installs a probe. */
-    serve(probeText: string, version: string) {
-      served = { text: probeText, version };
-    },
-  };
+  engine.openDocument(COMPILER, file, source);
+  return { file, done: () => engine.closeDocument(COMPILER, file) };
 }
 
 const STD_SOURCE = [
@@ -74,13 +50,17 @@ test(
   "the std combinators are completions of `Result.`",
   { skip },
   async () => {
-    const { file, ts, at } = await project(STD_SOURCE);
+    const { file, done } = project(STD_SOURCE);
     const dot = STD_SOURCE.indexOf("Result.map(r") + "Result.".length;
-    const offset = at(dot);
-    assert.notEqual(offset, null);
-    const answer = await ts.completionsAt(file, offset!);
-    assert.equal(answer.member, true, "expected a member completion");
-    const names = answer.entries.map((e) => e.name);
+    const answer = await engine.completion(
+      COMPILER,
+      file,
+      positionAt(STD_SOURCE, dot),
+      true,
+    );
+    assert.ok(answer, "expected a completion answer");
+    assert.equal(answer!.member, true, "expected a member completion");
+    const names = answer!.items.map((e) => e.label);
     // The constructors the server contributes itself, and the combinators
     // it used to hide by returning only those.
     for (const member of [
@@ -96,15 +76,23 @@ test(
     ]) {
       assert.ok(names.includes(member), `missing ${member} in: ${names}`);
     }
+    done();
   },
 );
 
 test("a completion entry resolves to its type", { skip }, async () => {
-  const { file, ts, at } = await project(STD_SOURCE);
+  const { file, done } = project(STD_SOURCE);
   const dot = STD_SOURCE.indexOf("Result.map(r") + "Result.".length;
-  const detail = await ts.completionDetail(file, at(dot)!, "andThen");
+  const position = positionAt(STD_SOURCE, dot);
+  const detail = await engine.completionResolve(
+    COMPILER,
+    file,
+    position,
+    "andThen",
+    undefined,
+  );
   assert.ok(detail, "expected details for andThen");
-  // The server resolves the entry against the position it was asked at, so
+  // The engine resolves the entry against the position it was asked at, so
   // the signature comes back instantiated (`Result<number, string>`) rather
   // than in the type parameters the declaration is written in.
   assert.ok(
@@ -119,13 +107,18 @@ test("a completion entry resolves to its type", { skip }, async () => {
     detail!.documentation.includes("Chains a computation"),
     `documentation was: ${detail!.documentation}`,
   );
+  done();
 });
 
 test("signature help types a combinator's arguments", { skip }, async () => {
-  const { file, ts, at } = await project(STD_SOURCE);
+  const { file, done } = project(STD_SOURCE);
   // Inside `Result.map(r, ...)`, on the second argument.
   const inCall = STD_SOURCE.indexOf("(n) => n * 2");
-  const help = await ts.signatureHelpAt(file, at(inCall)!);
+  const help = await engine.signatureHelp(
+    COMPILER,
+    file,
+    positionAt(STD_SOURCE, inCall),
+  );
   assert.ok(help, "expected signature help");
   assert.equal(help!.activeParameter, 1);
   const sig = help!.signatures[help!.activeSignature];
@@ -139,28 +132,26 @@ test("signature help types a combinator's arguments", { skip }, async () => {
     sig.label.slice(start, end).startsWith("f:"),
     `second parameter was: ${sig.label.slice(start, end)}`,
   );
+  done();
 });
 
 /* ------------------------------------------------------------- probes -- */
 
-/** Completions at `offset` the way the server asks for them: the plain
- * path first, then a probe when it came back empty. Returns both answers
- * so a test can assert the plain one really was empty. */
+/** Completions at `offset` both ways: the plain answer (no member policy),
+ * and the member-access path where the engine probes when the plain path
+ * cannot answer. Returns label lists so a test can assert the plain one
+ * really was empty. */
 async function probed(source: string, offset: number) {
-  const { file, ts, at, serve } = await project(source);
-  const plain = (await ts.completionsAt(file, at(offset) ?? offset)).entries.map(
-    (e) => e.name,
-  );
-
-  const built = await buildProbe(source, offset, (probeSource) =>
-    runEmitMap(COMPILER, probeSource, `${file}.probe`),
-  );
-  assert.ok(built, "probe did not compile");
-  serve(built!.code, "probe-1");
-  const withProbe = (await ts.completionsAt(file, built!.offset)).entries.map(
-    (e) => e.name,
-  );
-  return { plain, withProbe };
+  const { file, done } = project(source);
+  const position = positionAt(source, offset);
+  const plainAnswer = await engine.completion(COMPILER, file, position, false);
+  const memberAnswer = await engine.completion(COMPILER, file, position, true);
+  done();
+  return {
+    plain: (plainAnswer?.items ?? []).map((e) => e.label),
+    withProbe: (memberAnswer?.items ?? []).map((e) => e.label),
+    probe: memberAnswer?.probe ?? null,
+  };
 }
 
 const PIPE_SOURCE = [
@@ -170,10 +161,14 @@ const PIPE_SOURCE = [
 ].join("\n");
 
 test("a pipeline step's members need a probe", { skip }, async () => {
-  const { plain, withProbe } = await probed(PIPE_SOURCE, PIPE_SOURCE.length);
+  const { plain, withProbe, probe } = await probed(
+    PIPE_SOURCE,
+    PIPE_SOURCE.length,
+  );
   // The raw buffer is all TypeScript can see (`|> .` is not a member access
   // it can emit), and `|>` collapses the statement it sits in.
   assert.deepEqual(plain, [], "plain completions should be empty here");
+  assert.notEqual(probe, null, "the members had to come from a probe");
   for (const member of ["toFixed", "toString", "toPrecision"]) {
     assert.ok(withProbe.includes(member), `missing ${member} in: ${withProbe}`);
   }
@@ -192,10 +187,7 @@ test(
   "a probe carries the pipeline's type through earlier steps",
   { skip },
   async () => {
-    const { withProbe } = await probed(
-      PIPE_STD_SOURCE,
-      PIPE_STD_SOURCE.length,
-    );
+    const { withProbe } = await probed(PIPE_STD_SOURCE, PIPE_STD_SOURCE.length);
     // The value at the last step is a `Result`, not the head's type.
     assert.ok(withProbe.includes("kind"), `members were: ${withProbe}`);
   },
@@ -218,9 +210,10 @@ const MATCH_SOURCE = [
 test("a match arm binding's members come from the emit", { skip }, async () => {
   // `radius` is a pattern binding — it exists only in the emitted switch —
   // but a trailing `.` in an arm body still compiles, so the ordinary path
-  // (the buffer's virtual document) already answers and no probe is built.
+  // (the buffer's projection) already answers and no probe is needed.
   const offset = MATCH_SOURCE.indexOf("radius.,") + "radius.".length;
-  const { plain, withProbe } = await probed(MATCH_SOURCE, offset);
+  const { plain, withProbe, probe } = await probed(MATCH_SOURCE, offset);
+  assert.equal(probe, null, "no probe should be needed here");
   for (const member of ["toFixed", "toString"]) {
     assert.ok(plain.includes(member), `missing ${member} in: ${plain}`);
     assert.ok(withProbe.includes(member), `missing ${member} in: ${withProbe}`);

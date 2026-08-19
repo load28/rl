@@ -23,6 +23,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+mod server;
+
+use rlc::engine::collect_sources;
 use rlc::{
     EnumSymbol, ExternEnum, ImportRewrite, ModuleScan, Options, RlImport, RlImportNames, compile,
 };
@@ -80,7 +83,11 @@ Tooling options (bundler plugins, editors):
   --emit-map            print each input's emitted TypeScript plus source<->
                         output byte mappings as JSON; parse + emit only (no
                         rl-level checks, .rl specifiers untouched) — the
-                        editor's virtual-document feed (for language tooling)"
+                        editor's virtual-document feed (for language tooling)
+  --server              keep the engine alive and answer check/emitMap/
+                        typedCheck requests as JSON lines on stdin/stdout,
+                        reusing one project session per project — the same
+                        answers as the one-shot modes, without the startup"
     );
 }
 
@@ -182,47 +189,6 @@ fn run_help(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Extensions a directory walk picks up when hand-written TypeScript rides
-/// along (build/--check/--types). `.rl` is always collected.
-const TS_EXTENSIONS: &[&str] = &["ts", "mts", "cts"];
-
-fn collect_sources(entry: &Path, include_ts: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    let meta = fs::metadata(entry)?;
-    if meta.is_file() {
-        out.push(entry.to_path_buf());
-        return Ok(());
-    }
-    if meta.is_dir() {
-        let mut children: Vec<PathBuf> = fs::read_dir(entry)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
-        children.sort();
-        for child in children {
-            let meta = fs::metadata(&child)?;
-            if meta.is_dir() {
-                // Dot-directories (.git, .rl-build, .rl-types, ...) and
-                // node_modules are never sources; descending into them
-                // would pull generated or vendored TypeScript into the
-                // build — or the cache tree into itself.
-                let skip = child.file_name().is_some_and(|name| {
-                    let name = name.to_string_lossy();
-                    name.starts_with('.') || name == "node_modules"
-                });
-                if !skip {
-                    collect_sources(&child, include_ts, out)?;
-                }
-            } else if meta.is_file()
-                && child.extension().is_some_and(|e| {
-                    e == "rl" || (include_ts && TS_EXTENSIONS.iter().any(|ts| *ts == e))
-                })
-            {
-                out.push(child);
-            }
-        }
-    }
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -690,7 +656,258 @@ where
         .collect()
 }
 
-mod typescript;
+/// `rlc --check-types` / `rlc --types` as an engine consumer: open the
+/// project once, take a snapshot per pass, print what the check found. The
+/// engine owns the state (documents, projections, the running compiler);
+/// this driver owns the terminal — wording, order and exit codes are the
+/// CLI's contract (`docs/reference/cli.md`).
+fn typed_check_mode(inputs: &[String], options: &TypedCheckOptions<'_>) -> ExitCode {
+    let engine = rlc::engine::Engine::new(options.node.map(Path::to_path_buf));
+    let mut project = match engine.open_project(
+        inputs,
+        &rlc::engine::ProjectOptions {
+            tsconfig: options.project.map(Path::to_path_buf),
+            out_dir: options.out_dir.map(Path::to_path_buf),
+        },
+    ) {
+        Ok(project) => project,
+        Err(e) => {
+            eprintln!("rlc: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for (path, text) in options.overlay {
+        project.open_document(path.clone(), text.clone());
+    }
+
+    if options.watch {
+        return typed_watch(&mut project, options);
+    }
+
+    let files = project.initial_files();
+    match typed_pass(&mut project, &files, options) {
+        // The exit code answers "did the check pass?", in every mode — a
+        // `--types` run still *writes* its sidecars when the code has type
+        // errors (a stale sidecar is worse than one built from erroring
+        // code), but it says so.
+        //
+        // 2 is the third answer: the check could not run, so nothing was
+        // written. A caller holding a previous result — an editor showing
+        // the last good sidecar — keeps it on 2 and replaces it on 1.
+        Ok(report) if report.blocked => ExitCode::from(2),
+        Ok(report) if report.reported == 0 => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("rlc: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// What the typed modes were asked for, beside their inputs.
+struct TypedCheckOptions<'a> {
+    project: Option<&'a Path>,
+    node: Option<&'a Path>,
+    /// Where the sidecars go, in the mode that writes them.
+    out_dir: Option<&'a Path>,
+    /// `--types`: emit declarations and write them. `--check-types` does not.
+    emit: bool,
+    watch: bool,
+    /// `--overlay`: unsaved text standing in for a file on disk, keyed by
+    /// canonical path.
+    overlay: &'a std::collections::HashMap<PathBuf, String>,
+    /// `--rl-only`: report only the rl layer.
+    rl_only: bool,
+    /// The raw inputs, for mirroring their layout under `-o`.
+    inputs: &'a [String],
+}
+
+/// What one pass printed.
+struct TypedReport {
+    /// How many diagnostics were printed. Zero is the only passing result.
+    reported: usize,
+    /// Whether the pass could not run at all — see [`rlc::engine::Blocked`].
+    blocked: bool,
+}
+
+/// One snapshot, one check, everything printed.
+fn typed_pass(
+    project: &mut rlc::engine::Project,
+    files: &[PathBuf],
+    options: &TypedCheckOptions<'_>,
+) -> Result<TypedReport, String> {
+    let snapshot = match project.update(files) {
+        Ok(snapshot) => snapshot,
+        Err(blocked) => {
+            eprintln!(
+                "rlc: {}:{}:{}: {}",
+                shown(&blocked.path),
+                blocked.error.line,
+                blocked.error.col,
+                blocked.error.message
+            );
+            return Ok(TypedReport {
+                reported: 1,
+                blocked: true,
+            });
+        }
+    };
+    let checked = project.check(
+        &snapshot,
+        &rlc::engine::CheckRequest {
+            emit_declarations: options.emit,
+            rl_only: options.rl_only,
+        },
+    )?;
+
+    // The declarations the compiler emitted for the lowered modules, laid
+    // out under `-o` the way the sources are laid out under the project.
+    if options.emit {
+        write_declarations(
+            &checked.declarations,
+            options.inputs,
+            options.out_dir,
+            project.root(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    for diagnostic in &checked.diagnostics {
+        match diagnostic.position {
+            Some((line, col)) => eprintln!(
+                "rlc: {}:{}:{}: {}",
+                shown(&diagnostic.path),
+                line,
+                col,
+                diagnostic.message
+            ),
+            None => eprintln!("rlc: {}: {}", shown(&diagnostic.path), diagnostic.message),
+        }
+    }
+
+    Ok(TypedReport {
+        reported: checked.diagnostics.len(),
+        blocked: false,
+    })
+}
+
+/// Re-checks on every change, against the compiler started for the first
+/// pass. The project is opened once and updated after that, which is what
+/// makes the wait a re-check rather than a cold start — and the engine's
+/// projection cache means only the files that changed are re-lowered.
+fn typed_watch(project: &mut rlc::engine::Project, options: &TypedCheckOptions<'_>) -> ExitCode {
+    let mut stamps: std::collections::HashMap<PathBuf, std::time::SystemTime> =
+        std::collections::HashMap::new();
+    let mut first = true;
+    loop {
+        let files = match project.scan() {
+            Ok(files) => files,
+            // A file can disappear mid-edit; keep watching rather than
+            // tearing the session down.
+            Err(_) => {
+                thread::sleep(WATCH_INTERVAL);
+                continue;
+            }
+        };
+        let current: std::collections::HashMap<PathBuf, std::time::SystemTime> = files
+            .iter()
+            .map(|file| {
+                let stamp = fs::metadata(file)
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                (file.clone(), stamp)
+            })
+            .collect();
+
+        if first || current != stamps {
+            let started = std::time::Instant::now();
+            match typed_pass(project, &files, options) {
+                Ok(report) => eprintln!(
+                    "rlc: {} file(s), {} reported in {} ms — watching",
+                    files.len(),
+                    report.reported,
+                    started.elapsed().as_millis()
+                ),
+                Err(e) => eprintln!("rlc: {e}"),
+            }
+        }
+        if first {
+            eprintln!("rlc: watching {} file(s) — Ctrl-C to stop", files.len());
+            first = false;
+        }
+        stamps = current;
+        thread::sleep(WATCH_INTERVAL);
+    }
+}
+
+/// Writes the emitted declarations under `out_dir`, mirroring their layout
+/// under the project root — never beside the sources.
+///
+/// A declaration emitted for a lowered module becomes an **editor sidecar**:
+/// `src/token.rl.d.ts` plus a `.d.ts.map` whose `sources` is the `.rl` file,
+/// so "go to definition" lands in what the user wrote rather than in a
+/// declaration. The body is the compiler's; only the map is rlc's, and it is
+/// built by the same [`rlc::build_sidecar`] the `--sidecar` mode uses.
+fn write_declarations(
+    declarations: &rlc::engine::Declarations,
+    inputs: &[String],
+    out_dir: Option<&Path>,
+    root: &Path,
+) -> std::io::Result<()> {
+    // The standard library's declarations land under the sidecar directory
+    // as `rl.d.ts`, so a consumer running plain tsc can point `@rl/std` at
+    // them (`paths`).
+    if let Some(text) = &declarations.std {
+        let dir = out_dir.unwrap_or(root);
+        fs::create_dir_all(dir)?;
+        fs::write(dir.join("rl.d.ts"), text)?;
+    }
+    for declaration in &declarations.modules {
+        let file = &declaration.file;
+        // The same placement `--types` and `--sidecar` use: beside the
+        // source, or mirroring the input layout under `-o`.
+        let name = format!(
+            "{}.d.ts",
+            file.source_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+        let target = match out_dir {
+            Some(dir) => dir
+                .join(input_relative(&file.source_path, inputs))
+                .with_file_name(name),
+            None => file.source_path.with_file_name(name),
+        };
+        let dir = target.parent().unwrap_or(Path::new(".")).to_path_buf();
+        fs::create_dir_all(&dir)?;
+
+        let sidecar = rlc::build_sidecar(
+            &file.source,
+            &declaration.text,
+            &relative_path(&dir, &file.source_path),
+        );
+        fs::write(&target, &sidecar.declarations)?;
+        fs::write(target.with_extension("ts.map"), &sidecar.map)?;
+    }
+    Ok(())
+}
+
+/// A path as a diagnostic should name it: relative to the directory the
+/// command was run in, when it is under it.
+///
+/// The compiler resolves modules by absolute path, so that is what comes
+/// back — but `rlc: /tmp/build-42/src/a.rl:3:1: ...` is not what the other
+/// modes print, and not what an editor's problem matcher expects.
+fn shown(path: &Path) -> String {
+    let relative = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf));
+    relative
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
+}
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -717,6 +934,7 @@ fn main() -> ExitCode {
     let mut symbols = false;
     let mut emit_map = false;
     let mut sidecar_dir: Option<PathBuf> = None;
+    let mut server = false;
     let mut node: Option<PathBuf> = None;
     let mut rewrite_imports = ImportRewrite::default();
     let mut jobs_limit: Option<usize> = None;
@@ -741,6 +959,7 @@ fn main() -> ExitCode {
                 types = true;
             }
             "--rl-only" => rl_only = true,
+            "--server" => server = true,
             "--overlay" => match it.next() {
                 Some(path) => overlay_path = Some(PathBuf::from(path)),
                 None => {
@@ -811,6 +1030,26 @@ fn main() -> ExitCode {
             }
             other => inputs.push(other.to_string()),
         }
+    }
+
+    // The engine behind a pipe — a session for tools that ask often. It
+    // reads requests from stdin, so it combines with nothing else.
+    if server {
+        if !inputs.is_empty()
+            || emit_std
+            || print
+            || watch
+            || check
+            || check_types
+            || symbols
+            || emit_map
+            || sidecar_dir.is_some()
+            || overlay_path.is_some()
+        {
+            eprintln!("rlc: --server takes no inputs and combines with no other mode");
+            return ExitCode::FAILURE;
+        }
+        return server::run(node);
     }
 
     // The standard library on stdout — how a bundler plugin serves the
@@ -893,9 +1132,9 @@ fn main() -> ExitCode {
         // so a project's tsconfig `paths` and `.gitignore` keep pointing at
         // the same place. A check that writes nothing needs no directory.
         let sidecar_out = types.then(|| out_dir.unwrap_or_else(|| PathBuf::from(TYPES_DIR)));
-        return typescript::check::run(
+        return typed_check_mode(
             &inputs,
-            &typescript::check::CheckOptions {
+            &TypedCheckOptions {
                 project: project.as_deref(),
                 node: node.as_deref(),
                 out_dir: sidecar_out.as_deref(),
@@ -903,6 +1142,7 @@ fn main() -> ExitCode {
                 watch,
                 overlay: &overlay,
                 rl_only,
+                inputs: &inputs,
             },
         );
     }

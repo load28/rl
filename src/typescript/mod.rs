@@ -16,11 +16,14 @@
 //! - [`mapper`] converts between the three coordinate spaces involved:
 //!   `.rl` source bytes, emitted TypeScript bytes, and the UTF-16 code-unit
 //!   offsets TypeScript itself uses.
-//! - [`project`] assembles the one project graph both hand-written `.ts`
-//!   and lowered `.rl` modules live in.
+//!
+//! Who assembles the one project graph both hand-written `.ts` and lowered
+//! `.rl` modules live in — and who owns its state across passes — is the
+//! engine ([`crate::engine`]): a [`crate::engine::Project`] holds the
+//! documents and projections, a [`crate::engine::Snapshot`] freezes them for
+//! a pass, and the backend here answers about that snapshot.
 
 pub(crate) mod backend;
-pub(crate) mod check;
 pub(crate) mod mapper;
 pub(crate) mod native;
-pub(crate) mod project;
+pub(crate) mod service;

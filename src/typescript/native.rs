@@ -348,16 +348,16 @@ fn job_json(query: &Query) -> serde_json::Value {
 }
 
 /// A covered literal as the value JavaScript compares with `===`.
-fn literal_json(literal: &rlc::Literal) -> serde_json::Value {
+fn literal_json(literal: &crate::Literal) -> serde_json::Value {
     use serde_json::json;
     match literal {
-        rlc::Literal::String(s) => json!(s),
-        rlc::Literal::Number(n) => json!(n),
-        rlc::Literal::Boolean(b) => json!(b),
+        crate::Literal::String(s) => json!(s),
+        crate::Literal::Number(n) => json!(n),
+        crate::Literal::Boolean(b) => json!(b),
         // No finite literal union TypeScript reports holds a BigInt, so a
         // match covering one is never asked about; carried as text for
         // completeness.
-        rlc::Literal::BigInt(d) => json!(d),
+        crate::Literal::BigInt(d) => json!(d),
     }
 }
 
@@ -424,11 +424,11 @@ fn array<'a>(value: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value]
 }
 
 /// A literal the checker reported, in rl's own vocabulary.
-fn json_literal(value: &serde_json::Value) -> Option<rlc::Literal> {
+fn json_literal(value: &serde_json::Value) -> Option<crate::Literal> {
     match value {
-        serde_json::Value::String(s) => Some(rlc::Literal::String(s.clone())),
-        serde_json::Value::Number(n) => n.as_f64().map(rlc::Literal::Number),
-        serde_json::Value::Bool(b) => Some(rlc::Literal::Boolean(*b)),
+        serde_json::Value::String(s) => Some(crate::Literal::String(s.clone())),
+        serde_json::Value::Number(n) => n.as_f64().map(crate::Literal::Number),
+        serde_json::Value::Bool(b) => Some(crate::Literal::Boolean(*b)),
         _ => None,
     }
 }
