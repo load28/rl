@@ -1,8 +1,8 @@
 # TASK-074: 에디터를 네이티브 백엔드로 — 사이드카 규약 통일
 
-- **상태**: 진행 중
+- **상태**: 완료
 - **시작일**: 2026-08-19
-- **완료일**: —
+- **완료일**: 2026-08-19
 - **커밋**: —
 
 ## 목적
@@ -143,6 +143,25 @@ TASK-073이 만든 네이티브 백엔드의 선언 트리와, 에디터가 소�
 - **해결**: 호스트가 `program.isSourceFileDefaultLibrary`로 묻는다. 두 배포
   형태에서 같은 사실을 얻는다. 두 툴체인 모두에서 16건 통과 확인.
 
+### Language Service 이전 가능 범위 (조사 결과)
+
+확장 프로그램의 나머지 절반(`server/src/tsproject.ts`)은 여전히 **인프로세스
+TypeScript 언어 서비스**를 돌린다. TS 7 API로 옮길 수 있는지 표면을 확인했다.
+
+| 기능 | TS 7 API에 있는 것 |
+|------|--------------------|
+| hover | `getTypeAtPosition` + `typeToString` + `getDocumentationCommentOfSymbol` — 조립 필요 (`getQuickInfoAtPosition` 없음) |
+| 정의 이동 | `getSymbolAtPosition` → `symbol.declarations`(NodeHandle: `path` + `resolve()`), 노드가 `pos`/`end`를 들고 있다 |
+| 자동완성 | `getCompletionsAtPosition` — 그대로 있다 |
+| 참조 찾기 | `getReferencesToSymbolInFile`, `getReferencedSymbolsForNode` |
+| 시그니처 도움말 | `getResolvedSignature`, `getSignaturesOfType`, `getSignatureUsage` |
+| 이름 바꾸기 | 없음 — 편집 목록을 만드는 API가 아직 없다 |
+
+즉 `getQuickInfoAtPosition`/`getDefinitionAtPosition` 같은 **완성된 LS 진입점은
+없고 프리미티브만** 있다. 대안은 tsgo의 LSP 서버(`internal/lsp`)에 붙는 것으로,
+`.rl`을 가상 문서로 열어야 한다. 어느 쪽이든 규모가 이 태스크를 넘으므로
+별도 태스크로 등록한다 (TASK-077).
+
 ## 검증
 
 - [x] `cargo fmt --check`
@@ -153,4 +172,13 @@ TASK-073이 만든 네이티브 백엔드의 선언 트리와, 에디터가 소�
 
 ## 결과
 
-*작업 완료 시 기록.*
+사이드카 규약이 하나가 됐고, 에디터의 저장 시 갱신이 네이티브 백엔드로
+넘어갔다. 확장 프로그램에서 인프로세스 선언 emit이 사라졌다.
+
+변경 파일: `src/typescript/{project,check,native,backend,host.mjs}.rs`,
+`tests/native.rs`, `editors/vscode/server/src/sidecar.ts`,
+`editors/vscode/server/src/test/sidecar.test.ts`, `.github/workflows/ci.yml`,
+`docs/reference/cli.md`.
+
+후속: 언어 서비스 이전은 TASK-077, `--types` 정리는 TASK-075, 증분화는
+TASK-076.
