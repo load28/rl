@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime};
 
 use rlc::{
     EmitMapping, EnumSymbol, ExternEnum, ImportRewrite, Literal, ModuleScan, Options, RlImport,
-    RlImportNames, compile, compile_mapped,
+    RlImportNames, ValMethodCall, compile, compile_mapped,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1397,6 +1397,60 @@ fn literal_checks(
         .collect()
 }
 
+/// One method call made through a `val` binding, handed to the host so the
+/// checker can say what the receiver actually is ([`rlc::val_method_calls`]).
+///
+/// rlc deliberately does not answer "does `q.set(k)` mutate?" from the
+/// method's name — a user-defined `set` is not `Map#set`. The probe carries
+/// where the method name landed in the emitted module (so the host can
+/// resolve its symbol) and where the access path starts in the `.rl` source
+/// (so the answer is reported there).
+struct ValCheck {
+    /// Virtual module path the checker sees.
+    module: String,
+    /// UTF-16 offsets of the method name in that module.
+    start: usize,
+    end: usize,
+    /// The method name and the `val` binding the path is rooted at.
+    method: String,
+    binding: String,
+    /// The `.rl` file, and the byte offset of the path's root identifier.
+    file: PathBuf,
+    offset: usize,
+    /// Index into the loaded sources, for the source text to position in.
+    source_index: usize,
+}
+
+/// The `val` probes of one compiled module, dropped when the method name
+/// did not survive into the output as verbatim text — an unresolvable
+/// question is not asked, and nothing is reported for it.
+fn val_checks(
+    source: &str,
+    module: &str,
+    code: &str,
+    mappings: &[EmitMapping],
+    file: &Path,
+    source_index: usize,
+) -> Vec<ValCheck> {
+    rlc::val_method_calls(source)
+        .into_iter()
+        .filter_map(|call: ValMethodCall| {
+            let start = output_offset(mappings, call.name)?;
+            let end = output_offset(mappings, call.name_end.checked_sub(1)?)? + 1;
+            Some(ValCheck {
+                module: module.to_string(),
+                start: utf16_position(code, start),
+                end: utf16_position(code, end),
+                method: call.method,
+                binding: call.binding,
+                file: file.to_path_buf(),
+                offset: call.offset,
+                source_index,
+            })
+        })
+        .collect()
+}
+
 /// `--types`: one pass of the unified type pipeline.
 ///
 /// Compiles every `.rl` in memory, has the embedded host emit declarations
@@ -1532,6 +1586,25 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
         })
         .collect();
 
+    // The same question shape for `val`: rlc collects every method call
+    // made through a `val` binding, the checker decides which of them land
+    // on a built-in mutator.
+    let val_probes: Vec<ValCheck> = modules
+        .iter()
+        .zip(&emitted_from)
+        .flat_map(|(module, (index, mappings))| {
+            let source = loaded[*index].as_ref().map_or("", |l| l.source.as_str());
+            val_checks(
+                source,
+                &module.path,
+                &module.text,
+                mappings,
+                &rl_jobs[*index].file,
+                *index,
+            )
+        })
+        .collect();
+
     let std_module = needs_std.then(|| VirtualModule {
         path: STD_VIRTUAL.to_string(),
         text: rlc::STD_SOURCE.to_string(),
@@ -1545,6 +1618,7 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
         &sources,
         &rl_map,
         &checks,
+        &val_probes,
     )?;
     for diagnostic in &emitted.diagnostics {
         failed = true;
@@ -1564,6 +1638,26 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
              (add the missing arms or a final `_` arm)",
             slash_path(&check.file),
             missing.missing
+        );
+    }
+
+    for mutation in &emitted.val_mutations {
+        let Some(probe) = val_probes.get(mutation.index) else {
+            continue;
+        };
+        let source = loaded[probe.source_index]
+            .as_ref()
+            .map_or("", |l| l.source.as_str());
+        let (line, col) = rlc::line_col(source, probe.offset);
+        failed = true;
+        eprintln!(
+            "rlc: {}:{line}:{col}: cannot call mutating method `{}` of built-in `{}` through \
+             val binding `{}` (the binding is declared with `val`, so every access path from it \
+             is read-only)",
+            slash_path(&probe.file),
+            probe.method,
+            mutation.receiver,
+            probe.binding,
         );
     }
 
@@ -1660,6 +1754,8 @@ struct EmittedTypes {
     diagnostics: Vec<TypeDiagnostic>,
     /// Literal matches the checker found non-exhaustive.
     literal_missing: Vec<LiteralMissing>,
+    /// `val` path method calls the checker resolved to a built-in mutator.
+    val_mutations: Vec<ValMutation>,
 }
 
 /// One non-exhaustive literal match, as the host reports it: the index of
@@ -1668,6 +1764,14 @@ struct EmittedTypes {
 struct LiteralMissing {
     index: usize,
     missing: String,
+}
+
+/// One proven built-in mutation, as the host reports it: the index of the
+/// [`ValCheck`] it answers and the built-in that declares the method —
+/// which is *why* it is a mutation, and what the diagnostic names.
+struct ValMutation {
+    index: usize,
+    receiver: String,
 }
 
 /// One tsc diagnostic as the host reports it. Positions are TypeScript's:
@@ -1757,6 +1861,7 @@ fn run_types_host(
     sources: &[String],
     rl_map: &[(String, String)],
     checks: &[LiteralCheck],
+    val_probes: &[ValCheck],
 ) -> Result<EmittedTypes, ExitCode> {
     let dir = std::env::temp_dir().join(format!("rlc-types-{}", std::process::id()));
     let script = dir.join("types_host.mjs");
@@ -1766,7 +1871,9 @@ fn run_types_host(
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let job = types_job(&cwd, modules, std_module, sources, rl_map, checks);
+    let job = types_job(
+        &cwd, modules, std_module, sources, rl_map, checks, val_probes,
+    );
     let binary = node.map_or_else(|| PathBuf::from("node"), Path::to_path_buf);
 
     let mut child = match Command::new(&binary)
@@ -1838,6 +1945,7 @@ fn types_job(
     sources: &[String],
     rl_map: &[(String, String)],
     checks: &[LiteralCheck],
+    val_probes: &[ValCheck],
 ) -> String {
     let list = |items: &[&VirtualModule]| {
         items
@@ -1887,15 +1995,30 @@ fn types_job(
         .collect::<Vec<_>>()
         .join(",");
 
+    let val_checks = val_probes
+        .iter()
+        .map(|c| {
+            format!(
+                "{{\"module\":{},\"start\":{},\"end\":{},\"method\":{}}}",
+                json_str(&c.module),
+                c.start,
+                c.end,
+                json_str(&c.method)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{{\"cwd\":{},\"compilerOptions\":{},\"modules\":[{}],\"std\":{},\"sources\":[{}],\"rlModules\":{{{}}},\"literalChecks\":[{}]}}",
+        "{{\"cwd\":{},\"compilerOptions\":{},\"modules\":[{}],\"std\":{},\"sources\":[{}],\"rlModules\":{{{}}},\"literalChecks\":[{}],\"valChecks\":[{}]}}",
         json_str(&cwd.display().to_string()),
         TYPES_COMPILER_OPTIONS,
         list(&refs),
         std_json,
         source_list,
         map,
-        literal_checks
+        literal_checks,
+        val_checks
     )
 }
 
@@ -1940,10 +2063,21 @@ fn parse_types_result(stdout: &str) -> EmittedTypes {
         }
     }
 
+    let mut val_mutations = Vec::new();
+    for entry in json_objects(stdout, "\"valMutations\":[") {
+        if let Some(receiver) = json_field(&entry, "receiver") {
+            val_mutations.push(ValMutation {
+                index: json_number(&entry, "index") as usize,
+                receiver,
+            });
+        }
+    }
+
     EmittedTypes {
         declarations,
         diagnostics,
         literal_missing,
+        val_mutations,
     }
 }
 

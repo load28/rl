@@ -148,7 +148,8 @@ function read(val user: User) {}    // param the function cannot mutate
 const f = (val u: U) => u.name;     // arrows, methods, catch (val e), for (val const x of xs)
 ```
 - No modifier = plain TS = mutable. There is no `mut`.
-- ERRORS on a val-rooted path: `x.a = v` (all compound forms), `x[i] = v`, `x.a++`/`++x.a`, `delete x.a`, and name-based mutating methods (push pop shift unshift splice sort reverse fill copyWithin set delete clear add) at ANY depth (`s.a.b.tags.push(1)`).
+- ERRORS on a val-rooted path, at ANY depth (`s.a.b.name = v`): `x.a = v` (all compound forms), `x[i] = v`, `x.a++`/`++x.a`, `delete x.a`.
+- Method calls are NOT judged by name: `query.set("k")` on a user-defined `set` is fine. `rlc --types` (only) reports a call it resolves to a built-in mutator — Array push/pop/shift/unshift/splice/sort/reverse/fill/copyWithin, Map set/delete/clear, Set add/delete/clear, WeakMap set/delete, WeakSet add/delete, TypedArray set/sort/reverse/fill/copyWithin — so `val const items: number[] = []; items.push(1)` fails under `--types` and passes plain `rlc`. Unresolvable receiver (`any`, type param) = not reported.
 - NOT an error: `x = v` (that is const/let's axis), reads, comparisons, spread `{...x}`.
 - Call check: a val binding may only be passed to a `val` parameter of a same-file named function (`function f`, `const f = (...) =>`, `const f = function`). Plain path args only.
 - val is per-BINDING, not per-object: `val const view = original;` still lets `original.x = 1`. Inner declarations shadow an outer val.
@@ -190,7 +191,7 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 ## Errors
 
 - `rlc: file:line:col: msg` — e.g. `match on enum X is not exhaustive: missing "Y"` (add arms or `_`), `duplicate arm`, `or-pattern alternatives must bind the same fields`, `cannot mix tag patterns and literal patterns`, else-block-must-diverge, try-position-restriction (extract helper), `cannot mutate through val binding `x``, `cannot pass val binding `x` to mutable parameter `p` of `f``.
-- `rlc --types` also prints `match on literal union is not exhaustive: missing "..."` for `_`-less literal matches over finite literal unions.
+- `rlc --types` also prints `match on literal union is not exhaustive: missing "..."` for `_`-less literal matches over finite literal unions, and ``cannot call mutating method `set` of built-in `Map` through val binding `m` `` for val paths it proves land on a built-in mutator.
 - Type errors come from tsc, reported at the **`.rl` source** position — `rlc --types` prints `rlc: src/x.rl:12:31: <tsc message>` (exit 1, sidecars still written), and the VSCode extension shows them inline (`source: ts`, `rl.typeDiagnostics` to disable). Applies inside `match` arms and `|>` pipelines too.
 - A `|>` step's combinator inferring `unknown` (e.g. `Result.mapP((n) => n)` with `n: unknown`) means the pipeline **head** has no usable type — it is not a `Result`, or the head is an unannotated parameter. Fix the head, not the step.
 - tsc errors on output containing literal `match`/`try` → silent passthrough; recheck semicolons/parens/reserved words.

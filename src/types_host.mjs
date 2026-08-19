@@ -17,11 +17,20 @@
  *   { cwd, compilerOptions, modules: [{ path, text }], std: { path, text } | null,
  *     sources: ["<hand-written>.ts"],
  *     rlModules: { "<source>.rl": "<virtual>.ts" },
- *     literalChecks: [{ module, start, end, covered: [...] }] }
+ *     literalChecks: [{ module, start, end, covered: [...] }],
+ *     valChecks: [{ module, start, end, method }] }
  *
  *   { declarations: [{ path, text }],
  *     diagnostics: [{ file, line, col, code, message }],
- *     literalMissing: [{ index, missing }] }
+ *     literalMissing: [{ index, missing }],
+ *     valMutations: [{ index, receiver }] }
+ *
+ * `valChecks` is the typed half of rl's `val`: rlc names the method of every
+ * call made through a `val` binding (as a UTF-16 range in the emitted module)
+ * and the checker here decides whether that method is one TypeScript itself
+ * declares on a mutating built-in (`Array#push`, `Map#set`, ...). A method it
+ * cannot resolve to one — a user-defined `set`, an `any` receiver — is not a
+ * mutation: rlc never guesses mutation from a method's name.
  *
  * `literalChecks` is the typed half of rl's literal `match`: rlc names the
  * scrutinee of every wildcard-free literal match (as a UTF-16 range in the
@@ -39,6 +48,30 @@ import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import process from "node:process";
+
+/**
+ * The built-in receivers whose listed methods mutate them. Names here are
+ * only half of the verdict: a call counts as a mutation when the method's
+ * symbol is declared on one of these interfaces **in TypeScript's own lib
+ * files**. A user-defined `set` shares the name and nothing else, and no
+ * verdict is ever taken from a return type (`Map#set` returns the map).
+ */
+const BUILTIN_MUTATORS = new Map(
+  [
+    ["Array", ["push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill", "copyWithin"]],
+    ["Map", ["set", "delete", "clear"]],
+    ["Set", ["add", "delete", "clear"]],
+    ["WeakMap", ["set", "delete"]],
+    ["WeakSet", ["add", "delete"]],
+    // The TypedArrays share one shape; `set` writes through, the rest are
+    // the in-place Array methods they also carry.
+    ...[
+      "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array",
+      "Int32Array", "Uint32Array", "Float32Array", "Float64Array",
+      "BigInt64Array", "BigUint64Array",
+    ].map((name) => [name, ["set", "sort", "reverse", "fill", "copyWithin"]]),
+  ].map(([name, methods]) => [name, new Set(methods)]),
+);
 
 const job = JSON.parse(await readStdin());
 if (job === null || typeof job !== "object" || !Array.isArray(job.modules)) {
@@ -133,7 +166,10 @@ for (const module of [...job.modules, ...(job.std ? [job.std] : [])]) {
 
 const diagnostics = ts.getPreEmitDiagnostics(program).map(plain);
 const literalMissing = checkLiteralMatches(program, job.literalChecks ?? []);
-process.stdout.write(JSON.stringify({ declarations, diagnostics, literalMissing }));
+const valMutations = checkValMutations(program, job.valChecks ?? []);
+process.stdout.write(
+  JSON.stringify({ declarations, diagnostics, literalMissing, valMutations }),
+);
 
 /**
  * Typed exhaustiveness for literal matches — see the protocol note above.
@@ -178,6 +214,53 @@ function widestNodeIn(file, start, end) {
   };
   ts.forEachChild(file, visit);
   return best;
+}
+
+/**
+ * Typed mutation for `val` — see the protocol note above. Every check the
+ * checker cannot resolve to a built-in mutator is silently skipped: a false
+ * positive on a user-defined API costs more than a missed mutation.
+ */
+function checkValMutations(program, checks) {
+  if (checks.length === 0) return [];
+  const checker = program.getTypeChecker();
+  const out = [];
+  for (const [index, check] of checks.entries()) {
+    const file = program.getSourceFile(absolute(check.module));
+    if (file === undefined) continue;
+    const node = widestNodeIn(file, check.start, check.end);
+    if (node === null) continue;
+    const receiver = builtinMutator(program, checker, node, check.method);
+    if (receiver !== null) out.push({ index, receiver });
+  }
+  return out;
+}
+
+/**
+ * The built-in the method at `node` is declared on, or null when it is not
+ * a built-in mutator — which is the answer for a user-defined method, an
+ * unresolvable receiver (`any`, an unresolved import), and a union whose
+ * members do not all mutate. Every declaration must qualify, so a name
+ * shared with a user type never decides it alone.
+ */
+function builtinMutator(program, checker, node, method) {
+  if (!ts.isIdentifier(node) || node.text !== method) return null;
+  const access = node.parent;
+  if (access === undefined || !ts.isPropertyAccessExpression(access) || access.name !== node) {
+    return null;
+  }
+  const declarations = checker.getSymbolAtLocation(node)?.declarations ?? [];
+  if (declarations.length === 0) return null;
+  const receivers = new Set();
+  for (const declaration of declarations) {
+    const owner = declaration.parent;
+    if (owner === undefined || !ts.isInterfaceDeclaration(owner)) return null;
+    if (!program.isSourceFileDefaultLibrary(declaration.getSourceFile())) return null;
+    const mutators = BUILTIN_MUTATORS.get(owner.name.text);
+    if (mutators === undefined || !mutators.has(method)) return null;
+    receivers.add(owner.name.text);
+  }
+  return [...receivers].join(" | ");
 }
 
 /**

@@ -25,11 +25,20 @@
 //!   root identifier of every mutation path, and checks calls whose callee
 //!   is a function declared in the same file.
 //!
+//! - [`method_calls`] — the *probe* half. A method call through a `val`
+//!   path (`items.push(1)`) may or may not mutate: that depends on what
+//!   the receiver is, which is a fact about a TypeScript type. rlc does
+//!   not guess it from the method's name; it collects the calls as
+//!   questions and `rlc --types` answers them with the real checker,
+//!   exactly as literal-match exhaustiveness does ([`crate::probe`]).
+//!
 //! What it does *not* do is inference: no effect system, no borrow
 //! checker, no analysis of what an arbitrary imported function does with
-//! its argument. The limits are normative and documented in
+//! its argument, and no verdict on a method call it cannot resolve to a
+//! built-in. The limits are normative and documented in
 //! `docs/reference/language.md` §10.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::error::RlError;
@@ -142,11 +151,19 @@ pub(crate) fn modifier_end(src: &str, keyword_end: usize) -> usize {
     end
 }
 
-/// Built-in methods that mutate their receiver. Name-based and therefore a
-/// heuristic — rlc has no type information here — but these names are
-/// mutating on every standard built-in that has them (`Array`, `Map`,
-/// `Set`), which is what makes the trade worth taking.
-fn is_mutating_method(name: &str) -> bool {
+/// Method names that *may* name a built-in mutator — the filter deciding
+/// which calls are worth asking a type checker about.
+///
+/// It is a question filter, never a verdict: whether `q.set(k)` mutates
+/// depends on what `q` is, and rlc has no types. The verdict is made in
+/// `types_host.mjs` (`rlc --types`), which resolves the method's symbol and
+/// only reports the one case it can prove — a method TypeScript itself
+/// declares on `Array`/`Map`/`Set`/`WeakMap`/`WeakSet`/a TypedArray. A
+/// user-defined `set` never reaches that verdict.
+///
+/// Keep this a **superset** of every name that host judges; a name missing
+/// here is a mutation the typed path can no longer see.
+fn is_builtin_mutator_name(name: &str) -> bool {
     matches!(
         name,
         "push"
@@ -240,8 +257,11 @@ struct Path<'a> {
     /// the bare binding, which `val` says nothing about — replacing the
     /// binding's value is `const`'s business, not `val`'s.
     steps: usize,
-    /// The last `.p` / `?.p` property name, for the mutating-method check.
+    /// The last `.p` / `?.p` property name, for the method-call probe.
     last_prop: Option<&'a str>,
+    /// The token index that name sits at — the node `rlc --types` asks the
+    /// checker to resolve.
+    last_prop_tok: Option<usize>,
 }
 
 /// Parses the access path rooted at the identifier token `root`.
@@ -250,6 +270,7 @@ fn parse_path<'a>(src: &'a str, tokens: &[Token], root: usize) -> Path<'a> {
         end: root + 1,
         steps: 0,
         last_prop: None,
+        last_prop_tok: None,
     };
     loop {
         let j = path.end;
@@ -262,6 +283,7 @@ fn parse_path<'a>(src: &'a str, tokens: &[Token], root: usize) -> Path<'a> {
                 path.end = close + 1;
                 path.steps += 1;
                 path.last_prop = None;
+                path.last_prop_tok = None;
                 continue;
             }
             // a non-null assertion continues the path; `!=` does not
@@ -277,6 +299,7 @@ fn parse_path<'a>(src: &'a str, tokens: &[Token], root: usize) -> Path<'a> {
         match tokens.get(j + 1) {
             Some(t) if matches!(t.kind, TokenKind::Ident) => {
                 path.last_prop = Some(&src[t.span.start..t.span.end]);
+                path.last_prop_tok = Some(j + 1);
                 path.end = j + 2;
                 path.steps += 1;
             }
@@ -309,9 +332,52 @@ struct ParamSig {
     is_val: bool,
 }
 
+/// One method call made through a `val` binding's access path — a
+/// *question*, not a verdict.
+///
+/// Whether `items.push(1)` mutates depends on what `items` is, so rlc
+/// reports nothing on its own: [`crate::val_method_calls`] collects these
+/// and `rlc --types` resolves the method against the receiver TypeScript
+/// actually inferred, reporting only the calls it can prove land on a
+/// built-in mutator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValMethodCall {
+    /// Byte offset of the path's root identifier — where the diagnostic is
+    /// reported (see [`crate::line_col`]).
+    pub offset: usize,
+    /// The `val` binding the path is rooted at, for the message.
+    pub binding: String,
+    /// The method called.
+    pub method: String,
+    /// Byte offset of the method name in the source. The name is copied
+    /// verbatim into the output, so this maps through
+    /// [`crate::EmitMapping`]s to the node the checker is asked about.
+    pub name: usize,
+    /// Byte offset just past the method name.
+    pub name_end: usize,
+}
+
 /// Runs the `val` analysis over a whole file's token stream. Returns the
 /// first violation, like every other rl-level check.
 pub(crate) fn check(src: &str, tokens: &[Token]) -> Result<(), RlError> {
+    run(src, tokens, None).map(|_| ())
+}
+
+/// Collects every candidate built-in mutator call made through a `val`
+/// path, in source order — the typed half's input. Never reports an error.
+pub(crate) fn method_calls(src: &str, tokens: &[Token]) -> Vec<ValMethodCall> {
+    let sink = RefCell::new(Vec::new());
+    let _ = run(src, tokens, Some(&sink));
+    sink.into_inner()
+}
+
+/// The one walk both halves share. With a sink the walk is in probe mode:
+/// it reports nothing and collects instead.
+fn run(
+    src: &str,
+    tokens: &[Token],
+    calls: Option<&RefCell<Vec<ValMethodCall>>>,
+) -> Result<(), RlError> {
     // Files that do not use the modifier — the overwhelming majority —
     // pay one linear scan and nothing else.
     if !uses_val(src, tokens) {
@@ -322,6 +388,7 @@ pub(crate) fn check(src: &str, tokens: &[Token]) -> Result<(), RlError> {
     let checker = Checker {
         src,
         signatures: &signatures,
+        calls,
     };
     let mut frames = vec![Frame {
         end: usize::MAX,
@@ -611,11 +678,41 @@ fn collect_pattern_names<'a>(
 /// every name it introduces — `const a = 1, { b } = o;` introduces both.
 /// The scan stops at the statement's `;`, at the end of the enclosing
 /// group, or at an `of`/`in` of a `for` head.
+/// Whether a declarator really starts at `idx` — the guard on the comma
+/// scan in [`collect_decl_names`].
+///
+/// A `<...>` type-argument list is not a bracket the scanner matches, so a
+/// comma inside one (`= new Map<string, number>()`, `: Map<string, number>`)
+/// looks like a declarator separator. What follows tells them apart: a real
+/// declarator continues with `=`, `:`, `,` or `;`, while a type argument is
+/// followed by `>` (or by `[`, `|`, ...). Registering `number` as a binding
+/// would be a false positive twice over — it would make a later
+/// `number[] = ...` annotation read as a mutation.
+fn declarator_at(tokens: &[Token], idx: usize) -> bool {
+    match tokens.get(idx).map(|t| &t.kind) {
+        // a destructuring pattern
+        Some(TokenKind::Punct(b'{' | b'[')) => true,
+        Some(TokenKind::Ident) => {
+            tokens.get(idx + 1).is_none()
+                || matches!(
+                    tokens.get(idx + 1).map(|t| &t.kind),
+                    Some(TokenKind::Punct(b':' | b',' | b';'))
+                )
+                || assignment_op_at(tokens, idx + 1) == Some(1)
+        }
+        _ => false,
+    }
+}
+
 fn collect_decl_names<'a>(src: &'a str, tokens: &[Token], start: usize) -> Vec<&'a str> {
     let mut names = Vec::new();
     let mut k = start;
+    let mut first = true;
     loop {
-        k = collect_pattern_names(src, tokens, k, &mut names);
+        if first || declarator_at(tokens, k) {
+            k = collect_pattern_names(src, tokens, k, &mut names);
+        }
+        first = false;
         // skip this declarator's type annotation and initializer
         while k < tokens.len() {
             match &tokens[k].kind {
@@ -670,6 +767,10 @@ fn expression_end(tokens: &[Token], from: usize) -> usize {
 struct Checker<'a> {
     src: &'a str,
     signatures: &'a HashMap<&'a str, Option<Vec<ParamSig>>>,
+    /// Probe mode: collect method calls instead of reporting violations.
+    /// The violations are the same either way — the file has already been
+    /// checked by the time its probes are collected.
+    calls: Option<&'a RefCell<Vec<ValMethodCall>>>,
 }
 
 impl<'a> Checker<'a> {
@@ -964,6 +1065,9 @@ impl<'a> Checker<'a> {
         }
         let offset = tokens[root].span.start;
         if mutates || assignment_op_at(tokens, path.end).is_some() || incdec_at(tokens, path.end) {
+            if self.calls.is_some() {
+                return Ok(());
+            }
             return Err(RlError::at(
                 offset,
                 format!(
@@ -972,17 +1076,22 @@ impl<'a> Checker<'a> {
                 ),
             ));
         }
-        if let Some(method) = path.last_prop
-            && is_mutating_method(method)
+        // A method call is a *question*: `q.set(k)` mutates only if `q` is
+        // a built-in with a mutating `set`, which needs the receiver's
+        // type. rlc never answers it from the name — it records the call
+        // for `rlc --types`, where the real checker decides.
+        if let Some(sink) = self.calls
+            && let (Some(method), Some(tok)) = (path.last_prop, path.last_prop_tok)
+            && is_builtin_mutator_name(method)
             && punct_at(tokens, path.end, b'(')
         {
-            return Err(RlError::at(
+            sink.borrow_mut().push(ValMethodCall {
                 offset,
-                format!(
-                    "cannot call mutating method `{method}` through val binding `{name}` \
-                     (the binding is declared with `val`, so every access path from it is read-only)"
-                ),
-            ));
+                binding: name.to_string(),
+                method: method.to_string(),
+                name: tokens[tok].span.start,
+                name_end: tokens[tok].span.end,
+            });
         }
         Ok(())
     }
@@ -999,6 +1108,9 @@ impl<'a> Checker<'a> {
         params: &[ParamSig],
         frames: &[Frame<'a>],
     ) -> Result<(), RlError> {
+        if self.calls.is_some() {
+            return Ok(()); // probe mode reports nothing
+        }
         for (idx, (start, end)) in list_entries(tokens, open).into_iter().enumerate() {
             if !matches!(tokens[start].kind, TokenKind::Ident) || dotted_at(tokens, 0, start) {
                 continue;
