@@ -5,6 +5,10 @@ node_modules/
 # rlc sidecar output (rlc --types)
 .rl-types/
 
+# 로컬 개발 설정·산출물 (scripts/setup이 생성; 머신 로컬 — 커밋하지 않는다)
+.rl-dev/
+npm/rl-lang/rl-dev.local.json
+
 # Added by cargo
 
 /target

@@ -11,6 +11,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
+import { devPackageCompiler, rlcSpawnEnv } from "./dev";
 import { engineRequest } from "./engine";
 
 /** A typed check opens a project and starts a compiler; it is slower than
@@ -48,7 +49,8 @@ const CANDIDATE_PATHS = [
 
 /**
  * Resolve the compiler to run: explicit setting > locally built binary in a
- * workspace root > `rlc` on PATH.
+ * workspace root > the rlc of a `file:`-installed local rl-lang package
+ * (a test project set up via `scripts/setup`, see dev.ts) > `rlc` on PATH.
  */
 export function findCompiler(
   configuredPath: string,
@@ -65,6 +67,8 @@ export function findCompiler(
       }
     }
   }
+  const dev = devPackageCompiler(workspaceRoots);
+  if (dev !== "") return dev;
   return "rlc";
 }
 
@@ -164,7 +168,7 @@ function runCheckOnce(
     execFile(
       compiler,
       args,
-      { timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
+      { timeout: 15000, maxBuffer: 4 * 1024 * 1024, env: rlcSpawnEnv(compiler) },
       (err, _stdout, stderr) => {
         if (err && (err as NodeJS.ErrnoException).code === "ENOENT") {
           resolve({ kind: "not-found", compiler });
@@ -248,7 +252,7 @@ export function runSymbols(
     execFile(
       compiler,
       ["--symbols", file],
-      { timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
+      { timeout: 15000, maxBuffer: 16 * 1024 * 1024, env: rlcSpawnEnv(compiler) },
       (err, stdout) => {
         if (err) {
           resolve(null);
@@ -362,7 +366,12 @@ function runTypedCheckOnce(
       child = execFile(
         compiler,
         args,
-        { cwd, timeout: TYPED_CHECK_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+        {
+          cwd,
+          timeout: TYPED_CHECK_TIMEOUT_MS,
+          maxBuffer: 4 * 1024 * 1024,
+          env: rlcSpawnEnv(compiler),
+        },
         (err, _stdout, stderr) => {
           const diagnostics = parseStderr(String(stderr), shown);
           // Exit code 2 is "could not run, nothing was checked" — an rl-level

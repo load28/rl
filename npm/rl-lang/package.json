@@ -10,6 +10,8 @@
   "files": [
     "bin/rlc.js",
     "index.js",
+    "dev.js",
+    "rl-dev.local.json",
     "README.md"
   ],
   "repository": {

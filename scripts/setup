@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# ----------------------------------------------------------------------------
+# scripts/setup — build the local RL development environment.
+#
+#   ./scripts/setup --tsgo-root ~/dev/typescript-go   # first run (checkout mode)
+#   ./scripts/setup --tsgo-npm                        # first run (npm mode)
+#   ./scripts/setup                                   # afterwards: reuse the
+#                                                     # saved toolchain config
+#
+# What it does, in order (any failure stops the run):
+#
+#   1. resolve the TypeScript toolchain — a typescript-go checkout named by
+#      --tsgo-root (built here, in place), or "npm" (--tsgo-npm): TypeScript 7
+#      installed from npm by each consuming project, nothing to build here
+#   2. save that choice to .rl-dev/toolchain.json (local, never committed)
+#   3. checkout mode only: build the current typescript-go checkout
+#      (native compiler + API client) and verify both artifacts
+#   4. build the current RL checkout (cargo build --release) and verify rlc
+#   5. stamp npm/rl-lang for local `file:` installs (rl-dev.local.json)
+#   6. build the VSCode extension and reinstall it (uninstall first when an
+#      old install exists; skipped when the `code` CLI is not on PATH)
+#
+# What it never does: touch git state (pull/checkout/reset — updating either
+# repository is the user's move), or write to your shell profile. Toolchain
+# environment variables exist only inside the rlc processes the launcher
+# spawns (npm/rl-lang/dev.js).
+#
+# This whole layer is temporary (docs/tasks/TASK-090): once RL ships a
+# verified TypeScript 7 inside its own package, delete this script, .rl-dev/
+# and npm/rl-lang/dev.js together.
+# ----------------------------------------------------------------------------
+set -euo pipefail
+
+RL_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+CONFIG_DIR="$RL_ROOT/.rl-dev"
+CONFIG="$CONFIG_DIR/toolchain.json"
+PKG_DIR="$RL_ROOT/npm/rl-lang"
+
+fail() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+usage: ./scripts/setup [--tsgo-root <path> | --tsgo-npm]
+
+  --tsgo-root <path>  use a local typescript-go checkout (built in place)
+  --tsgo-npm          use TypeScript 7 from npm — each consuming project
+                      installs it (npm i -D typescript@7) and rlc finds it
+                      in that project's node_modules
+
+With no flag, the toolchain saved in .rl-dev/toolchain.json is reused.
+EOF
+}
+
+# ---------------------------------------------------------------- arguments --
+TSGO_ROOT_ARG=""
+TSGO_NPM_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tsgo-root)
+      shift
+      [ $# -gt 0 ] || fail "--tsgo-root needs a path"
+      TSGO_ROOT_ARG="$1"
+      ;;
+    --tsgo-root=*)
+      TSGO_ROOT_ARG="${1#--tsgo-root=}"
+      ;;
+    --tsgo-npm)
+      TSGO_NPM_ARG="yes"
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      fail "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+if [ -n "$TSGO_ROOT_ARG" ] && [ -n "$TSGO_NPM_ARG" ]; then
+  fail "--tsgo-root and --tsgo-npm are mutually exclusive"
+fi
+
+# node is needed even before any build: the toolchain config is JSON.
+command -v node > /dev/null 2>&1 && command -v npm > /dev/null 2>&1 \
+  || fail "Node.js is required to build the TypeScript API client."
+
+# Reads one string field out of a JSON file; empty output when absent.
+json_field() { # <file> <field>
+  node -e '
+    try {
+      const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))[process.argv[2]];
+      if (typeof v === "string") process.stdout.write(v);
+    } catch {}
+  ' "$1" "$2"
+}
+
+# ---------------------------------------------------- resolve the toolchain --
+# KIND is "checkout" (a typescript-go tree at TSGO_ROOT) or "npm" (TypeScript
+# comes from each consuming project's node_modules; nothing to build here).
+KIND=""
+TSGO_ROOT=""
+if [ -n "$TSGO_NPM_ARG" ]; then
+  KIND="npm"
+elif [ -n "$TSGO_ROOT_ARG" ]; then
+  KIND="checkout"
+  case "$TSGO_ROOT_ARG" in
+    "~") TSGO_ROOT_ARG="$HOME" ;;
+    "~/"*) TSGO_ROOT_ARG="$HOME/${TSGO_ROOT_ARG#"~/"}" ;;
+  esac
+  [ -d "$TSGO_ROOT_ARG" ] || fail "TypeScript toolchain root does not exist:
+  $TSGO_ROOT_ARG"
+  TSGO_ROOT="$(cd "$TSGO_ROOT_ARG" && pwd -P)"
+elif [ -f "$CONFIG" ]; then
+  KIND="$(json_field "$CONFIG" kind)"
+  TSGO_ROOT="$(json_field "$CONFIG" root)"
+  # A config predating the "kind" field named a checkout root only.
+  [ -n "$KIND" ] || { [ -n "$TSGO_ROOT" ] && KIND="checkout"; } || true
+  case "$KIND" in
+    npm) TSGO_ROOT="" ;;
+    checkout)
+      [ -n "$TSGO_ROOT" ] || fail "$CONFIG has no toolchain root — run:
+  ./scripts/setup --tsgo-root /path/to/typescript-go"
+      [ -d "$TSGO_ROOT" ] || fail "TypeScript toolchain root does not exist:
+  $TSGO_ROOT
+(saved in $CONFIG — pass --tsgo-root to point at a new checkout)"
+      ;;
+    *) fail "$CONFIG is unreadable — re-run with --tsgo-root or --tsgo-npm" ;;
+  esac
+else
+  cat >&2 <<EOF
+RL setup: TypeScript toolchain is not configured.
+Run:
+  ./scripts/setup --tsgo-root /path/to/typescript-go
+or, once TypeScript 7 is what your projects install from npm:
+  ./scripts/setup --tsgo-npm
+EOF
+  exit 1
+fi
+
+command -v cargo > /dev/null 2>&1 || fail "Rust (cargo) is required to build rlc."
+if [ "$KIND" = "checkout" ]; then
+  command -v go > /dev/null 2>&1 \
+    || fail "Go is required to build the TypeScript native compiler."
+fi
+
+# ------------------------------------------------------- save the toolchain --
+mkdir -p "$CONFIG_DIR"
+node -e '
+  const config = process.argv[2] === "npm"
+    ? { kind: "npm" }
+    : { kind: "checkout", root: process.argv[3] };
+  require("fs").writeFileSync(process.argv[1], JSON.stringify(config, null, 2) + "\n");
+' "$CONFIG" "$KIND" "$TSGO_ROOT"
+
+# ------------------------------------------------- build the TypeScript half --
+if [ "$KIND" = "checkout" ]; then
+  echo "==> TypeScript toolchain: $TSGO_ROOT (current checkout, as-is)"
+  echo "==> building the native compiler (go build ./cmd/tsgo)"
+  (cd "$TSGO_ROOT" && go build -o built/local/tsgo ./cmd/tsgo) \
+    || fail "failed to build TypeScript native compiler."
+
+  # npm ci only when the installed tree is missing or older than the lockfile
+  # — `npm ci` deletes node_modules, so an unconditional run would make every
+  # setup pay the full install.
+  if [ ! -d "$TSGO_ROOT/node_modules" ] \
+    || [ "$TSGO_ROOT/package-lock.json" -nt "$TSGO_ROOT/node_modules/.package-lock.json" ]; then
+    echo "==> installing typescript-go npm dependencies (npm ci)"
+    (cd "$TSGO_ROOT" && npm ci) || fail "failed to build TypeScript API client."
+  fi
+  echo "==> building the API client (tsc -b _packages/native-preview)"
+  (cd "$TSGO_ROOT" && npx tsc -b _packages/native-preview) \
+    || fail "failed to build TypeScript API client."
+
+  # The build commands above may leave stale artifacts behind; only the
+  # files rlc actually loads decide success.
+  TSGO_BIN="$TSGO_ROOT/built/local/tsgo"
+  TSGO_API="$TSGO_ROOT/_packages/native-preview/dist/api/sync/api.js"
+  [ -f "$TSGO_BIN" ] || fail "failed to build TypeScript native compiler.
+  missing: $TSGO_BIN"
+  [ -f "$TSGO_API" ] || fail "failed to build TypeScript API client.
+  missing: $TSGO_API"
+else
+  echo "==> TypeScript toolchain: npm (consuming projects install typescript@7)"
+fi
+
+# ------------------------------------------------------------------ build RL --
+echo "==> building rlc (cargo build --release)"
+(cd "$RL_ROOT" && cargo build --release) || fail "failed to build rlc."
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) RLC_EXE="rlc.exe" ;;
+  *) RLC_EXE="rlc" ;;
+esac
+RLC_BIN="$RL_ROOT/target/release/$RLC_EXE"
+[ -f "$RLC_BIN" ] || fail "failed to build rlc.
+  missing: $RLC_BIN"
+
+# -------------------------------------------------- stamp the local package --
+# rl-dev.local.json marks npm/rl-lang as a local development install: the
+# launcher (dev.js) then runs this repository's release rlc and injects the
+# toolchain environment. The file is machine-local and gitignored.
+node -e '
+  require("fs").writeFileSync(
+    process.argv[1],
+    JSON.stringify({ root: process.argv[2] }, null, 2) + "\n",
+  );
+' "$PKG_DIR/rl-dev.local.json" "$RL_ROOT"
+
+# ------------------------------------------------------------------- VSCode --
+EXT_DIR="$RL_ROOT/editors/vscode"
+EXT_ID="rl-lang.rl-language"
+VSIX="$CONFIG_DIR/rl-language.vsix"
+
+echo "==> building the VSCode extension"
+if [ ! -d "$EXT_DIR/node_modules" ] \
+  || [ ! -d "$EXT_DIR/client/node_modules" ] \
+  || [ ! -d "$EXT_DIR/server/node_modules" ] \
+  || [ "$EXT_DIR/package-lock.json" -nt "$EXT_DIR/node_modules/.package-lock.json" ]; then
+  (cd "$EXT_DIR" && npm ci) || fail "failed to build VSCode extension."
+fi
+(cd "$EXT_DIR" && npx tsc -b) || fail "failed to build VSCode extension."
+(cd "$EXT_DIR" && npx --yes @vscode/vsce package --no-dependencies -o "$VSIX") \
+  || fail "failed to build VSCode extension."
+
+# Update = uninstall + install, never an overwrite; first install just skips
+# the uninstall.
+if command -v code > /dev/null 2>&1; then
+  if code --list-extensions 2> /dev/null | grep -qix "$EXT_ID"; then
+    echo "==> uninstalling the existing RL extension"
+    code --uninstall-extension "$EXT_ID" > /dev/null \
+      || fail "failed to uninstall the existing RL extension."
+    VSCODE_STATUS="RL extension reinstalled"
+  else
+    VSCODE_STATUS="RL extension installed"
+  fi
+  echo "==> installing the RL extension"
+  code --install-extension "$VSIX" > /dev/null \
+    || fail "failed to install the RL extension."
+else
+  VSCODE_STATUS="build ready, install skipped — no 'code' CLI on PATH
+  (install manually: code --install-extension $VSIX)"
+fi
+
+# ------------------------------------------------------------------ summary --
+echo
+echo "RL development environment ready"
+echo "RL"
+echo "  root: $RL_ROOT"
+echo "  rlc: target/release/$RLC_EXE"
+echo "TypeScript toolchain"
+if [ "$KIND" = "checkout" ]; then
+  echo "  root: $TSGO_ROOT"
+  echo "  compiler: built/local/tsgo"
+  echo "  api: _packages/native-preview/dist/api/sync/api.js"
+else
+  echo "  npm — install TypeScript 7 in each consuming project:"
+  echo "    pnpm add -D typescript@7"
+fi
+echo "VSCode"
+echo "  $VSCODE_STATUS"
+echo "Local package"
+echo "  $PKG_DIR"
+echo "Install into a test project with:"
+echo "  pnpm add -D file:$PKG_DIR"
