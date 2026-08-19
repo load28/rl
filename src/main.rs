@@ -828,7 +828,12 @@ fn main() -> ExitCode {
     let include_ts = !symbols && !emit_map && sidecar_dir.is_none();
 
     if native_check {
-        return typescript::check::run(&inputs, project.as_deref(), node.as_deref());
+        return typescript::check::run(
+            &inputs,
+            project.as_deref(),
+            node.as_deref(),
+            out_dir.as_deref(),
+        );
     }
 
     if types {

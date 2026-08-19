@@ -93,6 +93,43 @@ fn check(dir: &Path, root: &Path) -> String {
 }
 
 #[test]
+fn declarations_are_emitted_by_the_compiler_itself() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/shape.rl",
+        "export enum Shape { Circle(radius: number), Point }\n\
+         export function area(s: Shape): number {\n\
+         \x20 return match (s) { Circle(radius) => radius, Point => 0 };\n\
+         }\n",
+    )]);
+    let out_dir = dir.join("out");
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .args(["--native-check", "src", "-o"])
+        .arg(&out_dir)
+        .current_dir(&dir)
+        .env("RLC_TSGO_ROOT", root)
+        .output()
+        .expect("rlc runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let declaration = fs::read_to_string(out_dir.join("src/shape.d.ts")).expect("a .d.ts");
+    // rlc writes no declaration syntax of its own: this is what the compiler
+    // emits for the module rlc lowered, exactly as for a hand-written one.
+    assert!(
+        declaration.contains("kind: \"Circle\"") && declaration.contains("radius: number"),
+        "the enum's union type: {declaration}"
+    );
+    assert!(
+        declaration.contains("export declare function area(s: Shape): number;"),
+        "the function's signature: {declaration}"
+    );
+}
+
+#[test]
 fn a_ts_file_and_an_rl_file_share_one_project_graph() {
     let root = require_tsgo!();
     let dir = project(&[

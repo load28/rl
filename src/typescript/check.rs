@@ -18,7 +18,12 @@ use super::project;
 
 /// Runs the check. Returns failure when anything was reported, exactly like
 /// `--check`.
-pub(crate) fn run(inputs: &[String], project_arg: Option<&Path>, node: Option<&Path>) -> ExitCode {
+pub(crate) fn run(
+    inputs: &[String],
+    project_arg: Option<&Path>,
+    node: Option<&Path>,
+    out_dir: Option<&Path>,
+) -> ExitCode {
     let files = match collect(inputs) {
         Ok(files) if files.is_empty() => {
             eprintln!("rlc: no .rl sources found");
@@ -68,7 +73,8 @@ pub(crate) fn run(inputs: &[String], project_arg: Option<&Path>, node: Option<&P
         }
     };
 
-    let (query, probes) = project::query(&lowered);
+    let (mut query, probes) = project::query(&lowered);
+    query.emit_declarations = out_dir.is_some();
     let answers = match backend.ask(&tsconfig, &query) {
         Ok(answers) => answers,
         Err(e) => {
@@ -76,6 +82,15 @@ pub(crate) fn run(inputs: &[String], project_arg: Option<&Path>, node: Option<&P
             return ExitCode::FAILURE;
         }
     };
+
+    // The declarations the compiler emitted for the lowered modules, laid
+    // out under `-o` the way the sources are laid out under the project.
+    if let Some(dir) = out_dir
+        && let Err(e) = write_declarations(&answers.declarations, &tsconfig, dir)
+    {
+        eprintln!("rlc: {e}");
+        return ExitCode::FAILURE;
+    }
 
     let mut reported = 0usize;
 
@@ -223,6 +238,32 @@ pub(crate) fn run(inputs: &[String], project_arg: Option<&Path>, node: Option<&P
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Writes the emitted declarations under `out_dir`, mirroring their layout
+/// under the project root — the same shape `--sidecar` produces, and never
+/// beside the sources.
+fn write_declarations(
+    declarations: &[super::backend::Declaration],
+    tsconfig: &Path,
+    out_dir: &Path,
+) -> std::io::Result<()> {
+    let root = tsconfig.parent().unwrap_or(Path::new("."));
+    for declaration in declarations {
+        let relative = declaration.path.strip_prefix(root).unwrap_or(
+            declaration
+                .path
+                .file_name()
+                .map(Path::new)
+                .unwrap_or(&declaration.path),
+        );
+        let target = out_dir.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, &declaration.text)?;
+    }
+    Ok(())
 }
 
 /// A covered literal as it reads in a message.

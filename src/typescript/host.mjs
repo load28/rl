@@ -18,12 +18,14 @@
  *     modules: [{ path, text }],          // lowered .rl → virtual .ts
  *     literalChecks: [{ module, start, covered: [...] }],
  *     tagChecks: [{ module, start, covered: [...] }],
- *     symbolChecks: [{ module, start }] }
+ *     symbolChecks: [{ module, start }],
+ *     emitDeclarations: boolean }
  *
  *   { diagnostics: [{ file, start, end, code, message }],
  *     literalMissing: [{ index, missing }],
  *     tagMissing: [{ index, missing }],
- *     symbols: [{ index, id, name, declaredIn }] }
+ *     symbols: [{ index, id, name, declaredIn }],
+ *     declarations: [{ path, text }] }
  *
  * `start`/`end` are UTF-16 code-unit offsets — TypeScript's own coordinate
  * space. Mapping them back to `.rl` byte positions is rlc's job (`mapper`),
@@ -124,7 +126,7 @@ async function main() {
     fs: layeredFileSystem(job.modules ?? []),
   });
 
-  const out = { diagnostics: [], literalMissing: [], tagMissing: [], symbols: [] };
+  const out = { diagnostics: [], literalMissing: [], tagMissing: [], symbols: [], declarations: [] };
   try {
     const snapshot = api.updateSnapshot({ openProjects: [job.tsconfig] });
     const project = snapshot.getProject(job.tsconfig);
@@ -175,6 +177,17 @@ async function main() {
         declaredIn: (symbol.declarations ?? []).map((d) => String(d.path ?? "")).filter(Boolean),
       });
     });
+    // Declaration emit, in memory. The compiler writes the `.d.ts` for a
+    // lowered module exactly as it would for a hand-written one, so rlc
+    // never generates TypeScript declaration syntax itself.
+    if (job.emitDeclarations) {
+      const emitted = project.program.getDeclarationEmit(
+        (job.modules ?? []).map((m) => m.path),
+      );
+      for (const [path, file] of emitted.outputFiles) {
+        out.declarations.push({ path, text: file.text });
+      }
+    }
   } finally {
     api.close();
   }

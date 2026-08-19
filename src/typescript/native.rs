@@ -186,6 +186,7 @@ fn job_json(
         "symbolChecks": query.symbols.iter()
             .map(|v| json!({ "module": v.module, "start": v.position }))
             .collect::<Vec<_>>(),
+        "emitDeclarations": query.emit_declarations,
     })
 }
 
@@ -254,6 +255,12 @@ fn parse_answers(stdout: &str) -> Result<Answers, String> {
                         .collect()
                 })
                 .unwrap_or_default(),
+        });
+    }
+    for d in array(&value, "declarations") {
+        answers.declarations.push(Declaration {
+            path: PathBuf::from(d["path"].as_str().unwrap_or_default()),
+            text: d["text"].as_str().unwrap_or_default().to_string(),
         });
     }
     Ok(answers)

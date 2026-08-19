@@ -74,6 +74,10 @@ pub(crate) struct Query {
     pub literals: Vec<LiteralQuery>,
     pub tags: Vec<TagQuery>,
     pub symbols: Vec<SymbolQuery>,
+    /// Ask the compiler to emit the lowered modules' `.d.ts` as well. rlc
+    /// never writes declaration syntax of its own: the compiler emits for a
+    /// lowered module exactly what it would for a hand-written one.
+    pub emit_declarations: bool,
 }
 
 /// One TypeScript diagnostic, in TypeScript's coordinates. Mapping it back
@@ -127,6 +131,14 @@ pub(crate) struct Resolution {
     pub declared_in: Vec<String>,
 }
 
+/// One emitted declaration file, in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Declaration {
+    /// The path the compiler would have written it to.
+    pub path: PathBuf,
+    pub text: String,
+}
+
 /// The answers to one [`Query`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Answers {
@@ -134,6 +146,7 @@ pub(crate) struct Answers {
     pub literal_missing: Vec<LiteralMissing>,
     pub tag_missing: Vec<TagMissing>,
     pub resolutions: Vec<Resolution>,
+    pub declarations: Vec<Declaration>,
 }
 
 /// A source of TypeScript semantics for one project.

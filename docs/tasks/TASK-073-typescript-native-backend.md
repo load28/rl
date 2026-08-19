@@ -23,8 +23,7 @@ TypeScript 7 네이티브 컴파일러(typescript-go)의 API 서버로 옮긴다
   가상 FS 기반 단일 프로젝트 로딩, TS 진단의 `.rl` 위치 매핑, 리터럴 match
   소진성과 `val` 메서드 판정을 새 백엔드로 이전, 기능 parity 확인 후
   `types_host.mjs` 제거.
-- 제외: rl 파서/코드젠 재작성(별도), Language Service 전면 이전(별도 태스크),
-  `.d.ts` emit 이전(현재 API에 emit 표면이 없음 — 아래 조사 결과 참조).
+- 제외: rl 파서/코드젠 재작성(별도), Language Service 전면 이전(별도 태스크).
 
 ## 사전 조사 (실측)
 
@@ -42,7 +41,7 @@ Codex가 제시한 설계 초안의 전제 중 몇 가지가 사실과 달라, �
 | `val` 판정 | `Map#set` → `lib.es2015.collection.d.ts`, `Store#set` → 사용자 파일, `any.set` → 심볼 없음 |
 | 진단 | `{ fileName, pos, end, code, text }` — **UTF-16 code unit 오프셋** |
 | 배치 | `getSymbolAtPosition(file, positions[])` 등 배열 오버로드 존재 |
-| emit | `Emitter`는 `printNode`뿐 — 선언 emit API 없음 |
+| emit | 릴리스 7.0.2: `Emitter.printNode`뿐. **HEAD(7.1.0-dev)**: `Program.getDeclarationEmit` / `getJavaScriptEmit` / `emitToString` — 메모리로 받음 |
 | 전송 | MessagePack 튜플 `[MessageType u8, method bin, payload bin]`, stdin/stdout. 소스 주석: *"The protocol is unversioned; both sides must be built from the same tree."* |
 
 ## 의사결정
@@ -173,6 +172,9 @@ valMutations:
 - 2026-08-19: `val` binding resolution 위임 — `rlc::val_probes`(바인딩/뮤테이션
   비짝지음), 백엔드 질의를 범용 `SymbolQuery`로, 짝짓기는 `Symbol.id` 비교.
   `defer_to_checker`가 `val::check`도 건너뛴다.
+- 2026-08-19: 선언 emit — host의 `emitDeclarations`, `-o <dir>`로 기록.
+  `.rl`의 enum이 컴파일러가 emit한 `.d.ts`에서 유니언 타입 + 생성자 const로
+  나오는 것을 확인.
 - 2026-08-19: `tests/native.rs` 5건 추가 (단일 프로젝트 그래프 / narrowed
   소진성 / `val` 심볼 판정 / `any` 무판정 / 타입 에러 위치 매핑). tsgo 트리가
   빌드돼 있지 않으면 조용히 skip한다 — 가드는 컴파일러의 해석 규칙을
@@ -189,7 +191,19 @@ valMutations:
 - **해결**: 경로 문자열을 그대로 넘기고, 프로젝트는 `openProjects`로 연 뒤
   `getProject(tsconfig)`로 집는다.
 
-### 이슈 2: `include`가 디렉터리를 훑으면 가상 모듈이 안 보인다
+### 이슈 2: emit API가 없다고 잘못 판단했다
+
+- **증상**: "TS7에는 선언 emit API가 없으니 sidecar를 대체할 수 없다"고 보고했다.
+- **원인**: 릴리스된 npm typescript@7.0.2의 `dist/api/sync/api.d.ts`만 보고
+  `Emitter`에 `printNode`밖에 없는 것을 확인한 뒤, `Program` 쪽을 확인하지
+  않았다. 실제로는 HEAD의 `Program`에 `getDeclarationEmit` /
+  `getJavaScriptEmit` / `emitToString`이 있다 (`internal/api/proto.go`의
+  `MethodEmit`/`MethodEmitToString` 등).
+- **해결**: HEAD 소스에서 확인 후 `emitDeclarations`를 프로토콜에 추가.
+  `rlc --native-check -o <dir>`이 컴파일러가 emit한 `.d.ts`를 그대로 쓴다 —
+  rlc는 선언 구문을 스스로 만들지 않는다.
+
+### 이슈 3: `include`가 디렉터리를 훑으면 가상 모듈이 안 보인다
 
 - **증상**: `tsconfig.json`이 `"include": ["src"]`면 lowering 결과가 프로그램에
   들어오지 않는다.
@@ -202,7 +216,7 @@ valMutations:
 
 - [x] `cargo fmt --check`
 - [x] `cargo clippy --all-targets -- -D warnings`
-- [x] `cargo test` (기존 전량 + `tests/native.rs` 10건)
+- [x] `cargo test` (기존 전량 + `tests/native.rs` 11건)
 
 ## 결과
 
