@@ -194,7 +194,7 @@ impl Checker<'_> {
         }
         for segment in &program.segments {
             match segment {
-                Segment::Verbatim(_) | Segment::RlImport(_) => {}
+                Segment::Verbatim(_) | Segment::RlImport(_) | Segment::ValModifier(_) => {}
                 Segment::Enum(decl) => self.check_enum(decl)?,
                 Segment::Match(expr) => self.check_match(expr)?,
                 Segment::TupleMatch(expr) => self.check_tuple_match(expr)?,

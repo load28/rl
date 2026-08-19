@@ -6,11 +6,12 @@
 ## 프로젝트 개요
 
 **rl**은 TypeScript로 컴파일되는 초경량 전처리 언어이고, **rlc**는 Rust로 작성된
-그 컴파일러입니다. rl은 TypeScript 위에 딱 일곱 가지만 추가합니다:
+그 컴파일러입니다. rl은 TypeScript 위에 딱 일곱 구문과 바인딩 수식자 하나만
+추가합니다:
 Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드·튜플 match·
 중첩 패턴 포함), 에러 전파 `try` 문, 값 추출 `let-else`·`if let` 문,
 파이프라인 연산자 `|>`(함수 합성 `flow` 포함), `Result` 계산 블록
-`result`(바인딩 `<-`).
+`result`(바인딩 `<-`), 그리고 변경 금지 바인딩 수식자 `val`.
 
 ### 절대 불변 원칙 (설계 계약)
 
@@ -54,6 +55,8 @@ src/
                  없으면 통과 — TS의 `result` 식별자 + 블록 문과의 구분)
   sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입, 소진성
                  (임포트 선언·내장 Option/Result 포함, 로컬 > 임포트 > 내장 섀도잉)
+  val.rs         `val` 바인딩 수식자 — 수식자 인식(파서가 사용)과 토큰 스트림
+                 위의 스코프·변경 경로·호출 권한 검사
   stdlib.rs      표준 라이브러리 — STD_SOURCE(공개) / BUILTIN_ENUMS(내부)
   stdlib/
     rl_std.ts    std 모듈 본체 (Option/Result + 콤비네이터, --emit-std로 방출)
@@ -78,7 +81,7 @@ docs/
 
 파이프라인 (swc 스타일 단계 분리): `compile()` = parser::parse(lexer::lex
 토큰화 → 무오류 구조 파싱 → AST) → sema::check(모든 rl 수준 에러 + 소진성) →
-codegen::emit(무오류 방출) → verify_output(swc 파싱 자가 검사, `--no-verify`로
+val::check(같은 토큰 스트림 위의 `val` 바인딩 분석) → codegen::emit(무오류 방출) → verify_output(swc 파싱 자가 검사, `--no-verify`로
 생략 가능).
 새 기능은 해당 단계에만 손댄다: 새 구문 = ast + parser(+codegen), 새 검사 =
 sema, 방출 형태 변경 = codegen.

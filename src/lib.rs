@@ -1,16 +1,17 @@
 //! rl — a tiny preprocessor language that compiles to TypeScript.
 //!
 //! Every valid TypeScript file is a valid `.rl` file and compiles to itself
-//! byte for byte; the compiler only rewrites the six constructs rl adds —
+//! byte for byte; the compiler only rewrites the constructs rl adds —
 //! Rust-style `enum` declarations (plain TypeScript enums pass through
 //! untouched), `match` expressions (literal, tuple and nested patterns
 //! included), `try` statements (Rust-`?`-style error propagation over
 //! `Result`), let-else and `if let` statements, and the pipeline operator
-//! `|>` — plus relative `.rl` import specifiers, which are rewritten to a
-//! consumable form (see [`ImportRewrite`]). rl-level errors — duplicate
-//! cases, non-exhaustive matches, bad field types, misplaced `try` — are
-//! rlc compile errors with exact positions; the emitted output is plain
-//! TypeScript.
+//! `|>` — plus the `val` binding modifier, which is erased, and relative
+//! `.rl` import specifiers, which are rewritten to a consumable form (see
+//! [`ImportRewrite`]). rl-level errors — duplicate cases, non-exhaustive
+//! matches, bad field types, misplaced `try`, mutation through a `val`
+//! binding — are rlc compile errors with exact positions; the emitted
+//! output is plain TypeScript.
 //!
 //! The whole public API is [`compile`] plus its [`Options`] (with
 //! [`ImportRewrite`]), error type
@@ -59,6 +60,7 @@ mod scanner;
 mod sema;
 mod sidecar;
 mod stdlib;
+mod val;
 mod verify;
 
 pub use error::CompileError;
@@ -504,9 +506,11 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
     // The swc-style pipeline: structural parse (infallible; anything that is
     // not fully rl syntax stays a verbatim byte range) → semantic checks
     // (every rl-level error, including exhaustiveness — never delegated to
-    // tsc) → code emission (infallible).
-    let program = parser::parse(source);
+    // tsc; `val`'s binding analysis reads the token stream the parse
+    // already produced) → code emission (infallible).
+    let (program, tokens) = parser::lex_and_parse(source);
     sema::check(&program, options.verify, options.extern_enums).map_err(to_compile_error)?;
+    val::check(source, &tokens).map_err(to_compile_error)?;
     let (code, mappings) = codegen::emit_with_map(
         &program,
         source,

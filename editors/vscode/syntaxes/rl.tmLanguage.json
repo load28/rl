@@ -8,6 +8,7 @@
     { "include": "#rl-flow" },
     { "include": "#rl-result" },
     { "include": "#rl-result-bind" },
+    { "include": "#rl-val" },
     { "include": "source.ts" }
   ],
   "repository": {
@@ -69,6 +70,10 @@
         { "match": "[A-Za-z_$][A-Za-z0-9_$]*", "name": "variable.other.enummember.rl" },
         { "match": ",", "name": "punctuation.separator.comma.rl" }
       ]
+    },
+    "rl-val": {
+      "match": "(?<![.$\\w])(val)(?=[ \\t]+(?!as\\b|satisfies\\b|is\\b|in\\b|of\\b|instanceof\\b|keyof\\b)[A-Za-z_$\\{\\[])",
+      "captures": { "1": { "name": "storage.modifier.val.rl" } }
     },
     "rl-flow": {
       "match": "(?<![.$\\w])(flow)(?=\\s*\\|>)",

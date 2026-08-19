@@ -76,7 +76,10 @@ pub fn literal_matches(source: &str) -> Vec<LiteralMatch> {
 fn walk(program: &Program, src: &str, out: &mut Vec<LiteralMatch>) {
     for segment in &program.segments {
         match segment {
-            Segment::Verbatim(_) | Segment::RlImport(_) | Segment::Enum(_) => {}
+            Segment::Verbatim(_)
+            | Segment::RlImport(_)
+            | Segment::Enum(_)
+            | Segment::ValModifier(_) => {}
             Segment::Match(expr) => {
                 collect(expr, src, out);
                 walk(&expr.scrutinee, src, out);

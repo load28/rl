@@ -1,6 +1,6 @@
 # rl — AI context
 
-rl = TypeScript + 7 constructs; `rlc` compiles `.rl` → plain TS. Write normal TS everywhere; rl syntax only for: enum (tagged union), match, try, let-else, if let, `|>` (+ `flow` composition), `result` block.
+rl = TypeScript + 7 constructs + 1 binding modifier; `rlc` compiles `.rl` → plain TS. Write normal TS everywhere; rl syntax only for: enum (tagged union), match, try, let-else, if let, `|>` (+ `flow` composition), `result` block, `val` (mutation-free binding).
 
 CONTRACTS:
 - Every valid TS file is a valid `.rl` file. rlc transforms only text parsing COMPLETELY as an rl construct; all else passes through byte-for-byte.
@@ -139,6 +139,22 @@ import { Option, Result } from "@rl/std";
   - Result: map mapErr andThen orElse unwrapOr unwrapOrElse expect ok err fromThrowable fromPromise isOk isErr flatten transpose collect (+P: map mapErr andThen orElse unwrapOr unwrapOrElse expect)
 - Bridges: `Option.fromNullable(x)` (T|null|undefined), `Result.fromThrowable(() => JSON.parse(s))`, `Result.fromPromise(p)`, `Result.collect(arr)` / `Option.collect(arr)`.
 
+## val
+
+```rl
+val const config = load();          // binding + every path from it is read-only
+val let state = { count: 0 };       // still rebindable: state = {...state}
+function read(val user: User) {}    // param the function cannot mutate
+const f = (val u: U) => u.name;     // arrows, methods, catch (val e), for (val const x of xs)
+```
+- No modifier = plain TS = mutable. There is no `mut`.
+- ERRORS on a val-rooted path: `x.a = v` (all compound forms), `x[i] = v`, `x.a++`/`++x.a`, `delete x.a`, and name-based mutating methods (push pop shift unshift splice sort reverse fill copyWithin set delete clear add) at ANY depth (`s.a.b.tags.push(1)`).
+- NOT an error: `x = v` (that is const/let's axis), reads, comparisons, spread `{...x}`.
+- Call check: a val binding may only be passed to a `val` parameter of a same-file named function (`function f`, `const f = (...) =>`, `const f = function`). Plain path args only.
+- val is per-BINDING, not per-object: `val const view = original;` still lets `original.x = 1`. Inner declarations shadow an outer val.
+- Compile-time only: keyword (and its trailing spaces) erased, no runtime, no `readonly`.
+- SYNTAX rule: `val` must sit on the same line as `const|let|var` or as the parameter binding it modifies; anywhere else `val` is an ordinary identifier and passes through. Not usable in match patterns (`Ok(val u)` → the match won't parse).
+
 ## Modules
 
 - Import `.rl` files by relative path WITH extension: `import { Token } from "./token.rl";` → rewritten on emit to `./token.js` (default; `--rewrite-imports ts|off`; `ts` needs tsconfig `allowImportingTsExtensions` + `rewriteRelativeImportExtensions`).
@@ -173,7 +189,7 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 
 ## Errors
 
-- `rlc: file:line:col: msg` — e.g. `match on enum X is not exhaustive: missing "Y"` (add arms or `_`), `duplicate arm`, `or-pattern alternatives must bind the same fields`, `cannot mix tag patterns and literal patterns`, else-block-must-diverge, try-position-restriction (extract helper).
+- `rlc: file:line:col: msg` — e.g. `match on enum X is not exhaustive: missing "Y"` (add arms or `_`), `duplicate arm`, `or-pattern alternatives must bind the same fields`, `cannot mix tag patterns and literal patterns`, else-block-must-diverge, try-position-restriction (extract helper), `cannot mutate through val binding `x``, `cannot pass val binding `x` to mutable parameter `p` of `f``.
 - `rlc --types` also prints `match on literal union is not exhaustive: missing "..."` for `_`-less literal matches over finite literal unions.
 - Type errors come from tsc, reported at the **`.rl` source** position — `rlc --types` prints `rlc: src/x.rl:12:31: <tsc message>` (exit 1, sidecars still written), and the VSCode extension shows them inline (`source: ts`, `rl.typeDiagnostics` to disable). Applies inside `match` arms and `|>` pipelines too.
 - A `|>` step's combinator inferring `unknown` (e.g. `Result.mapP((n) => n)` with `n: unknown`) means the pipeline **head** has no usable type — it is not a `Result`, or the head is an unannotated parameter. Fix the head, not the step.
@@ -182,4 +198,4 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 
 ## Checklist
 
-match parens + `_` last + object arms `({...})`; bind by field name not position; literal patterns are values (never mixed with tags, none in tuple elements); `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check src` + `tsc --noEmit`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.
+`val` only in front of `const|let|var` or a parameter, same line; match parens + `_` last + object arms `({...})`; bind by field name not position; literal patterns are values (never mixed with tags, none in tuple elements); `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check src` + `tsc --noEmit`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.

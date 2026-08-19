@@ -392,3 +392,43 @@ fn numeric_literals_of_every_form() {
 fn boolean_literals_in_ordinary_positions() {
     assert_passthrough("const t = true;\nconst f = false;\nconst u = { a: true };\n");
 }
+
+/* ---- `val` as an ordinary identifier ---- */
+
+#[test]
+fn variable_named_val() {
+    assert_passthrough("const val = { a: 1 };\nval.a = 2;\nconst n = val.a + 1;\n");
+}
+
+#[test]
+fn property_and_parameter_named_val() {
+    assert_passthrough("const o = { val: 1 };\no.val = 2;\n");
+    assert_passthrough("function f(val: number) { return val + 1; }\n");
+    assert_passthrough("const g = (val: string) => val.length;\n");
+    assert_passthrough("interface I { val: string }\ntype T = { val?: number };\n");
+    assert_passthrough("class C { val = 1; getVal() { return this.val; } }\n");
+}
+
+#[test]
+fn val_followed_by_a_declaration_on_the_next_line() {
+    // Two statements separated by ASI: an expression statement naming the
+    // variable `val`, then a declaration. `val` only modifies what follows
+    // it on the same line, so this keeps its meaning.
+    assert_passthrough("let x = 0;\nx = val\nconst y = 1;\n");
+    assert_passthrough("val\nconst y = 1;\n");
+    assert_passthrough("val;\nconst y = 1;\n");
+}
+
+#[test]
+fn val_in_front_of_an_operator_word() {
+    assert_passthrough("const u = (val as User);\nconst v = (val satisfies User);\n");
+    assert_passthrough("for (val of items) { log(val); }\n");
+    assert_passthrough("if (val in obj) { log(1); }\nif (val instanceof C) { log(2); }\n");
+}
+
+#[test]
+fn val_as_a_call_argument_or_element() {
+    assert_passthrough("f(val, other);\nconst xs = [val, other];\n");
+    assert_passthrough("const m = new Map([[val, 1]]);\n");
+    assert_passthrough("arr.reduce((acc, val) => acc + val, 0);\n");
+}

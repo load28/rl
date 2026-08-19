@@ -2181,3 +2181,64 @@ const label: string = match ("a" as "a" | "b") {
     );
     assert!(ok, "{out}");
 }
+
+/* ------------------------------------------------------------------ */
+/* val — binding modifier                                             */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn typecheck_val_bindings_are_plain_typescript() {
+    require_toolchain!();
+    // `val` is compile-time only: what reaches tsc is an ordinary
+    // declaration and an ordinary parameter, with no readonly types and
+    // no runtime helper.
+    let (ok, out) = typecheck(
+        r#"
+type User = { name: string; tags: string[] };
+
+val const user: User = { name: "Kim", tags: ["dev"] };
+
+function inspect(val u: User): string {
+  return u.name + u.tags.length;
+}
+
+val let state = { count: 0 };
+state = { ...state, count: state.count + 1 };
+
+const label = inspect(user) + state.count;
+"#,
+    );
+    assert!(ok, "{out}");
+    assert!(
+        !out.contains("val "),
+        "the modifier leaked into the output: {out}"
+    );
+    assert!(!out.contains("readonly"), "{out}");
+}
+
+#[test]
+fn run_val_program_behaves_exactly_like_the_typescript_it_erases_to() {
+    require_toolchain!();
+    let lines = run(r#"
+val const config = { name: "rl", tags: ["dev"] };
+val let state = { count: 0 };
+
+function describe(val c: { name: string; tags: string[] }): string {
+  return `${c.name}:${c.tags.length}`;
+}
+
+function bump(s: { count: number }) {
+  s.count += 1;
+  return s;
+}
+
+state = { count: state.count + 1 };
+const mutable = { count: 0 };
+bump(mutable);
+
+console.log(describe(config));
+console.log(String(state.count));
+console.log(String(mutable.count));
+"#);
+    assert_eq!(lines, ["rl:1", "1", "1"]);
+}
