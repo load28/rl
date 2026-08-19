@@ -385,14 +385,13 @@ fn collect_signatures<'a>(
                         if punct_at(tokens, k, b'*') {
                             k += 1;
                         }
-                        ident_at(k).and_then(|name| {
-                            params_after_name(src, tokens, k + 1).map(|p| (name, p))
-                        })
+                        ident_at(k).zip(params_after_name(src, tokens, k + 1))
                     }
-                    "const" | "let" | "var" => ident_at(i + 1).and_then(|name| {
-                        function_value_at(src, tokens, declarator_eq(tokens, i + 2)?)
-                            .map(|p| (name, p))
-                    }),
+                    "const" | "let" | "var" => {
+                        let params = declarator_eq(tokens, i + 2)
+                            .and_then(|eq| function_value_at(src, tokens, eq));
+                        ident_at(i + 1).zip(params)
+                    }
                     _ => None,
                 };
                 if let Some((name, params)) = found {

@@ -222,6 +222,18 @@ TypeScript의 기본 mutable 의미는 그대로 두고, 사용자가 `val`을 �
   `language.md` §10.7과 `errors.md`에 명시했다. 남은 부채: match 패턴 문법에
   `val`을 넣는 후속 작업에서 파서가 직접 위치 있는 에러를 내게 한다.
 
+### 이슈 5: 로컬은 통과했는데 CI clippy가 실패했다
+
+- **증상**: PR #29의 `fmt / clippy / test` 잡이
+  `error: manual implementation of \`Option::zip\`` 2건(`src/val.rs`의
+  시그니처 수집부)으로 실패. 로컬 게이트는 통과했었다.
+- **원인**: 로컬 툴체인이 1.94.1, CI는 stable 1.97.1이라 그 사이에 추가된
+  `clippy::manual_option_zip`이 로컬에서는 존재하지 않았다.
+- **해결**: `and_then(|name| ... .map(|p| (name, p)))`를 `ident_at(..).zip(..)`
+  으로 바꿨다(`?`를 쓰던 쪽은 `declarator_eq(..).and_then(..)`으로 먼저 풀고
+  `zip`). 이어서 로컬 툴체인을 CI와 같은 1.97.1로 올려 세 게이트를 재실행,
+  전부 통과를 확인했다. 교훈: 게이트 재현은 CI와 같은 stable에서 해야 한다.
+
 ## 검증
 
 - [x] `cargo fmt --check`
