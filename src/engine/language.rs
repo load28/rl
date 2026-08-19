@@ -575,9 +575,9 @@ impl Project {
     }
 
     /// TypeScript's type errors for one file, mapped onto its `.rl` source.
-    /// Spans that land in compiler-written glue are dropped — rlc's
-    /// emissions are the compiler's responsibility, never something to
-    /// report at the user (the error-layer contract).
+    /// Exact source spans are reported as-is. Diagnostics that land in
+    /// compiler-written glue are still surfaced at the nearest source
+    /// construct, matching the batch typed-check path.
     pub fn service_diagnostics(&mut self, path: &Path) -> Result<Vec<ServiceDiagnostic>, String> {
         let (doc, path) = self.serve(path)?;
         let session = self.session();
@@ -604,16 +604,20 @@ impl Project {
             }
             let start = u16_offset(&doc.code, position_of(&item["range"]["start"]));
             let end = u16_offset(&doc.code, position_of(&item["range"]["end"]));
-            let Some((s, e)) = from_service_span(&doc, start, end) else {
+            let Some((s, e, exact)) = diagnostic_source_span(&doc, start, end) else {
                 continue;
             };
             // An empty span (an error at a position, not over one) would
             // render as an invisible squiggle; give it the character it
             // points at.
             let e = if e > s { e } else { s + 1 };
+            let mut message = item["message"].as_str().unwrap_or_default().to_string();
+            if !exact {
+                message.push_str(" (in code rlc generated for this construct)");
+            }
             out.push(ServiceDiagnostic {
                 range: source_range(&doc.source, s, e),
-                message: item["message"].as_str().unwrap_or_default().to_string(),
+                message,
                 code: item["code"].as_u64().unwrap_or(0) as u32,
                 warning: severity == 2,
             });
@@ -863,6 +867,35 @@ fn from_service_span(doc: &ServiceDoc, start: usize, end: usize) -> Option<(usiz
         mapper::to_utf16(&doc.source, ss),
         mapper::to_utf16(&doc.source, se),
     ))
+}
+
+/// A TypeScript diagnostic span translated back to source UTF-16 offsets.
+///
+/// Unlike navigation and rename, diagnostics on generated glue are still
+/// useful: the CLI reports them at the construct that produced the glue, so
+/// the language service follows the same policy.
+fn diagnostic_source_span(
+    doc: &ServiceDoc,
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize, bool)> {
+    let sb = mapper::from_utf16(&doc.code, start);
+    let eb = mapper::from_utf16(&doc.code, end);
+    if let (Some(ss), Some(se)) = (
+        mapper::to_source_inclusive(&doc.mappings, sb),
+        mapper::to_source_inclusive(&doc.mappings, eb),
+    ) && se >= ss
+    {
+        return Some((
+            mapper::to_utf16(&doc.source, ss),
+            mapper::to_utf16(&doc.source, se),
+            true,
+        ));
+    }
+
+    let (ss, exact) = mapper::to_source_or_nearest(&doc.mappings, sb)?;
+    let s = mapper::to_utf16(&doc.source, ss);
+    Some((s, s + 1, exact))
 }
 
 /// A `[start, end)` pair of UTF-16 offsets as a [`Range`] over `text`.

@@ -96,7 +96,8 @@
 | TASK-086 | Project/Snapshot 기반 Language Engine 아키텍처 재구성 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-086](./TASK-086-engine-architecture.md) |
 | TASK-087 | LSP 재설계 — 엔진 어댑터화와 TsgoProject 제거 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-087](./TASK-087-lsp-engine-adapter.md) |
 | TASK-088 | CI native 테스트 guard 개수 갱신 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-088](./TASK-088-ci-native-guard-count.md) |
+| TASK-089 | 에디터 TS 진단의 glue 위치 보정 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-089](./TASK-089-editor-diagnostic-glue-fallback.md) |
 
 ## 다음 태스크 번호
 
-**TASK-089**
+**TASK-090**
