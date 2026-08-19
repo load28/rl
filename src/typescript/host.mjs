@@ -14,7 +14,7 @@
  *
  * Protocol (stdin → stdout, both JSON, one object each):
  *
- *   { tsgoBin, apiModule, cwd, tsconfig,
+ *   { tsgoBin (nullable), apiModule, cwd, tsconfig,
  *     modules: [{ path, text }],          // lowered .rl → virtual .ts
  *     literalChecks: [{ module, start, covered: [...] }],
  *     tagChecks: [{ module, start, covered: [...] }],
@@ -122,7 +122,9 @@ async function main() {
 
   const api = new API({
     cwd: job.cwd,
-    tsserverPath: job.tsgoBin,
+    // Omitted for an installed package: the client runs the executable
+    // shipped beside it, which is the one it was built against.
+    ...(job.tsgoBin ? { tsserverPath: job.tsgoBin } : {}),
     fs: layeredFileSystem(job.modules ?? []),
   });
 
