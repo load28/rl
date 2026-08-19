@@ -34,7 +34,10 @@ function toolchainAvailable(): boolean {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-toolchain-probe-"));
   try {
     fs.writeFileSync(path.join(dir, "probe.rl"), "export const n: number = 1;\n");
-    execFileSync(COMPILER, ["--native-sidecar", "probe.rl"], { cwd: dir, stdio: "pipe" });
+    // `-o` the way `refreshSidecar` passes it: on its own `--types` writes
+    // into `.rl-types`, and the probe asks whether a sidecar can be built
+    // where the editor puts one.
+    execFileSync(COMPILER, ["--types", "probe.rl", "-o", "."], { cwd: dir, stdio: "pipe" });
     return fs.existsSync(path.join(dir, "probe.rl.d.ts"));
   } catch {
     return false;

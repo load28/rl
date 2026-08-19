@@ -57,7 +57,7 @@ const v = match (x) { Some(v) => v, "none" => 0 };
 
 `_` 없는 리터럴 match의 **소진성은 기본 경로에서 검사하지 않습니다** — 런타임
 가드(`rl match: unexpected literal ...`)만 남습니다. 타입이 있는
-`rlc --types` 경로가 검사합니다:
+`rlc --check-types`/`--types`가 검사합니다:
 
 ```
 rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
@@ -66,6 +66,11 @@ rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
 
 스크루티니 타입이 유한 리터럴 유니언으로 확정될 때만 나옵니다
 ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)).
+
+**enum 소진성 메시지는 모드에 따라 다릅니다.** 기본 경로(`rlc`/`--check`)는
+자기 선언 표에서 답하므로 enum 이름을 댑니다(아래 표). `--check-types`/`--types`는
+match 위치의 *타입*에서 답하므로 이름 없이 `match is not exhaustive: missing ...`
+라고 하고, 대신 앞선 가드가 좁혀 낸 케이스는 요구하지 않습니다.
 
 ### 소진성
 
@@ -172,7 +177,7 @@ const a = c ? x : y |> f;
 | 메시지 | 원인과 해결 |
 |--------|-------------|
 | `` cannot mutate through val binding `<이름>` (the binding is declared with `val`, so every access path from it is read-only) `` | `val` 바인딩에서 시작하는 경로로 대입·증감·`delete`를 했습니다. 위치는 경로의 **루트 식별자**. 변경이 필요하면 `val`을 빼거나, 변경 가능한 다른 바인딩을 통하거나, 새 값을 만들어 교체합니다(`val let`이면 재할당은 가능) |
-| `` cannot call mutating method `<메서드>` of built-in `<built-in>` through val binding `<이름>` (...) `` | **`--types`에서만** 나옵니다. `val` 경로로 호출한 메서드를 TypeScript가 `Array`/`Map`/`Set`/`WeakMap`/`WeakSet`/TypedArray의 변경 메서드로 확인했습니다. 같은 이름의 **사용자 정의 메서드는 걸리지 않습니다** — 판정 근거는 이름이 아니라 수신자의 선언입니다 ([`language.md` §10.4](./language.md#104-built-in-변경-메서드---types)) |
+| `` cannot call mutating method `<메서드>` through val binding `<이름>` (...) `` | **`--check-types`/`--types`에서만** 나옵니다. `val` 경로로 호출한 메서드를 TypeScript가 **자신이 선언한 것**으로 확인했습니다 (`Array`/`Map`/`Set`/`WeakMap`/`WeakSet`/TypedArray의 변경 메서드). 같은 이름의 **사용자 정의 메서드는 걸리지 않습니다** — 판정 근거는 이름이 아니라 수신자의 선언입니다 ([`language.md` §10.4](./language.md#104-built-in-변경-메서드---types)) |
 | `` cannot pass val binding `<이름>` to mutable parameter `<매개변수>` of `<함수>` (the parameter is not declared with `val`, so the function may mutate through it) `` | `val` 바인딩을 `val`이 아닌 매개변수로 넘겼습니다. 위치는 인자. 그 함수가 인자를 변경하지 않는다면 매개변수를 `val`로 선언합니다 ([`language.md` §10.5](./language.md#105-함수-경계)) |
 
 ```rl
@@ -211,7 +216,7 @@ source or an rlc bug; use --no-verify to bypass.
 
 | 어디서 | 형식 | 비고 |
 |--------|------|------|
-| `rlc --types` | `rlc: <파일>.rl:<행>:<열>: <메시지>` | 타입 에러가 있어도 사이드카는 방출되고 종료 코드만 1 ([`cli.md`](./cli.md#타입-생성---types)) |
+| `rlc --check-types` / `--types` | `rlc: <파일>.rl:<행>:<열>: ts(<코드>): <메시지>` | 타입 에러가 있어도 `--types`의 사이드카는 방출되고 종료 코드만 1 ([`cli.md`](./cli.md#타입-검사---check-types---types)) |
 | VSCode 확장 | 진단 `source: ts`, `code`는 TS 에러 번호 | `rl.typeDiagnostics`로 끌 수 있음 |
 
 두 경로 모두 `match` 암·`|>` 파이프라인·`try`/let-else/`if let` **안쪽**의
@@ -220,7 +225,7 @@ source or an rlc bug; use --no-verify to bypass.
 
 ```rl
 const bad = evaluate() |> Result.mapP((n) => n.length);
-// rlc: eval.rl:1:48: Property 'length' does not exist on type 'number'.
+// rlc: eval.rl:1:48: ts(2339): Property 'length' does not exist on type 'number'.
 ```
 
 계층은 그대로입니다: 위의 rl 수준 에러는 **전부 rlc가**, 타입 에러는
@@ -239,18 +244,15 @@ const bad = evaluate() |> Result.mapP((n) => n.length);
 | `--rewrite-imports requires a value (js, ts, or off)` / `... expects js, ts, or off (got <값>)` | 값이 없거나 셋 중 하나가 아님 |
 | `--sidecar requires a directory of tsc-emitted .d.ts files` | `--sidecar` 뒤에 디렉터리가 없음 |
 | `--emit-std takes no inputs (the build materializes @rl/std itself)` | stdout 전용 단독 모드 — 빌드에서는 자동 방출이 대신합니다 |
-| `--types does not combine with -p, --check, --symbols, or --sidecar` | `--types`는 자체 파이프라인 (`-w`는 조합 가능) |
+| `--types/--check-types does not combine with -p, --check, --symbols, --emit-map, or --sidecar` | 타입 검사 모드는 자체 파이프라인 (`-w`·`--project`·`-o`는 조합 가능) |
 | `unknown option <옵션>` | 알 수 없는 `-` 시작 인자. `rlc -h` 참조 |
 | `` unknown help topic "<주제>" (run `rlc help` for the list) `` | `rlc help <주제>`의 주제가 목록에 없음. `rlc help`로 주제·별칭 확인 |
 | `` help takes at most one topic (run `rlc help` for the list) `` | `rlc help`에 주제를 둘 이상 넘김 |
 | `no such file or directory: <경로>` | 입력 경로가 없음 |
 | `no sources found` | 입력에서 컴파일할 파일을 찾지 못함 |
 | `<경로>: output would overwrite the input — pass -o <dir>` | 통과 `.ts`를 제자리 컴파일하면 소스를 덮어씀. `-o`로 출력 트리를 분리 |
-| `<a.rl> would shadow <a.ts> — rename one of them` | `--types`가 `a.rl`을 올릴 가상 모듈 경로에 같은 이름의 실제 `a.ts`가 이미 있음. 한쪽 이름을 바꿉니다 |
-| `node not found — install Node.js or pass --node <path> (--types needs it)` | `--types`가 node를 찾지 못함 |
-| `typescript not found — install it (npm i -D typescript)` | 프로젝트에서 TypeScript를 해석하지 못함 |
-| `declaration emit failed: <상세>` | 선언 방출 호스트가 비정상 종료 |
-| `no declarations emitted for <모듈>` | 방출 결과에 그 모듈의 선언이 없음 (rlc 버그) |
+| `no TypeScript compiler found — install one (npm i -D typescript@7)` | 타입 검사 모드가 구동할 TypeScript를 해석하지 못함 ([`cli.md`](./cli.md#컴파일러-해석)) |
+| `rlc host: the resolved TypeScript has no declaration emit API` | 해석된 TypeScript로는 검사는 되지만 선언 방출이 안 됨 — `--check-types`는 되고 `--types`의 사이드카 쓰기만 막힙니다 |
 | `<경로>: <OS 에러>` | 파일 IO 실패. 해당 파일만 건너뛰고 계속 진행한 뒤 1로 종료 |
 
 인자 에러와 없는 경로는 즉시 종료하고, IO 에러는 파일 단위로 건너뛰며 계속

@@ -29,17 +29,17 @@ jobs:
         with:
           node-version: "22"
 
-      # Pinned to major 6: TypeScript 7 is the native compiler whose npm
-      # package has no JS compiler API, which `rlc --types` drives directly
-      # (types_host.mjs). The gate must exercise the supported majors — the
-      # TS 7 situation is covered by a clear rlc diagnostic + test skips.
+      # `tsc` for the integration tests, which type-check and run rlc's
+      # emitted TypeScript. Pinned to major 6 because major 7 *is* the
+      # native compiler and takes a different command line; what rlc drives
+      # for `--types` is installed separately below.
       - name: Install TypeScript
         run: npm install -g typescript@6
 
-      # The native backend (TASK-073/074) drives TypeScript 7's own compiler
-      # through its API client. Without one the `tests/native.rs` suite skips
-      # silently, so the gate installs it and points rlc at it.
-      - name: Install TypeScript 7 for the native backend
+      # What `--check-types`/`--types` drive: TypeScript 7's own compiler,
+      # through its API client. Without one the `tests/native.rs` suite
+      # skips silently, so the gate installs it and points rlc at it.
+      - name: Install TypeScript 7 for the type checking modes
         run: |
           mkdir -p "$HOME/ts7" && cd "$HOME/ts7"
           npm install --no-save typescript@7
@@ -63,7 +63,7 @@ jobs:
           # covered by the `native` job below.
           test -f "$RLC_TSGO_API"
           cargo test --test native 2>&1 | tee /tmp/native.log
-          grep -q "16 passed" /tmp/native.log
+          grep -q "19 passed" /tmp/native.log
 
   extension:
     name: vscode extension
@@ -121,7 +121,7 @@ jobs:
           ! grep -q "SKIP no tsgo executable" /tmp/extension.log
 
   native:
-    name: native backend (typescript-go)
+    name: type checking (typescript-go)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,12 +164,12 @@ jobs:
       - name: Build rlc
         run: cargo build
 
-      - name: Test — the native backend end to end
+      - name: Test — the type checking modes end to end
         env:
           RLC_TSGO_ROOT: ${{ github.workspace }}/typescript-go
         run: |
           cargo test --test native 2>&1 | tee /tmp/native.log
-          grep -q "16 passed" /tmp/native.log
+          grep -q "19 passed" /tmp/native.log
 
       - name: Build the extension
         working-directory: editors/vscode

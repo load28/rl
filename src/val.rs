@@ -37,7 +37,7 @@
 //!   redeclaration are where an approximation quietly differs. So this half
 //!   collects the `val` bindings and the mutations **without pairing
 //!   them**, and a caller with a checker pairs them by symbol identity
-//!   ([`crate::val_probes`], `rlc --native-check`). What counts as a
+//!   ([`crate::val_probes`], `rlc --check-types`). What counts as a
 //!   mutation is still syntax, and still rl's own.
 //!
 //! What it does *not* do is inference: no effect system, no borrow
@@ -164,8 +164,8 @@ pub(crate) fn modifier_end(src: &str, keyword_end: usize) -> usize {
 ///
 /// It is a question filter, never a verdict: whether `q.set(k)` mutates
 /// depends on what `q` is, and rlc has no types. The verdict is made in
-/// `types_host.mjs` (`rlc --types`), which resolves the method's symbol and
-/// only reports the one case it can prove — a method TypeScript itself
+/// `rlc --check-types`, where the checker resolves the method's symbol and
+/// only the one case it can prove is reported — a method TypeScript itself
 /// declares on `Array`/`Map`/`Set`/`WeakMap`/`WeakSet`/a TypedArray. A
 /// user-defined `set` never reaches that verdict.
 ///
@@ -415,6 +415,25 @@ pub struct ValProbes {
     pub bindings: Vec<ValBinding>,
     /// Every mutation in the file, rooted at any identifier.
     pub mutations: Vec<Mutation>,
+    /// Every argument that reaches a parameter the callee did not declare
+    /// `val`, rooted at any identifier.
+    pub passes: Vec<ValPass>,
+}
+
+/// One argument handed to a parameter that is not declared `val` — a
+/// violation exactly when the argument's root turns out to be a `val`
+/// binding, which is symbol identity and so the checker's answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValPass {
+    /// Byte offset of the argument's root identifier: what the checker
+    /// resolves, and where the diagnostic is reported.
+    pub offset: usize,
+    /// The root identifier's text, for the message.
+    pub name: String,
+    /// The parameter as the message names it — `` `user` `` or `#2`.
+    pub param: String,
+    /// The called function's name.
+    pub callee: String,
 }
 
 /// Where a slice of `src` starts, in bytes. `part` must be a subslice of
@@ -924,6 +943,18 @@ impl<'a> Checker<'a> {
                 }
                 TokenKind::Punct(b'(') => {
                     if let Some((start, end, vars)) = self.param_scope(tokens, i) {
+                        // A `val` parameter is a `val` binding like any
+                        // other; it just never goes through `declare`.
+                        if let Sink::Probes(sink) = self.sink {
+                            sink.borrow_mut().bindings.extend(
+                                vars.iter()
+                                    .filter(|v| v.val_at.is_some())
+                                    .map(|v| ValBinding {
+                                        name: v.name.to_string(),
+                                        ident: v.ident,
+                                    }),
+                            );
+                        }
                         pending.push((start, end, vars));
                     }
                 }
@@ -1238,17 +1269,19 @@ impl<'a> Checker<'a> {
         params: &[ParamSig],
         frames: &[Frame<'a>],
     ) -> Result<(), RlError> {
-        if !matches!(self.sink, Sink::Report) {
-            return Ok(()); // probe mode reports nothing
+        if matches!(self.sink, Sink::Calls(_)) {
+            return Ok(()); // the typed-method half asks nothing about calls
         }
         for (idx, (start, end)) in list_entries(tokens, open).into_iter().enumerate() {
             if !matches!(tokens[start].kind, TokenKind::Ident) || dotted_at(tokens, 0, start) {
                 continue;
             }
             let name = self.text(&tokens[start]);
-            let Some(_) = self.lookup(frames, name) else {
+            // Probe mode leaves "is this a `val` binding?" to the checker;
+            // the report path answers it from this file's own scope model.
+            if matches!(self.sink, Sink::Report) && self.lookup(frames, name).is_none() {
                 continue;
-            };
+            }
             // only `x` / `x.y.z` — a computed argument is not a path
             let path = parse_path(self.src, tokens, start);
             if path.end != end || (path.steps > 0 && path.last_prop.is_none()) {
@@ -1264,6 +1297,15 @@ impl<'a> Checker<'a> {
                 Some(n) => format!("`{n}`"),
                 None => format!("#{}", idx + 1),
             };
+            if let Sink::Probes(sink) = self.sink {
+                sink.borrow_mut().passes.push(ValPass {
+                    offset: tokens[start].span.start,
+                    name: name.to_string(),
+                    param: described,
+                    callee: callee.to_string(),
+                });
+                continue;
+            }
             return Err(RlError::at(
                 tokens[start].span.start,
                 format!(

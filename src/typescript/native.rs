@@ -324,6 +324,7 @@ fn job_json(query: &Query) -> serde_json::Value {
         "modules": query.modules.iter()
             .map(|m| json!({ "path": m.path, "text": m.text }))
             .collect::<Vec<_>>(),
+        "sources": query.sources,
         "literalChecks": query.literals.iter()
             .map(|l| json!({
                 "module": l.module,

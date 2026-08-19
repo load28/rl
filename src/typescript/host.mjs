@@ -183,11 +183,14 @@ async function main() {
     // Opening happens once; from then on the snapshot is only told what
     // changed, which is the whole point of keeping this process alive.
     const paths = (job.modules ?? []).map((m) => m.path);
+    // Without a configuration the project is whatever is opened, so the
+    // hand-written `.ts` files come along: one nothing imports is still the
+    // user's code, and `rlc --types src` is expected to check it.
     const params = opened
       ? { fileChanges: changes }
       : open.tsconfig
         ? { openProjects: [open.tsconfig] }
-        : { openFiles: paths };
+        : { openFiles: [...paths, ...(job.sources ?? [])] };
     const snapshot = api.updateSnapshot(params);
     const project = open.tsconfig
       ? snapshot.getProject(open.tsconfig)

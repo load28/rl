@@ -23,10 +23,10 @@ mod rope;
 
 use std::cell::Cell;
 
-use crate::EmitMapping;
 use crate::ImportRewrite;
 use crate::ast::*;
 use crate::scanner::contains_await;
+use crate::{EmitMapping, ScrutineeTemp};
 use rope::Rope;
 
 /// A trailing line comment would swallow whatever codegen appends on the
@@ -47,7 +47,7 @@ pub(crate) fn emit_with_map(
     src: &str,
     rewrite_imports: ImportRewrite,
     std_import: Option<&str>,
-) -> (String, Vec<EmitMapping>) {
+) -> (String, Vec<EmitMapping>, Vec<ScrutineeTemp>) {
     let emitter = Emitter {
         src,
         bytes: src.as_bytes(),
@@ -57,7 +57,7 @@ pub(crate) fn emit_with_map(
         used_pipe: Cell::new(false),
         used_flow: Cell::new(false),
     };
-    let (mut code, mappings) = emitter.emit_program(program).flatten();
+    let (mut code, mappings, scrutinee_temps) = emitter.emit_program(program).flatten();
     // The pipeline apply helper, once per file. A function declaration
     // hoists, so appending at the end keeps every original line in place
     // while top-level pipelines still evaluate correctly at module init.
@@ -77,7 +77,7 @@ pub(crate) fn emit_with_map(
             "function $rl_fl<A extends unknown[], B, C>(f: (...a: A) => B, g: (b: B) => C): (...a: A) => C { return (...a: A) => g(f(...a)); }\n",
         );
     }
-    (code, mappings)
+    (code, mappings, scrutinee_temps)
 }
 
 pub(super) struct Emitter<'a> {

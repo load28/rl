@@ -1037,82 +1037,24 @@ fn run_rlc(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
     )
 }
 
-/// Whether TypeScript resolves without a project-local copy — true when a
-/// global install happens to be reachable, which changes what `--types` can
-/// legitimately do.
-fn global_typescript_resolvable() -> bool {
-    let dir = tmpdir();
-    let via_require = Command::new("node")
-        .current_dir(&dir)
-        .args(["-e", "require(\"typescript\")"])
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false);
-    if via_require {
-        return true;
-    }
-    // types_host.mjs also resolves the package that owns a `tsc` on PATH, so
-    // a setup where only the binary is reachable succeeds too and must skip.
-    std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                .any(|dir| dir.join("tsc").exists() || dir.join("tsc.cmd").exists())
-        })
-        .unwrap_or(false)
-}
-
-/// Whether a TypeScript with a **JS compiler API** resolves — what `--types`
-/// actually needs. TypeScript 7 is the native compiler: its package exposes
-/// no JS API, so a machine where only TS 7 is reachable must skip the
-/// `--types` success tests (rlc reports a clear diagnostic there instead).
-/// Mirrors the resolution order of `types_host.mjs`: plain `require`, then
-/// the package that owns each `tsc` on PATH.
+/// Whether rlc can resolve a TypeScript to drive *and* emit declarations
+/// with it. Asked by running `--types` over a trivial project and looking
+/// for the sidecar: the answer is rlc's own resolution, not a guess about
+/// the machine. A released `typescript@7` can check but not emit, so it
+/// answers `false` here and the `--types` success tests skip.
 fn usable_typescript_for_types() -> bool {
-    const API_CHECK: &str = "if (typeof require(\"typescript\")\
-        .convertCompilerOptionsFromJson !== \"function\") process.exit(1);";
     let dir = tmpdir();
-    let via_require = Command::new("node")
-        .current_dir(&dir)
-        .args(["-e", API_CHECK])
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false);
-    if via_require {
-        return true;
-    }
-
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    for entry in std::env::split_paths(&path) {
-        for name in ["tsc", "tsc.cmd"] {
-            let Ok(base) = fs::canonicalize(entry.join(name)) else {
-                continue;
-            };
-            let check = "const { createRequire } = require(\"node:module\");\
-                const ts = createRequire(process.argv[1])(\"typescript\");\
-                if (typeof ts.convertCompilerOptionsFromJson !== \"function\") process.exit(1);";
-            let ok = Command::new("node")
-                .args(["-e", check])
-                .arg(&base)
-                .output()
-                .map(|out| out.status.success())
-                .unwrap_or(false);
-            if ok {
-                return true;
-            }
-        }
-    }
-    false
+    fs::write(dir.join("probe.rl"), "export const n: number = 1;\n").unwrap();
+    let (ok, _) = run_rlc(&dir, &["--types", "probe.rl", "-o", "."]);
+    ok && dir.join("probe.rl.d.ts").exists()
 }
 
-/// Skip a `--types` success test when no usable (JS-API) TypeScript exists.
+/// Skip a `--types` success test when no TypeScript that can emit
+/// declarations is reachable.
 macro_rules! require_types_typescript {
     () => {
         if !usable_typescript_for_types() {
-            eprintln!(
-                "skipping: no TypeScript with a JS compiler API (--types needs typescript 5/6)"
-            );
+            eprintln!("skipping: no TypeScript for rlc to drive, or it cannot emit declarations");
             return;
         }
     };
@@ -1293,25 +1235,6 @@ fn write_consumer_tree(dir: &std::path::Path) {
     fs::write(dir.join("src/level.rl"), LEVEL_RL).unwrap();
     fs::write(dir.join("src/notice.rl"), NOTICE_RL).unwrap();
     fs::write(dir.join("src/main.ts"), CONSUMER_MAIN_TS).unwrap();
-    link_typescript(dir);
-}
-
-/// `--types` emits declarations through TypeScript's API, which it resolves
-/// from the project — the way ts-node, tsup and vite do. A fixture is a
-/// project, so it needs its own `node_modules/typescript`; this links the
-/// copy the repository already vendors for the language server.
-fn link_typescript(dir: &std::path::Path) {
-    let vendored = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("editors/vscode/server/node_modules/typescript");
-    if !vendored.exists() {
-        return; // the test's toolchain guard reports the skip
-    }
-    let modules = dir.join("node_modules");
-    fs::create_dir_all(&modules).unwrap();
-    #[cfg(unix)]
-    let _ = std::os::unix::fs::symlink(&vendored, modules.join("typescript"));
-    #[cfg(windows)]
-    let _ = std::os::windows::fs::symlink_dir(&vendored, modules.join("typescript"));
 }
 
 #[test]
@@ -1482,15 +1405,15 @@ fn cli_types_without_typescript_says_so() {
     let dir = tmpdir();
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(dir.join("src/level.rl"), LEVEL_RL).unwrap();
-    // No node_modules/typescript on purpose. A machine with a globally
-    // resolvable copy would (correctly) succeed, so skip there.
-    if global_typescript_resolvable() {
-        eprintln!("skipping: a global TypeScript is resolvable here");
+    // No TypeScript on purpose. A machine with a resolvable one would
+    // (correctly) succeed, so skip there.
+    if usable_typescript_for_types() {
+        eprintln!("skipping: a TypeScript is resolvable here");
         return;
     }
     let (ok, err) = run_rlc(&dir, &["--types", "src"]);
     assert!(!ok, "expected failure:\n{err}");
-    assert!(err.contains("typescript not found"), "{err}");
+    assert!(err.contains("no TypeScript compiler found"), "{err}");
 }
 
 #[test]

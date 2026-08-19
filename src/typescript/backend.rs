@@ -68,9 +68,16 @@ pub(crate) struct SymbolQuery {
 /// Everything asked of one project graph, in one round trip.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Query {
-    /// The lowered `.rl` modules. Hand-written `.ts` files are not listed:
-    /// the compiler reads those from disk, where they already are.
+    /// The lowered `.rl` modules. Their text is served from memory —
+    /// nothing is written to disk.
     pub modules: Vec<Module>,
+    /// Hand-written `.ts` files of the project, by path: the compiler reads
+    /// them from disk, where they already are. Listing them matters only
+    /// when the workspace has no `tsconfig.json` — then the project is
+    /// inferred from what is opened, and a `.ts` file nothing imports would
+    /// otherwise never be checked. With a `tsconfig.json` the project's own
+    /// `include` decides and this stays empty.
+    pub sources: Vec<PathBuf>,
     pub literals: Vec<LiteralQuery>,
     pub tags: Vec<TagQuery>,
     pub symbols: Vec<SymbolQuery>,

@@ -1,4 +1,5 @@
-//! `rlc --native-check` — the whole pipeline over one project graph.
+//! `rlc --check-types` / `rlc --types` — the whole pipeline over one
+//! project graph.
 //!
 //! Lowers every `.rl` input to ordinary TypeScript, hands the lowered modules
 //! to the real TypeScript compiler as part of the user's own project, and
@@ -6,8 +7,10 @@
 //!
 //! The two diagnostic layers stay distinguishable. An rl-level error (a
 //! duplicate case, a misplaced wildcard, a mutation through a `val` binding)
-//! is rlc's and is reported as `rl:`; a type error is TypeScript's and is
-//! reported as `ts(CODE):`. Both name a place in the file the user wrote.
+//! is rlc's and reads exactly as it does under `--check`; a type error is
+//! TypeScript's and is marked `ts(CODE):`. Both name a place in the file the
+//! user wrote, in rlc's own diagnostic form on stderr — stdout stays free
+//! for the modes that pipe (`docs/reference/errors.md`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -15,6 +18,10 @@ use std::process::ExitCode;
 use super::backend::{Resolution, TypeScriptBackend};
 use super::native::NativeBackend;
 use super::project;
+
+/// What counts as an rl source, and what counts as hand-written TypeScript.
+const RL_EXTENSIONS: &[&str] = &["rl"];
+const TS_EXTENSIONS: &[&str] = &["ts", "mts", "cts"];
 
 /// Runs the check. Returns failure when anything was reported, exactly like
 /// `--check`.
@@ -59,7 +66,7 @@ pub(crate) fn run(
             .to_path_buf(),
     };
     let requested: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
-    let files = match project_sources(&root, out_dir) {
+    let files = match project_sources(&root, out_dir, RL_EXTENSIONS) {
         Ok(all) if !all.is_empty() => all,
         Ok(_) => files,
         Err(e) => {
@@ -75,6 +82,14 @@ pub(crate) fn run(
         }
     };
 
+    // With a configuration the project's own `include` decides which
+    // hand-written files are in the program; without one, they have to be
+    // named or a `.ts` nothing imports is never checked.
+    let sources = match tsconfig {
+        Some(_) => Vec::new(),
+        None => project_sources(&root, out_dir, TS_EXTENSIONS).unwrap_or_default(),
+    };
+
     let pass = Pass {
         backend: &backend,
         requested: &requested,
@@ -83,6 +98,7 @@ pub(crate) fn run(
         root: &root,
         out_dir,
         emit,
+        sources: &sources,
     };
 
     if watch {
@@ -90,15 +106,16 @@ pub(crate) fn run(
     }
 
     match pass.once(&files) {
-        // Nothing could be written: an rl-level error left nothing to lower,
-        // so a caller keeping a previous result should keep it.
-        Ok(report) if report.blocked => ExitCode::FAILURE,
-        // Writing is what a sidecar run is for: the declarations are emitted
-        // even when the code has type errors (they are reported, and a stale
-        // sidecar would be worse than one built from erroring code), so the
-        // exit code reflects whether the files were written. A run that only
-        // checks fails on anything it reported.
-        Ok(report) if emit || report.reported == 0 => ExitCode::SUCCESS,
+        // The exit code answers "did the check pass?", in every mode — a
+        // `--types` run still *writes* its sidecars when the code has type
+        // errors (a stale sidecar is worse than one built from erroring
+        // code), but it says so.
+        //
+        // 2 is the third answer: the check could not run, so nothing was
+        // written. A caller holding a previous result — an editor showing
+        // the last good sidecar — keeps it on 2 and replaces it on 1.
+        Ok(report) if report.blocked => ExitCode::from(2),
+        Ok(report) if report.reported == 0 => ExitCode::SUCCESS,
         Ok(_) => ExitCode::FAILURE,
         Err(e) => {
             eprintln!("rlc: {e}");
@@ -118,14 +135,19 @@ struct Pass<'a> {
     root: &'a Path,
     out_dir: Option<&'a Path>,
     emit: bool,
+    /// The project's hand-written TypeScript, listed only when there is no
+    /// `tsconfig.json` to decide the program's files — see [`Query::sources`].
+    sources: &'a [PathBuf],
 }
 
 /// What one pass found.
 struct Report {
-    /// How many diagnostics were printed.
+    /// How many diagnostics were printed. Zero is the only passing result.
     reported: usize,
     /// Whether the pass could not run at all: an rl-level error left nothing
-    /// to lower, so nothing was asked and nothing was written.
+    /// to lower, so nothing was asked and nothing was written. Distinct from
+    /// "ran and reported", because a caller holding a previous result should
+    /// keep it in the first case and replace it in the second.
     blocked: bool,
 }
 
@@ -136,9 +158,9 @@ impl Pass<'_> {
         let lowered = match project::lower(files) {
             Ok(lowered) => lowered,
             Err((file, error)) => {
-                println!(
-                    "{}:{}:{}: rl: {}",
-                    file.display(),
+                eprintln!(
+                    "rlc: {}:{}:{}: {}",
+                    shown(&file),
                     error.line,
                     error.col,
                     error.message
@@ -150,7 +172,7 @@ impl Pass<'_> {
             }
         };
 
-        let (mut query, probes) = project::query(&lowered, self.root);
+        let (mut query, probes) = project::query(&lowered, self.root, self.sources);
         query.emit_declarations = self.emit;
         let answers = self.backend.ask(self.tsconfig, self.root, &query)?;
 
@@ -163,6 +185,7 @@ impl Pass<'_> {
                 self.requested,
                 self.inputs,
                 self.out_dir,
+                self.root,
             )
             .map_err(|e| e.to_string())?;
         }
@@ -176,9 +199,9 @@ impl Pass<'_> {
             let Some(file) = lowered.iter().find(|f| f.module_path == diagnostic.file) else {
                 // A hand-written file: TypeScript's own coordinates already name
                 // a file the user can open, so they are used as they are.
-                println!(
-                    "{}: ts({}): {}",
-                    diagnostic.file.display(),
+                eprintln!(
+                    "rlc: {}: ts({}): {}",
+                    shown(&diagnostic.file),
                     diagnostic.code,
                     diagnostic.message,
                 );
@@ -187,9 +210,9 @@ impl Pass<'_> {
             match project::diagnostic_source_offset(file, diagnostic.start) {
                 Some((offset, exact)) => {
                     let (line, col) = rlc::line_col(&file.source, offset);
-                    println!(
-                        "{}:{}:{}: ts({}): {}{}",
-                        file.source_path.display(),
+                    eprintln!(
+                        "rlc: {}:{}:{}: ts({}): {}{}",
+                        shown(&file.source_path),
                         line,
                         col,
                         diagnostic.code,
@@ -205,9 +228,9 @@ impl Pass<'_> {
                         },
                     );
                 }
-                None => println!(
-                    "{}: ts({}): {}",
-                    file.source_path.display(),
+                None => eprintln!(
+                    "rlc: {}: ts({}): {}",
+                    shown(&file.source_path),
                     diagnostic.code,
                     diagnostic.message,
                 ),
@@ -225,10 +248,10 @@ impl Pass<'_> {
             };
             let (line, col) = rlc::line_col(&file.source, anchor.offset);
             reported += 1;
-            println!(
-                "{}:{}:{}: rl: match is not exhaustive: missing {} \
+            eprintln!(
+                "rlc: {}:{}:{}: match on literal union is not exhaustive: missing {} \
                  (add the missing arms or a final `_` arm)",
-                file.source_path.display(),
+                shown(&file.source_path),
                 line,
                 col,
                 missing
@@ -250,10 +273,10 @@ impl Pass<'_> {
             };
             let (line, col) = rlc::line_col(&file.source, anchor.offset);
             reported += 1;
-            println!(
-                "{}:{}:{}: rl: match is not exhaustive: missing {} \
+            eprintln!(
+                "rlc: {}:{}:{}: match is not exhaustive: missing {} \
                  (add the missing arms or a final `_` arm)",
-                file.source_path.display(),
+                shown(&file.source_path),
                 line,
                 col,
                 missing
@@ -306,24 +329,60 @@ impl Pass<'_> {
             let (line, col) = rlc::line_col(&file.source, mutation.anchor.offset);
             reported += 1;
             match &mutation.method_name {
-                Some(method) => println!(
-                    "{}:{}:{}: rl: `{}` is a val binding: `{}` mutates it",
-                    file.source_path.display(),
+                // The built-in itself is not named: the compiler answered
+                // "this method is one of TypeScript's own", which is the
+                // verdict — not which interface declares it.
+                Some(method) => eprintln!(
+                    "rlc: {}:{}:{}: cannot call mutating method `{}` through val binding `{}` \
+                     (the binding is declared with `val`, so every access path from it is \
+                     read-only)",
+                    shown(&file.source_path),
                     line,
                     col,
-                    mutation.name,
                     method,
+                    mutation.name,
                 ),
-                None => println!(
-                    "{}:{}:{}: rl: cannot mutate through val binding `{}` \
+                None => eprintln!(
+                    "rlc: {}:{}:{}: cannot mutate through val binding `{}` \
                      (the binding is declared with `val`, so every access path \
                      from it is read-only)",
-                    file.source_path.display(),
+                    shown(&file.source_path),
                     line,
                     col,
                     mutation.name,
                 ),
             }
+        }
+
+        // The function boundary: a `val` binding may only be handed to a
+        // parameter that is itself `val`. Which binding the argument names
+        // is the same symbol question the mutations above ask.
+        for pass in &probes.passes {
+            let Some(root) = symbols.get(&pass.root) else {
+                continue;
+            };
+            if !val_symbols.contains(&root.id) {
+                continue;
+            }
+            let Some(file) = lowered
+                .iter()
+                .find(|f| f.source_path == pass.anchor.source_path)
+            else {
+                continue;
+            };
+            let (line, col) = rlc::line_col(&file.source, pass.anchor.offset);
+            reported += 1;
+            eprintln!(
+                "rlc: {}:{}:{}: cannot pass val binding `{}` to mutable parameter {} of \
+                 `{}` (the parameter is not declared with `val`, so the function may mutate \
+                 through it)",
+                shown(&file.source_path),
+                line,
+                col,
+                pass.name,
+                pass.param,
+                pass.callee,
+            );
         }
 
         Ok(Report {
@@ -341,7 +400,7 @@ fn watch_loop(pass: &Pass<'_>, root: &Path, out_dir: Option<&Path>) -> ExitCode 
         std::collections::HashMap::new();
     let mut first = true;
     loop {
-        let files = match project_sources(root, out_dir) {
+        let files = match project_sources(root, out_dir, RL_EXTENSIONS) {
             Ok(files) => files,
             // A file can disappear mid-edit; keep watching rather than
             // tearing the session down.
@@ -395,8 +454,21 @@ fn write_declarations(
     requested: &std::collections::HashSet<PathBuf>,
     inputs: &[String],
     out_dir: Option<&Path>,
+    root: &Path,
 ) -> std::io::Result<()> {
+    // The standard library's own declarations, so a consumer running plain
+    // tsc can point `@rl/std` at them (`paths`). It is a module of the
+    // project like any other, so the compiler emitted it too — it just has
+    // no `.rl` source to sit beside, and lands under the sidecar directory
+    // as `rl.d.ts`.
+    let std_declaration = root.join(project::STD_MODULE).with_extension("d.ts");
     for declaration in declarations {
+        if declaration.path == std_declaration {
+            let dir = out_dir.unwrap_or(root);
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(dir.join("rl.d.ts"), &declaration.text)?;
+            continue;
+        }
         // Only what was asked for is written; the rest of the project is in
         // the graph so that it resolves, not so that it is emitted.
         let Some(file) = lowered
@@ -436,6 +508,22 @@ fn write_declarations(
     Ok(())
 }
 
+/// A path as a diagnostic should name it: relative to the directory the
+/// command was run in, when it is under it.
+///
+/// The compiler resolves modules by absolute path, so that is what comes
+/// back — but `rlc: /tmp/build-42/src/a.rl:3:1: ...` is not what the other
+/// modes print, and not what an editor's problem matcher expects.
+fn shown(path: &Path) -> String {
+    let relative = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf));
+    relative
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
 /// A covered literal as it reads in a message.
 fn display_literal(literal: &rlc::Literal) -> String {
     match literal {
@@ -446,9 +534,14 @@ fn display_literal(literal: &rlc::Literal) -> String {
     }
 }
 
-/// Every `.rl` file of the project, as absolute paths. `node_modules`, dot
-/// directories and the output tree are skipped — nothing there is a source.
-fn project_sources(root: &Path, out_dir: Option<&Path>) -> std::io::Result<Vec<PathBuf>> {
+/// Every file of the project with one of `extensions`, as absolute paths.
+/// `node_modules`, dot directories and the output tree are skipped — nothing
+/// there is a source.
+fn project_sources(
+    root: &Path,
+    out_dir: Option<&Path>,
+    extensions: &[&str],
+) -> std::io::Result<Vec<PathBuf>> {
     let out = out_dir.and_then(|d| d.canonicalize().ok());
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -464,7 +557,11 @@ fn project_sources(root: &Path, out_dir: Option<&Path>) -> std::io::Result<Vec<P
             }
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "rl") {
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| extensions.contains(&e))
+            {
                 files.push(path.canonicalize()?);
             }
         }

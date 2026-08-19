@@ -394,12 +394,12 @@ TypeScript 타입 체커 안에 있고 rlc는 TypeScript 타입 시스템을 부
 않는다는 설계 계약을 지킵니다 (`docs/design/match-literal-patterns.md`).
 `_` 없는 리터럴 match는 위의 런타임 가드만 받고 그대로 컴파일됩니다.
 
-대신 **`rlc --types` 경로**가 이미 돌리는 TypeScript 체커에게 스크루티니 타입을
+대신 **`rlc --check-types`/`--types`**가 이미 돌리는 TypeScript 체커에게 스크루티니 타입을
 물어 검사합니다 ([§3.9](#39-리터럴-유니언-소진성---types)).
 
 ### 3.9 리터럴 유니언 소진성 (`--types`)
 
-`rlc --types`는 컴파일된 가상 모듈에 대해 TypeScript 프로그램을 만들므로,
+`rlc --check-types`/`--types`는 낮춘 모듈을 실제 TypeScript 프로젝트에 넣으므로,
 `_` 없는 리터럴 match마다 스크루티니의 타입을 `getTypeAtLocation`으로 조회할 수
 있습니다. 그 타입이 **유한한 리터럴 유니언으로 확정될 때만** 빠진 리터럴을
 보고합니다.
@@ -410,6 +410,12 @@ rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
 ```
 
 진단 위치는 생성된 `.ts`가 아니라 원본 `.rl`의 `match` 키워드입니다.
+
+같은 경로가 **enum 소진성**도 다시 답합니다 — match 위치에서 좁혀진 타입을
+쓰므로 앞선 가드가 제거한 케이스는 요구하지 않고, 다른 모듈의 enum도 선언을
+모아 오지 않아도 됩니다. 대신 답이 *타입*에서 오므로 enum 이름을 댈 수 없어
+메시지가 `match is not exhaustive: missing ...`입니다 (기본 경로는 자기 선언
+표에서 답하므로 이름을 댑니다 — [`errors.md`](./errors.md)).
 
 | 스크루티니 타입 | 검사 |
 |-----------------|------|
@@ -695,7 +701,7 @@ const a = (v: number) => v |> Result.mapP((n) => n);
 ```
 
 `unknown`은 증상이고, 진짜 문제는 head입니다 — head를 고칩니다
-(`Result.Ok(v) |> ...`). 이 에러는 `rlc --types`와 에디터 양쪽에서
+(`Result.Ok(v) |> ...`). 이 에러는 `rlc --check-types`와 에디터 양쪽에서
 원본 위치로 보고됩니다 ([`errors.md`](./errors.md#타입-에러-tsc)).
 
 ### 7.4 구조 규칙
@@ -1070,7 +1076,7 @@ state.user.profile.name = "Lee";  // 에러 — 경로의 루트가 val
 `x`가 무엇인가에 달렸고, 그건 TypeScript 타입에 대한 사실입니다. rlc는 이름으로
 추측하지 않습니다 — `set`/`add`/`push`라는 이름의 사용자 정의 메서드는 아무것도
 바꾸지 않을 수 있기 때문입니다. built-in에 대한 변경 메서드 호출은 타입 정보가
-있는 `rlc --types`에서 검사합니다 ([§10.4](#104-built-in-변경-메서드---types)).
+있는 `rlc --check-types`/`--types`에서 검사합니다 ([§10.4](#104-built-in-변경-메서드---types)).
 
 바인딩 자체를 다른 값으로 바꾸는 `x = v`는 `val`의 검사 대상이 **아닙니다**
 (`const`면 tsc가, `let`이면 아무도 막지 않습니다 — [§10.2](#102-의미)의 표).
@@ -1078,16 +1084,19 @@ state.user.profile.name = "Lee";  // 에러 — 경로의 루트가 val
 
 ### 10.4 built-in 변경 메서드 (`--types`)
 
-`rlc --types`는 컴파일된 가상 모듈로 TypeScript 프로그램을 만들므로, `val` 경로로
-호출된 메서드의 **심볼**을 조회할 수 있습니다. 그 심볼이 TypeScript 자신의
-lib에 선언돼 있고, 선언을 감싼 인터페이스가 아래 표의 built-in이며, 메서드가 그
-built-in의 변경 메서드일 때만 에러입니다.
+`rlc --check-types`/`--types`는 낮춘 모듈을 실제 TypeScript 프로젝트에 넣으므로,
+`val` 경로로 호출된 메서드의 **심볼**을 조회할 수 있습니다. 이름이 아래 표에
+있고 그 심볼의 선언이 **전부 TypeScript 자신의 lib**일 때만 에러입니다 —
+이름은 질문을 고르는 필터이고, 판정은 컴파일러가 합니다.
 
 ```
-rlc: src/main.rl:2:1: cannot call mutating method `set` of built-in `Map` through
-     val binding `map` (the binding is declared with `val`, so every access path
-     from it is read-only)
+rlc: src/main.rl:2:1: cannot call mutating method `set` through val binding `map`
+     (the binding is declared with `val`, so every access path from it is
+     read-only)
 ```
+
+메시지는 built-in의 *이름*을 대지 않습니다: 컴파일러가 답한 것은 "이 메서드는
+TypeScript 자신의 것"이고, 어느 인터페이스가 선언했는지가 아닙니다.
 
 | built-in | 변경 메서드 |
 |----------|-------------|
@@ -1186,7 +1195,7 @@ rlc가 추적할 수 있는 것만 검사합니다. 아래는 **의도적으로*
 | 항목 | 이유 |
 |------|------|
 | 임의의 외부 함수가 내부에서 하는 변경 | 이펙트 시스템·전역 이펙트 추론을 만들지 않습니다. 시그니처를 알 수 있는 같은 파일 함수만 [§10.5](#105-함수-경계)로 검사합니다 |
-| 기본 경로(`rlc`/`--check`)의 메서드 호출 | 수신자의 타입 없이는 변경 여부를 알 수 없습니다. 이름으로 추측하지 않고 `--types`에서만 판정합니다 ([§10.4](#104-built-in-변경-메서드---types)) |
+| 기본 경로(`rlc`/`--check`)의 메서드 호출 | 수신자의 타입 없이는 변경 여부를 알 수 없습니다. 이름으로 추측하지 않고 `--check-types`/`--types`에서만 판정합니다 ([§10.4](#104-built-in-변경-메서드---types)) |
 | built-in이 아닌 타입의 메서드 | 메서드 본문을 분석하지 않습니다. 사용자 정의 API가 내부에서 무엇을 바꾸는지는 검사 대상이 아닙니다 |
 | 메서드 호출로 넘기는 인자(`obj.m(x)`) | 메서드의 매개변수 선언을 이름으로 해석하지 않습니다 |
 | 별칭을 통한 우회 (`const alias = valBinding; alias.a = 1`) | 소유권·borrow checker를 만들지 않습니다. `val`은 바인딩 하나의 권한 제한입니다 |
@@ -1216,7 +1225,7 @@ rlc가 추적할 수 있는 것만 검사합니다. 아래는 **의도적으로*
 | `flow` | 첫 스텝이 입력 타입을 정합니다 — 제네릭 함수·커링 콤비네이터를 첫 스텝으로 쓰면 타입 인자를 명시해야 합니다. 첫 스텝은 메서드 스텝 불가. 입력 타입 주석 문법(`flow<T>`)은 없습니다 ([§7.5](#75-함수-합성-flow)) |
 | `result` 블록 | 바인딩이 하나 이상 필요하고 마지막은 세미콜론 없는 값 식이어야 합니다. 바인딩은 `Result` 전용(`Option`·`Promise` do-표기법 없음), `<-`는 블록 안 선언에서만. `<-` 뒤 식의 최상위 `>`는 제네릭 타입 인자와 구분되지 않아 괄호가 필요합니다. 블록 안의 `return`은 블록에서 빠져나가며 `try`·let-else는 쓸 수 없습니다 ([§8.4](#84-구조-규칙)) |
 | async 감지 | 토큰 단위 — 중첩 함수 안의 `await`도 async 방출을 유발하므로, 그런 match를 async가 아닌 곳에 두면 생성물이 문법 에러가 됩니다 |
-| `val` | 같은 줄 규칙(`val const`·`val <바인딩>`)과 접근 경로 루트가 식별자인 경우만. 메서드 호출은 기본 경로에서 판정하지 않습니다 — built-in 변경 메서드는 `--types`에서만 ([§10.4](#104-built-in-변경-메서드---types)). 외부 함수의 변경, 별칭 우회는 검사하지 않고 match 패턴 바인딩에는 쓸 수 없습니다 ([§10.8](#108-검사-범위)) |
+| `val` | 같은 줄 규칙(`val const`·`val <바인딩>`)과 접근 경로 루트가 식별자인 경우만. 메서드 호출은 기본 경로에서 판정하지 않습니다 — built-in 변경 메서드는 `--check-types`/`--types`에서만 ([§10.4](#104-built-in-변경-메서드---types)). 외부 함수의 변경, 별칭 우회는 검사하지 않고 match 패턴 바인딩에는 쓸 수 없습니다 ([§10.8](#108-검사-범위)) |
 | `.tsx` | 미지원 (제네릭 화살표 함수 출력이 JSX와 충돌) |
 | 식별자 | rl 구문 안에서는 ASCII만 |
 | `--no-verify` | 필드 타입 오류가 컴파일 시점에 잡히지 않고 tsc 단계에서 드러납니다 |

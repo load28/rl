@@ -52,8 +52,10 @@ export async function refreshSidecar(
     return { kind: "skipped", reason: "no sidecar to refresh" };
   }
 
-  const args = ["--native-sidecar", rlPath];
-  if (outDir !== undefined) args.push("-o", outDir);
+  // `-o` is always passed: on its own `--types` writes to `.rl-types`, the
+  // directory a project opts into, and the editor's sidecar goes wherever
+  // the settings say — beside the source by default.
+  const args = ["--types", rlPath, "-o", outDir ?? path.dirname(rlPath)];
   return run(compiler, args, [declarationTarget, `${base}.d.ts.map`]);
 }
 
@@ -66,9 +68,17 @@ function exists(file: string): boolean {
 }
 
 /**
- * One `rlc` run. Type errors in the saved file do not fail it — the sidecar
- * is written either way, and a stale one would be worse than one built from
- * code that does not check yet.
+ * One `rlc` run.
+ *
+ * The exit code carries three answers, and the middle one is the whole
+ * point: a saved file mid-edit usually has type errors, and the sidecar is
+ * written anyway (a stale one is worse than one built from code that does
+ * not check yet).
+ *
+ * - `0` — checked clean, written.
+ * - `1` — something was reported, and written all the same.
+ * - `2` — the check could not run (an rl-level error left nothing to
+ *   lower), so nothing was written and the last good sidecar stands.
  */
 function run(compiler: string, args: string[], files: string[]): Promise<SidecarResult> {
   return new Promise((resolve) => {
@@ -77,11 +87,12 @@ function run(compiler: string, args: string[], files: string[]): Promise<Sidecar
       args,
       { timeout: 30000, maxBuffer: 8 * 1024 * 1024 },
       (err, _stdout, stderr) => {
-        if (err) {
-          resolve({ kind: "failed", detail: stderr.trim() || String(err) });
+        const code = err === null ? 0 : ((err as { code?: number }).code ?? 1);
+        if (code === 0 || code === 1) {
+          resolve({ kind: "written", files });
           return;
         }
-        resolve({ kind: "written", files });
+        resolve({ kind: "failed", detail: stderr.trim() || String(err) });
       },
     );
   });

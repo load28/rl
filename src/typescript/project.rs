@@ -110,8 +110,11 @@ pub(crate) fn declaration_path_of(file: &Lowered) -> PathBuf {
 /// Every question is anchored at a byte the compiler can see: a probe whose
 /// anchor did not survive lowering as verbatim text (a nested rl construct)
 /// is dropped rather than asked about at an approximate position.
-pub(crate) fn query(lowered: &[Lowered], root: &Path) -> (Query, Probes) {
-    let mut query = Query::default();
+pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Query, Probes) {
+    let mut query = Query {
+        sources: sources.to_vec(),
+        ..Query::default()
+    };
     let mut probes = Probes::default();
 
     if lowered.iter().any(|f| rlc::imports_std(&f.source)) {
@@ -137,7 +140,7 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path) -> (Query, Probes) {
             {
                 continue;
             }
-            let Some(position) = anchor(&file.emit, probe.scrutinee) else {
+            let Some(position) = scrutinee_position(&file.emit, probe.offset) else {
                 continue;
             };
             query.literals.push(LiteralQuery {
@@ -152,7 +155,7 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path) -> (Query, Probes) {
         }
 
         for probe in rlc::tag_matches(&file.source) {
-            let Some(position) = anchor(&file.emit, probe.scrutinee) else {
+            let Some(position) = scrutinee_position(&file.emit, probe.offset) else {
                 continue;
             };
             query.tags.push(TagQuery {
@@ -214,6 +217,25 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path) -> (Query, Probes) {
                 method_name: mutation.method.map(|(name, _)| name),
             });
         }
+        for pass in val.passes {
+            let Some(position) = anchor(&file.emit, pass.offset) else {
+                continue;
+            };
+            query.symbols.push(SymbolQuery {
+                module: file.module_path.clone(),
+                position,
+            });
+            probes.passes.push(PassAnchor {
+                anchor: SourceAnchor {
+                    source_path: file.source_path.clone(),
+                    offset: pass.offset,
+                },
+                name: pass.name,
+                param: pass.param,
+                callee: pass.callee,
+                root: query.symbols.len() - 1,
+            });
+        }
     }
     (query, probes)
 }
@@ -243,6 +265,22 @@ pub(crate) struct MutationAnchor {
     pub method_name: Option<String>,
 }
 
+/// One argument handed to a parameter its callee did not declare `val`,
+/// with the symbol question that decides whether that is a violation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PassAnchor {
+    /// Where the diagnostic is reported: the argument.
+    pub anchor: SourceAnchor,
+    /// The argument's root identifier, for the message.
+    pub name: String,
+    /// The parameter as the message names it.
+    pub param: String,
+    /// The called function's name.
+    pub callee: String,
+    /// Index into [`Query::symbols`] for the root identifier.
+    pub root: usize,
+}
+
 /// The `.rl`-side halves of a [`Query`], parallel to its own vectors.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Probes {
@@ -251,6 +289,7 @@ pub(crate) struct Probes {
     /// Indices into [`Query::symbols`] for every `val` binding's identifier.
     pub val_bindings: Vec<usize>,
     pub mutations: Vec<MutationAnchor>,
+    pub passes: Vec<PassAnchor>,
 }
 
 /// The UTF-16 offset in the emitted module a source byte landed at, or
@@ -258,6 +297,23 @@ pub(crate) struct Probes {
 fn anchor(emit: &MappedEmit, source_byte: usize) -> Option<usize> {
     let out = mapper::to_output(&emit.mappings, source_byte)?;
     Some(mapper::to_utf16(&emit.code, out))
+}
+
+/// Where to ask about the type a `match` is over: the temporary the emitted
+/// code binds the scrutinee to, found by the `match` keyword's own offset.
+///
+/// Not the scrutinee's text. `getTypeAtPosition` answers about the node at a
+/// position, and for `match (getShape())` the node at the scrutinee's first
+/// byte is `getShape` — a function, whose type has no `kind` property and no
+/// literal constituents, so every exhaustiveness question came back silent.
+/// The temporary is the scrutinee's *value*, and the type the checker gives
+/// it is the narrowed one at the match. See [`rlc::ScrutineeTemp`].
+fn scrutinee_position(emit: &MappedEmit, keyword_offset: usize) -> Option<usize> {
+    let temp = emit
+        .scrutinee_temps
+        .iter()
+        .find(|temp| temp.src == keyword_offset)?;
+    Some(mapper::to_utf16(&emit.code, temp.out))
 }
 
 /// Where a TypeScript diagnostic belongs in the `.rl` source, and whether

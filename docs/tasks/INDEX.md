@@ -82,7 +82,7 @@
 | TASK-072 | 에디터에 타입 기반 `val` 진단 노출 | 대기 | — | — | [TASK-072](./TASK-072-val-typed-diagnostics-in-editor.md) |
 | TASK-073 | TypeScript 네이티브 백엔드 — 단일 프로젝트 그래프 | 진행 중 | 2026-08-19 | — | [TASK-073](./TASK-073-typescript-native-backend.md) |
 | TASK-074 | 에디터를 네이티브 백엔드로 — 사이드카 규약 통일 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-074](./TASK-074-editor-native-backend.md) |
-| TASK-075 | `types_host.mjs` 제거 — 타입 경로 단일화 | 대기 | — | — | [TASK-075](./TASK-075-retire-types-host.md) |
+| TASK-075 | `types_host.mjs` 제거 — 타입 경로 단일화 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-075](./TASK-075-retire-types-host.md) |
 | TASK-076 | 증분 검사 — 서버를 살려 두고 스냅샷만 갱신 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-076](./TASK-076-incremental-native-check.md) |
 | TASK-077 | 언어 서비스를 네이티브 백엔드로 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-077](./TASK-077-language-service-native.md) |
 

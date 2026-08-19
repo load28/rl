@@ -1,4 +1,4 @@
-//! The TypeScript 7 native backend, end to end (`rlc --native-check`).
+//! The TypeScript 7 backend, end to end (`rlc --check-types` / `--types`).
 //!
 //! These tests need a **built** typescript-go tree — the `tsgo` binary and
 //! the JS API client from the same build (see
@@ -117,15 +117,22 @@ fn run(dir: &Path, toolchain: &Toolchain, args: &[&str]) -> std::process::Output
     command.output().expect("rlc runs")
 }
 
-/// Runs `rlc --native-check src` in `dir`, returning its stdout.
+/// Runs `rlc --check-types src` in `dir`, returning its diagnostics.
 fn check(dir: &Path, toolchain: &Toolchain) -> String {
-    let out = run(dir, toolchain, &["--native-check", "src"]);
+    let out = run(dir, toolchain, &["--check-types", "src"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("no TypeScript compiler found"),
         "the toolchain guard passed but rlc disagreed: {stderr}"
     );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    // Diagnostics are diagnostics: stderr, in rlc's own form. stdout is
+    // reserved for the modes that pipe.
+    assert!(
+        out.stdout.is_empty(),
+        "a checking mode wrote to stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    stderr.into_owned()
 }
 
 #[test]
@@ -141,7 +148,7 @@ fn watching_re_checks_against_the_compiler_it_already_started() {
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_rlc"));
     command
-        .args(["--native-check", "src", "-w"])
+        .args(["--check-types", "src", "-w"])
         .current_dir(&dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -168,7 +175,7 @@ fn watching_re_checks_against_the_compiler_it_already_started() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("missing \"Blue\""),
+        stderr.contains("missing \"Blue\""),
         "the second pass saw the edit: {stdout}{stderr}"
     );
     assert_eq!(
@@ -230,12 +237,7 @@ fn naming_one_file_still_compiles_against_the_whole_project() {
     let out = run(
         &dir,
         &root,
-        &[
-            "--native-sidecar",
-            "src/parse.rl",
-            "-o",
-            out_dir.to_str().unwrap(),
-        ],
+        &["--types", "src/parse.rl", "-o", out_dir.to_str().unwrap()],
     );
     // `./token.rl` was never named, but it is part of the project, so it is
     // part of the graph — otherwise this would be TS2307.
@@ -269,7 +271,7 @@ fn a_declaration_carries_a_map_back_to_the_rl_source() {
     let out = run(
         &dir,
         &root,
-        &["--native-sidecar", "src", "-o", out_dir.to_str().unwrap()],
+        &["--types", "src", "-o", out_dir.to_str().unwrap()],
     );
     assert!(
         out.status.success(),
@@ -305,7 +307,7 @@ fn declarations_are_emitted_by_the_compiler_itself() {
     let out = run(
         &dir,
         &root,
-        &["--native-sidecar", "src", "-o", out_dir.to_str().unwrap()],
+        &["--types", "src", "-o", out_dir.to_str().unwrap()],
     );
     assert!(
         out.status.success(),
@@ -341,7 +343,7 @@ fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
     let out = run(
         &dir,
         &root,
-        &["--native-sidecar", "src", "-o", out_dir.to_str().unwrap()],
+        &["--types", "src", "-o", out_dir.to_str().unwrap()],
     );
     assert!(
         out.status.success(),
@@ -459,6 +461,53 @@ fn enum_exhaustiveness_uses_the_narrowed_type_at_the_match() {
 }
 
 #[test]
+fn val_holds_on_a_parameter_and_across_a_function_boundary() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/pass.rl",
+        "interface User { name: string; tags: string[] }\n         function update(user: User) { user.name = \"Lee\"; }\n         export function process(val user: User) {\n         \x20 user.name = \"Lee\";\n         \x20 user.tags.push(\"x\");\n         \x20 update(user);\n         }\n",
+    )]);
+    // `val` has two syntactic homes and three rules; a mode that checks
+    // only declarations, or only mutation paths, silently passes code the
+    // rl-level check rejects.
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("cannot mutate through val binding `user`"),
+        "a val parameter is a val binding: {out}"
+    );
+    assert!(
+        out.contains("mutating method `push` through val binding `user`"),
+        "and its access paths are read-only too: {out}"
+    );
+    assert!(
+        out.contains("cannot pass val binding `user` to mutable parameter `user` of `update`"),
+        "and it cannot be handed to a parameter that is not `val`: {out}"
+    );
+}
+
+#[test]
+fn exhaustiveness_holds_when_the_scrutinee_is_not_a_name() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/shape.rl",
+        "export enum Shape { Circle(radius: number), Rect(w: number, h: number) }\n         declare function getShape(): Shape;\n         type State = \"idle\" | \"loading\" | \"done\";\n         declare function getState(): State;\n         export const area = match (getShape()) { Circle(radius) => radius };\n         export const label = match (getState()) { \"idle\" => 0, \"loading\" => 1 };\n",
+    )]);
+    // The question is asked about the temporary the match binds, not about
+    // the scrutinee's text: at `getShape` the checker answers "a function",
+    // which has no cases and no literals, and both questions came back
+    // silent when that was where they were asked.
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("missing \"Rect\""),
+        "a call scrutinee still has an enum type: {out}"
+    );
+    assert!(
+        out.contains("missing \"done\""),
+        "a call scrutinee still has a literal union type: {out}"
+    );
+}
+
+#[test]
 fn an_enum_from_another_module_needs_no_declaration_collecting() {
     let root = require_tsgo!();
     let dir = project(&[
@@ -502,11 +551,11 @@ fn val_mutation_is_decided_by_the_method_the_call_resolves_to() {
     ]);
     let out = check(&dir, &root);
     assert!(
-        out.contains("`map` is a val binding"),
+        out.contains("mutating method `set` through val binding `map`"),
         "Map#set is declared in TypeScript's own lib: {out}"
     );
     assert!(
-        !out.contains("`store` is a val binding"),
+        !out.contains("val binding `store`"),
         "Store#set only shares the name: {out}"
     );
 }
