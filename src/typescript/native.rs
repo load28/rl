@@ -183,7 +183,7 @@ fn job_json(
                 "covered": t.covered,
             }))
             .collect::<Vec<_>>(),
-        "valChecks": query.vals.iter()
+        "symbolChecks": query.symbols.iter()
             .map(|v| json!({ "module": v.module, "start": v.position }))
             .collect::<Vec<_>>(),
     })
@@ -241,10 +241,11 @@ fn parse_answers(stdout: &str) -> Result<Answers, String> {
                 .unwrap_or_default(),
         });
     }
-    for v in array(&value, "valMutations") {
-        answers.val_resolutions.push(ValResolution {
+    for v in array(&value, "symbols") {
+        answers.resolutions.push(Resolution {
             index: v["index"].as_u64().unwrap_or_default() as usize,
-            method: v["receiver"].as_str().unwrap_or_default().to_string(),
+            id: v["id"].as_i64().unwrap_or_default(),
+            name: v["name"].as_str().unwrap_or_default().to_string(),
             declared_in: v["declaredIn"]
                 .as_array()
                 .map(|a| {
@@ -277,8 +278,8 @@ fn json_literal(value: &serde_json::Value) -> Option<rlc::Literal> {
 /// A method declared there — and only there — is a built-in.
 pub(crate) const BUNDLED_LIB_PREFIX: &str = "bundled:///libs/";
 
-/// Whether a resolved method is declared in TypeScript's own lib files.
-pub(crate) fn is_builtin(resolution: &ValResolution) -> bool {
+/// Whether a resolved symbol is declared in TypeScript's own lib files.
+pub(crate) fn is_builtin(resolution: &Resolution) -> bool {
     !resolution.declared_in.is_empty()
         && resolution
             .declared_in

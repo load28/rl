@@ -18,12 +18,12 @@
  *     modules: [{ path, text }],          // lowered .rl → virtual .ts
  *     literalChecks: [{ module, start, covered: [...] }],
  *     tagChecks: [{ module, start, covered: [...] }],
- *     valChecks: [{ module, start }] }
+ *     symbolChecks: [{ module, start }] }
  *
  *   { diagnostics: [{ file, start, end, code, message }],
  *     literalMissing: [{ index, missing }],
  *     tagMissing: [{ index, missing }],
- *     valMutations: [{ index, receiver, declaredIn }] }
+ *     symbols: [{ index, id, name, declaredIn }] }
  *
  * `start`/`end` are UTF-16 code-unit offsets — TypeScript's own coordinate
  * space. Mapping them back to `.rl` byte positions is rlc's job (`mapper`),
@@ -124,7 +124,7 @@ async function main() {
     fs: layeredFileSystem(job.modules ?? []),
   });
 
-  const out = { diagnostics: [], literalMissing: [], tagMissing: [], valMutations: [] };
+  const out = { diagnostics: [], literalMissing: [], tagMissing: [], symbols: [] };
   try {
     const snapshot = api.updateSnapshot({ openProjects: [job.tsconfig] });
     const project = snapshot.getProject(job.tsconfig);
@@ -162,15 +162,18 @@ async function main() {
       if (missing) out.tagMissing.push({ index, missing });
     });
 
-    // `val` mutation: what the method resolves to decides, never its name.
-    (job.valChecks ?? []).forEach((check, index) => {
+    // Resolution: the primitive rl's `val` is built from. Which binding an
+    // identifier names, and whether a method is a built-in, are both "what
+    // symbol is this?" — asked here, interpreted by rl.
+    (job.symbolChecks ?? []).forEach((check, index) => {
       const symbol = checker.getSymbolAtPosition(check.module, check.start);
       if (!symbol) return; // `any`, unresolved — never a verdict
-      const declaredIn = (symbol.declarations ?? [])
-        .map((d) => String(d.path ?? ""))
-        .filter(Boolean);
-      if (declaredIn.length === 0) return;
-      out.valMutations.push({ index, receiver: symbol.name, declaredIn });
+      out.symbols.push({
+        index,
+        id: symbol.id,
+        name: symbol.name,
+        declaredIn: (symbol.declarations ?? []).map((d) => String(d.path ?? "")).filter(Boolean),
+      });
     });
   } finally {
     api.close();

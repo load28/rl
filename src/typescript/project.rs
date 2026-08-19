@@ -55,9 +55,9 @@ pub(crate) fn lower(files: &[PathBuf]) -> Result<Vec<Lowered>, (PathBuf, rlc::Co
         })?;
         let options = Options {
             filename: Some(file.to_str().unwrap_or("<input>")),
-            // Exhaustiveness is the checker's answer here, from the narrowed
-            // type at each match — see `Options::defer_exhaustiveness`.
-            defer_exhaustiveness: true,
+            // Exhaustiveness and `val`'s pairing are the checker's answers
+            // here — see `Options::defer_to_checker`.
+            defer_to_checker: true,
             // The lowered module sits where the source did, so a relative
             // `.rl` specifier names the module beside it: `./x.rl` → `./x.ts`.
             rewrite_imports: rlc::ImportRewrite::Ts,
@@ -128,21 +128,52 @@ pub(crate) fn query(lowered: &[Lowered]) -> (Query, Probes) {
             });
         }
 
-        for call in rlc::val_method_calls(&file.source) {
-            let Some(position) = anchor(&file.emit, call.name) else {
+        // `val`: rlc finds the bindings and the mutations; which mutation
+        // belongs to which binding is symbol identity, which is the
+        // checker's to answer.
+        let val = rlc::val_probes(&file.source);
+        for binding in val.bindings {
+            let Some(position) = anchor(&file.emit, binding.ident) else {
                 continue;
             };
-            query.vals.push(ValQuery {
+            query.symbols.push(SymbolQuery {
                 module: file.module_path.clone(),
                 position,
             });
-            probes.vals.push(ValAnchor {
+            probes.val_bindings.push(query.symbols.len() - 1);
+        }
+        for mutation in val.mutations {
+            let Some(root) = anchor(&file.emit, mutation.root) else {
+                continue;
+            };
+            // A method call needs a second question: is the method one of
+            // TypeScript's own?
+            let method = match &mutation.method {
+                Some((_, at)) => match anchor(&file.emit, *at) {
+                    Some(position) => {
+                        query.symbols.push(SymbolQuery {
+                            module: file.module_path.clone(),
+                            position,
+                        });
+                        Some(query.symbols.len() - 1)
+                    }
+                    None => continue,
+                },
+                None => None,
+            };
+            query.symbols.push(SymbolQuery {
+                module: file.module_path.clone(),
+                position: root,
+            });
+            probes.mutations.push(MutationAnchor {
                 anchor: SourceAnchor {
                     source_path: file.source_path.clone(),
-                    offset: call.offset,
+                    offset: mutation.root,
                 },
-                binding: call.binding,
-                method: call.method,
+                name: mutation.name,
+                root: query.symbols.len() - 1,
+                method,
+                method_name: mutation.method.map(|(name, _)| name),
             });
         }
     }
@@ -156,12 +187,22 @@ pub(crate) struct SourceAnchor {
     pub offset: usize,
 }
 
-/// The `.rl`-side half of a `val` question, kept for the message.
+/// One mutation, with the symbol questions that decide whether it is one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValAnchor {
+pub(crate) struct MutationAnchor {
+    /// Where the diagnostic is reported.
     pub anchor: SourceAnchor,
-    pub binding: String,
-    pub method: String,
+    /// The root identifier's text, for the message.
+    pub name: String,
+    /// Index into [`Query::symbols`] for the root identifier: which binding
+    /// this path is rooted at.
+    pub root: usize,
+    /// Index into [`Query::symbols`] for the method name, when the mutation
+    /// is a method call. `None` for an assignment, an increment or a
+    /// `delete`, which mutate on syntax alone.
+    pub method: Option<usize>,
+    /// The method's name, for the message.
+    pub method_name: Option<String>,
 }
 
 /// The `.rl`-side halves of a [`Query`], parallel to its own vectors.
@@ -169,7 +210,9 @@ pub(crate) struct ValAnchor {
 pub(crate) struct Probes {
     pub literals: Vec<SourceAnchor>,
     pub tags: Vec<SourceAnchor>,
-    pub vals: Vec<ValAnchor>,
+    /// Indices into [`Query::symbols`] for every `val` binding's identifier.
+    pub val_bindings: Vec<usize>,
+    pub mutations: Vec<MutationAnchor>,
 }
 
 /// The UTF-16 offset in the emitted module a source byte landed at, or

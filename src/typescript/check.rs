@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use super::backend::TypeScriptBackend;
+use super::backend::{Resolution, TypeScriptBackend};
 use super::native::{NativeBackend, is_builtin};
 use super::project;
 
@@ -49,7 +49,13 @@ pub(crate) fn run(inputs: &[String], project_arg: Option<&Path>, node: Option<&P
     let lowered = match project::lower(&files) {
         Ok(lowered) => lowered,
         Err((file, error)) => {
-            eprintln!("{}: {}", file.display(), error.message);
+            eprintln!(
+                "{}:{}:{}: rl: {}",
+                file.display(),
+                error.line,
+                error.col,
+                error.message
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -153,32 +159,63 @@ pub(crate) fn run(inputs: &[String], project_arg: Option<&Path>, node: Option<&P
         );
     }
 
-    // `val`: a call mutates only when the method it resolves to is declared
-    // in TypeScript's own lib files. A user-defined method that shares a
-    // name — and anything the checker could not resolve — is not a mutation.
-    for resolution in &answers.val_resolutions {
-        if !is_builtin(resolution) {
-            continue;
-        }
-        let Some(anchor) = probes.vals.get(resolution.index) else {
-            continue;
+    // `val`: two resolutions decide, and rlc guesses neither of them.
+    //
+    // 1. Which binding a path is rooted at — the root identifier and the
+    //    binding's declaration are the same binding when they are the same
+    //    symbol. Shadowing, redeclaration and destructuring come out right
+    //    because this is TypeScript's own resolution, not a model of it.
+    // 2. For a method call, whether the method is a built-in — declared in
+    //    TypeScript's own lib files. A user-defined method that shares the
+    //    name is not, and anything unresolved is left alone.
+    let symbols: std::collections::HashMap<usize, &Resolution> =
+        answers.resolutions.iter().map(|r| (r.index, r)).collect();
+    let val_symbols: std::collections::HashSet<i64> = probes
+        .val_bindings
+        .iter()
+        .filter_map(|i| symbols.get(i).map(|r| r.id))
+        .collect();
+
+    for mutation in &probes.mutations {
+        let Some(root) = symbols.get(&mutation.root) else {
+            continue; // unresolved — never a verdict
         };
+        if !val_symbols.contains(&root.id) {
+            continue; // not this binding, whatever it is called
+        }
+        if let Some(method) = mutation.method {
+            match symbols.get(&method) {
+                Some(resolution) if is_builtin(resolution) => {}
+                // A user-defined method, or one the checker could not
+                // resolve: rl says nothing.
+                _ => continue,
+            }
+        }
         let Some(file) = lowered
             .iter()
-            .find(|f| f.source_path == anchor.anchor.source_path)
+            .find(|f| f.source_path == mutation.anchor.source_path)
         else {
             continue;
         };
-        let (line, col) = rlc::line_col(&file.source, anchor.anchor.offset);
+        let (line, col) = rlc::line_col(&file.source, mutation.anchor.offset);
         reported += 1;
-        println!(
-            "{}:{}:{}: rl: `{}` is a val binding: `{}` mutates it",
-            file.source_path.display(),
-            line,
-            col,
-            anchor.binding,
-            anchor.method,
-        );
+        match &mutation.method_name {
+            Some(method) => println!(
+                "{}:{}:{}: rl: `{}` is a val binding: `{}` mutates it",
+                file.source_path.display(),
+                line,
+                col,
+                mutation.name,
+                method,
+            ),
+            None => println!(
+                "{}:{}:{}: rl: cannot mutate through val binding `{}`",
+                file.source_path.display(),
+                line,
+                col,
+                mutation.name,
+            ),
+        }
     }
 
     if reported > 0 {

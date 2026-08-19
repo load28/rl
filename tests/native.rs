@@ -220,6 +220,58 @@ fn val_mutation_is_decided_by_the_method_the_call_resolves_to() {
 }
 
 #[test]
+fn a_shadowing_binding_is_a_different_binding() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/shadow.rl",
+        "export function go(): void {\n\
+         \x20 val const items = new Map<string, number>();\n\
+         \x20 {\n\
+         \x20   const items = new Map<string, number>();\n\
+         \x20   items.set(\"inner\", 1);\n\
+         \x20 }\n\
+         }\n",
+    )]);
+    assert_eq!(
+        check(&dir, &root),
+        "",
+        "the inner `items` is an ordinary binding that shares a name"
+    );
+}
+
+#[test]
+fn a_direct_mutation_through_a_val_binding_is_reported() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/direct.rl",
+        "export function go(): void {\n\
+         \x20 val const user = { name: \"a\", count: 0 };\n\
+         \x20 user.name = \"b\";\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("cannot mutate through val binding `user`"),
+        "an assignment mutates on syntax alone: {out}"
+    );
+}
+
+#[test]
+fn a_mutation_through_an_unmarked_binding_is_left_alone() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/plain.rl",
+        "export function go(): void {\n\
+         \x20 const items: number[] = [];\n\
+         \x20 items.push(1);\n\
+         \x20 const user = { name: \"a\" };\n\
+         \x20 user.name = \"b\";\n\
+         }\n",
+    )]);
+    assert_eq!(check(&dir, &root), "");
+}
+
+#[test]
 fn an_any_receiver_is_never_called_a_mutation() {
     let root = require_tsgo!();
     let dir = project(&[(

@@ -67,7 +67,7 @@ pub use error::CompileError;
 pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};
 pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
-pub use val::ValMethodCall;
+pub use val::{Mutation, ValBinding, ValMethodCall, ValProbes};
 
 use error::RlError;
 
@@ -412,6 +412,30 @@ pub fn val_method_calls(source: &str) -> Vec<ValMethodCall> {
     val::method_calls(source, &tokens)
 }
 
+/// Collects a file's `val` bindings and its mutations, **unpaired** — the
+/// delegated form of `val`'s analysis.
+///
+/// [`compile`] pairs the two itself, with a lexical scope model of its own.
+/// A caller that has a TypeScript checker does better: the binding a
+/// mutation belongs to is the one whose declaration shares its *symbol*, and
+/// symbol identity is not an approximation of scope — it is scope, as
+/// TypeScript resolved it. `rlc --native-check` pairs them that way; see
+/// `docs/reference/language.md` §10 for what `val` means either way.
+///
+/// ```
+/// let probes = rlc::val_probes("val const xs = [];\nxs.push(1);\nys.push(2);\n");
+/// assert_eq!(probes.bindings.len(), 1);
+/// assert_eq!(probes.bindings[0].name, "xs");
+/// // Both calls are collected: which one is rooted at the `val` binding is
+/// // not decided here.
+/// assert_eq!(probes.mutations.len(), 2);
+/// assert_eq!(probes.mutations[1].name, "ys");
+/// ```
+pub fn val_probes(source: &str) -> ValProbes {
+    let tokens = lexer::lex(source, 0, source.len());
+    val::probes(source, &tokens)
+}
+
 /// Converts a byte offset into `source` to a 1-based `(line, column)` —
 /// the same mapping [`CompileError`] positions use (column counted in
 /// UTF-8 code points). Offsets past the end clamp to the last position.
@@ -448,17 +472,25 @@ pub struct Options<'a> {
     /// built-ins of the same name). The `rlc` CLI fills this from the
     /// file's direct relative `.rl` imports.
     pub extern_enums: &'a [ExternEnum],
-    /// Leave match exhaustiveness to a TypeScript backend instead of
-    /// resolving it from this file's enum declarations.
+    /// Leave the two judgments a TypeScript checker makes better to a
+    /// TypeScript checker: match exhaustiveness, and which binding a
+    /// mutation path is rooted at (`val`).
     ///
-    /// rlc's own answer is complete for the enums it can see, but it is the
-    /// *declared* type's answer: a case an earlier guard already removed is
-    /// still demanded, and an enum from another module has to be collected
-    /// ([`Options::extern_enums`]). A checker asked at the `match` answers
-    /// from the **narrowed** type and needs no collecting. Callers that have
-    /// one — `rlc --native-check` — set this and report what it says; every
-    /// other rl-level check runs unchanged.
-    pub defer_exhaustiveness: bool,
+    /// rlc answers both on its own, from its enum declarations and a lexical
+    /// scope model of its own, and those answers are what [`compile`]
+    /// reports by default. Both are approximations of TypeScript's:
+    /// exhaustiveness is the *declared* type's answer, so a case an earlier
+    /// guard already removed is still demanded and an enum from another
+    /// module has to be collected ([`Options::extern_enums`]); `val`'s
+    /// pairing is a scope model, so shadowing and redeclaration are rlc's
+    /// reading rather than TypeScript's. A caller with a checker asks it
+    /// instead — the narrowed type at each `match`, and symbol identity for
+    /// each binding — and reports what it says. `rlc --native-check` does
+    /// exactly that ([`tag_matches`], [`literal_matches`], [`val_probes`]).
+    ///
+    /// Every other rl-level check runs either way: duplicate cases,
+    /// misplaced wildcards, bad field types, `val`'s call-capability rule.
+    pub defer_to_checker: bool,
     /// What `"@rl/std"` ([`STD_SPECIFIER`]) is rewritten to on the way out
     /// — the path of the standard library module this output will sit
     /// next to (`"./rl.js"`, `"../rl.ts"`, ...). `None` leaves the bare
@@ -474,7 +506,7 @@ impl Default for Options<'_> {
             verify: true,
             rewrite_imports: ImportRewrite::default(),
             extern_enums: &[],
-            defer_exhaustiveness: false,
+            defer_to_checker: false,
             std_import: None,
         }
     }
@@ -557,10 +589,12 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
         &program,
         options.verify,
         options.extern_enums,
-        options.defer_exhaustiveness,
+        options.defer_to_checker,
     )
     .map_err(to_compile_error)?;
-    val::check(source, &tokens).map_err(to_compile_error)?;
+    if !options.defer_to_checker {
+        val::check(source, &tokens).map_err(to_compile_error)?;
+    }
     let (code, mappings) = codegen::emit_with_map(
         &program,
         source,

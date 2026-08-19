@@ -31,6 +31,14 @@
 //!   not guess it from the method's name; it collects the calls as
 //!   questions and `rlc --types` answers them with the real checker,
 //!   exactly as literal-match exhaustiveness does ([`crate::probe`]).
+//! - [`probes`] — the *delegated* form. [`check`]'s scope model answers
+//!   "which binding is this path rooted at?" itself; that is an
+//!   approximation of TypeScript's resolution, and shadowing and
+//!   redeclaration are where an approximation quietly differs. So this half
+//!   collects the `val` bindings and the mutations **without pairing
+//!   them**, and a caller with a checker pairs them by symbol identity
+//!   ([`crate::val_probes`], `rlc --native-check`). What counts as a
+//!   mutation is still syntax, and still rl's own.
 //!
 //! What it does *not* do is inference: no effect system, no borrow
 //! checker, no analysis of what an arbitrary imported function does with
@@ -314,6 +322,10 @@ fn parse_path<'a>(src: &'a str, tokens: &[Token], root: usize) -> Path<'a> {
 struct Var<'a> {
     name: &'a str,
     val_at: Option<usize>,
+    /// Byte offset of the binding identifier itself — the node a checker is
+    /// asked to resolve when binding identity is delegated
+    /// ([`crate::val_probes`]).
+    ident: usize,
 }
 
 /// A lexical scope: the bindings it introduces, and the token index at
@@ -357,27 +369,102 @@ pub struct ValMethodCall {
     pub name_end: usize,
 }
 
+/// One `val` binding, as a node a checker can resolve — half of the
+/// delegated form of `val`'s analysis ([`crate::val_probes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValBinding {
+    /// The binding's name, for the message.
+    pub name: String,
+    /// Byte offset of the binding identifier. The identifier is copied
+    /// verbatim into the output, so this maps through
+    /// [`crate::EmitMapping`]s to the node the checker is asked about.
+    pub ident: usize,
+}
+
+/// One mutation, as syntax alone can see it: an access path with something
+/// that mutates it. **Which binding it belongs to is not decided here** —
+/// that is a question of symbol identity, and the other half of
+/// [`crate::val_probes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mutation {
+    /// Byte offset of the path's root identifier — both the node whose
+    /// symbol answers "which binding is this?" and where the diagnostic is
+    /// reported.
+    pub root: usize,
+    /// The root identifier's text, for the message.
+    pub name: String,
+    /// For a method call, the method and the byte offset of its name; the
+    /// call mutates only if that name resolves to a built-in's method.
+    /// `None` for an assignment, an increment or a `delete`, which mutate on
+    /// syntax alone.
+    pub method: Option<(String, usize)>,
+}
+
+/// Every `val` binding of a file and every mutation in it, with the two
+/// left unmatched.
+///
+/// rlc's own analysis ([`check`]) pairs them with a lexical scope model of
+/// its own. That model is an approximation of TypeScript's, and the places
+/// it can drift — shadowing, redeclaration, destructuring, a binding
+/// captured across a boundary — are exactly the places a mistake is
+/// invisible. A caller with a checker pairs them by **symbol identity**
+/// instead, which is not an approximation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValProbes {
+    /// Every `val` binding declared in the file.
+    pub bindings: Vec<ValBinding>,
+    /// Every mutation in the file, rooted at any identifier.
+    pub mutations: Vec<Mutation>,
+}
+
+/// Where a slice of `src` starts, in bytes. `part` must be a subslice of
+/// `src` — every name here comes from the source text the tokens index.
+fn offset_in(src: &str, part: &str) -> usize {
+    let offset = part.as_ptr() as usize - src.as_ptr() as usize;
+    debug_assert!(
+        offset + part.len() <= src.len(),
+        "not a slice of the source"
+    );
+    offset
+}
+
+/// Where collected output goes, which is also what the walk is for.
+#[derive(Clone, Copy)]
+enum Sink<'a> {
+    /// Report the first violation (the compile path).
+    Report,
+    /// Collect built-in mutator calls through `val` paths, resolved with
+    /// rlc's own scope model ([`method_calls`]).
+    Calls(&'a RefCell<Vec<ValMethodCall>>),
+    /// Collect bindings and mutations without pairing them ([`probes`]).
+    Probes(&'a RefCell<ValProbes>),
+}
+
 /// Runs the `val` analysis over a whole file's token stream. Returns the
 /// first violation, like every other rl-level check.
 pub(crate) fn check(src: &str, tokens: &[Token]) -> Result<(), RlError> {
-    run(src, tokens, None).map(|_| ())
+    run(src, tokens, Sink::Report).map(|_| ())
 }
 
 /// Collects every candidate built-in mutator call made through a `val`
 /// path, in source order — the typed half's input. Never reports an error.
 pub(crate) fn method_calls(src: &str, tokens: &[Token]) -> Vec<ValMethodCall> {
     let sink = RefCell::new(Vec::new());
-    let _ = run(src, tokens, Some(&sink));
+    let _ = run(src, tokens, Sink::Calls(&sink));
+    sink.into_inner()
+}
+
+/// Collects the file's `val` bindings and its mutations, unpaired — the
+/// input a checker pairs by symbol identity ([`ValProbes`]). Never reports.
+pub(crate) fn probes(src: &str, tokens: &[Token]) -> ValProbes {
+    let sink = RefCell::new(ValProbes::default());
+    let _ = run(src, tokens, Sink::Probes(&sink));
     sink.into_inner()
 }
 
 /// The one walk both halves share. With a sink the walk is in probe mode:
 /// it reports nothing and collects instead.
-fn run(
-    src: &str,
-    tokens: &[Token],
-    calls: Option<&RefCell<Vec<ValMethodCall>>>,
-) -> Result<(), RlError> {
+fn run(src: &str, tokens: &[Token], sink: Sink) -> Result<(), RlError> {
     // Files that do not use the modifier — the overwhelming majority —
     // pay one linear scan and nothing else.
     if !uses_val(src, tokens) {
@@ -388,7 +475,7 @@ fn run(
     let checker = Checker {
         src,
         signatures: &signatures,
-        calls,
+        sink,
     };
     let mut frames = vec![Frame {
         end: usize::MAX,
@@ -770,7 +857,7 @@ struct Checker<'a> {
     /// Probe mode: collect method calls instead of reporting violations.
     /// The violations are the same either way — the file has already been
     /// checked by the time its probes are collected.
-    calls: Option<&'a RefCell<Vec<ValMethodCall>>>,
+    sink: Sink<'a>,
 }
 
 impl<'a> Checker<'a> {
@@ -943,10 +1030,31 @@ impl<'a> Checker<'a> {
 
     /// Registers bindings in the innermost scope.
     fn declare(&self, frames: &mut [Frame<'a>], names: Vec<&'a str>, val_at: Option<usize>) {
+        let src = self.src;
         if let Some(frame) = frames.last_mut() {
-            frame
-                .vars
-                .extend(names.into_iter().map(|name| Var { name, val_at }));
+            frame.vars.extend(names.into_iter().map(|name| Var {
+                name,
+                val_at,
+                ident: offset_in(src, name),
+            }));
+        }
+        if val_at.is_some()
+            && let Sink::Probes(sink) = self.sink
+            && let Some(frame) = frames.last()
+        {
+            // Every `val` binding is a node the checker can resolve; which
+            // mutations belong to it is then a question of symbol identity,
+            // not of this file's scope model.
+            sink.borrow_mut().bindings.extend(
+                frame
+                    .vars
+                    .iter()
+                    .filter(|v| v.val_at == val_at)
+                    .map(|v| ValBinding {
+                        name: v.name.to_string(),
+                        ident: v.ident,
+                    }),
+            );
         }
     }
 
@@ -991,7 +1099,12 @@ impl<'a> Checker<'a> {
                     k += 1;
                 }
                 collect_pattern_names(self.src, tokens, k, &mut names);
-                names.into_iter().map(move |name| Var { name, val_at })
+                let src = self.src;
+                names.into_iter().map(move |name| Var {
+                    name,
+                    val_at,
+                    ident: offset_in(src, name),
+                })
             })
             .collect();
         Some((body.0, body.1, vars))
@@ -1055,7 +1168,9 @@ impl<'a> Checker<'a> {
         mutates: bool,
     ) -> Result<(), RlError> {
         let name = self.text(&tokens[root]);
-        if self.lookup(frames, name).is_none() {
+        // In probe mode the root is *not* resolved here: which binding it
+        // names is the checker's answer, from the symbol at this identifier.
+        if !matches!(self.sink, Sink::Probes(_)) && self.lookup(frames, name).is_none() {
             return Ok(());
         }
         let path = parse_path(self.src, tokens, root);
@@ -1065,7 +1180,15 @@ impl<'a> Checker<'a> {
         }
         let offset = tokens[root].span.start;
         if mutates || assignment_op_at(tokens, path.end).is_some() || incdec_at(tokens, path.end) {
-            if self.calls.is_some() {
+            if let Sink::Probes(sink) = self.sink {
+                sink.borrow_mut().mutations.push(Mutation {
+                    root: offset,
+                    name: name.to_string(),
+                    method: None,
+                });
+                return Ok(());
+            }
+            if matches!(self.sink, Sink::Calls(_)) {
                 return Ok(());
             }
             return Err(RlError::at(
@@ -1080,18 +1203,25 @@ impl<'a> Checker<'a> {
         // a built-in with a mutating `set`, which needs the receiver's
         // type. rlc never answers it from the name — it records the call
         // for `rlc --types`, where the real checker decides.
-        if let Some(sink) = self.calls
-            && let (Some(method), Some(tok)) = (path.last_prop, path.last_prop_tok)
+        if let (Some(method), Some(tok)) = (path.last_prop, path.last_prop_tok)
             && is_builtin_mutator_name(method)
             && punct_at(tokens, path.end, b'(')
         {
-            sink.borrow_mut().push(ValMethodCall {
-                offset,
-                binding: name.to_string(),
-                method: method.to_string(),
-                name: tokens[tok].span.start,
-                name_end: tokens[tok].span.end,
-            });
+            match self.sink {
+                Sink::Calls(sink) => sink.borrow_mut().push(ValMethodCall {
+                    offset,
+                    binding: name.to_string(),
+                    method: method.to_string(),
+                    name: tokens[tok].span.start,
+                    name_end: tokens[tok].span.end,
+                }),
+                Sink::Probes(sink) => sink.borrow_mut().mutations.push(Mutation {
+                    root: offset,
+                    name: name.to_string(),
+                    method: Some((method.to_string(), tokens[tok].span.start)),
+                }),
+                Sink::Report => {}
+            }
         }
         Ok(())
     }
@@ -1108,7 +1238,7 @@ impl<'a> Checker<'a> {
         params: &[ParamSig],
         frames: &[Frame<'a>],
     ) -> Result<(), RlError> {
-        if self.calls.is_some() {
+        if !matches!(self.sink, Sink::Report) {
             return Ok(()); // probe mode reports nothing
         }
         for (idx, (start, end)) in list_entries(tokens, open).into_iter().enumerate() {

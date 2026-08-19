@@ -51,15 +51,17 @@ pub(crate) struct TagQuery {
     pub covered: Vec<String>,
 }
 
-/// "What does this method call resolve to?" — the typed half of `val`.
+/// "What is the symbol here?" — the primitive `val` is built from.
 ///
-/// rlc does not decide from the method's name whether a call mutates; it
-/// names the call and lets the checker say where the method is declared.
+/// Two identifiers name the same binding when they resolve to the same
+/// symbol, and a method is a built-in when its symbol is declared in
+/// TypeScript's own lib files. Both are questions about resolution, so both
+/// are asked as one, and rl does the interpreting.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValQuery {
-    /// The module the call lives in.
+pub(crate) struct SymbolQuery {
+    /// The module the identifier lives in.
     pub module: PathBuf,
-    /// UTF-16 offset of the method name in that module.
+    /// UTF-16 offset of the identifier in that module.
     pub position: usize,
 }
 
@@ -71,7 +73,7 @@ pub(crate) struct Query {
     pub modules: Vec<Module>,
     pub literals: Vec<LiteralQuery>,
     pub tags: Vec<TagQuery>,
-    pub vals: Vec<ValQuery>,
+    pub symbols: Vec<SymbolQuery>,
 }
 
 /// One TypeScript diagnostic, in TypeScript's coordinates. Mapping it back
@@ -107,16 +109,21 @@ pub(crate) struct TagMissing {
     pub missing: Vec<String>,
 }
 
-/// What a [`ValQuery`]'s method resolved to.
+/// What a [`SymbolQuery`] resolved to. A position that resolved to nothing
+/// — an `any` receiver, an unresolved name — has no entry at all, and an
+/// unresolved question never becomes an rl error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValResolution {
-    /// Index into [`Query::vals`].
+pub(crate) struct Resolution {
+    /// Index into [`Query::symbols`].
     pub index: usize,
-    /// The resolved method's name.
-    pub method: String,
-    /// The files the method is declared in. TypeScript's own lib files carry
-    /// the `bundled:///libs/` prefix, which is what makes a call a built-in
-    /// mutation rather than a user-defined method that shares a name.
+    /// The symbol's id. Snapshot-wide, so two identifiers naming the same
+    /// binding share it — across modules included.
+    pub id: i64,
+    /// The symbol's name.
+    pub name: String,
+    /// The files the symbol is declared in. TypeScript's own lib files carry
+    /// the `bundled:///libs/` prefix, which is what makes a method a
+    /// built-in rather than a user-defined one that shares a name.
     pub declared_in: Vec<String>,
 }
 
@@ -126,7 +133,7 @@ pub(crate) struct Answers {
     pub diagnostics: Vec<Diagnostic>,
     pub literal_missing: Vec<LiteralMissing>,
     pub tag_missing: Vec<TagMissing>,
-    pub val_resolutions: Vec<ValResolution>,
+    pub resolutions: Vec<Resolution>,
 }
 
 /// A source of TypeScript semantics for one project.
