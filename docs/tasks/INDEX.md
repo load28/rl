@@ -88,7 +88,8 @@
 | TASK-078 | `result` 바인딩 선언 위치 emit-map | 완료 | 2026-08-19 | 2026-08-19 | [TASK-078](./TASK-078-result-binding-emit-map.md) |
 | TASK-079 | tsgo native backend 전환 설계 문서 편입 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-079](./TASK-079-tsgo-backend-design-record.md) |
 | TASK-080 | 구문이 도입하는 이름의 emit-map — `try`·패턴 바인딩 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-080](./TASK-080-binding-emit-map.md) |
+| TASK-081 | let-else 발산 판정 — 객체 리터럴 반환 오탐 수정 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-081](./TASK-081-let-else-divergence-object-literal.md) |
 
 ## 다음 태스크 번호
 
-**TASK-081**
+**TASK-082**

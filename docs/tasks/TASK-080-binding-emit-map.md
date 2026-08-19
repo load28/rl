@@ -179,7 +179,5 @@ TASK-078이 `result` 블록의 `<-` 바인딩에 대해 한 일을, 이름을 �
   종단 테스트 3건
 - `docs/reference/cli.md` — `--emit-map` 매핑 목록
 
-후속(별개 태스크로 등록할 것): let-else의 `else` 블록 발산 판정이
-`else { return { kind: "Err", error: e }; }`처럼 **객체 리터럴을 반환**하는
-경우를 거부한다 — 마지막 최상위 문장을 찾을 때 `{ … }`를 블록 문으로 읽는
-것으로 보인다. 이번 변경과 무관하지만 작업 중 발견했다.
+후속: 작업 중 발견한 let-else 발산 판정 오탐(`else { return { … }; }`)은
+[TASK-081](./TASK-081-let-else-divergence-object-literal.md)에서 다뤘다.

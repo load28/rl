@@ -576,6 +576,38 @@ console.log(double("x"));
     assert_eq!(lines, vec!["hello, amy", "who?", "42", "-1"]);
 }
 
+#[test]
+fn runtime_let_else_else_block_returns_an_object_literal() {
+    require_toolchain!();
+    // The natural shape for a `Result`-returning function: the else block
+    // propagates an `Err` as an object literal. Its `}` ends no statement,
+    // so the divergence check still sees a `return`.
+    let lines = run_with_std(
+        r#"
+import { Option, Result } from "./rl.js";
+
+function findUser(id: number): Option<string> {
+  return id === 1 ? Option.Some("amy") : Option.None;
+}
+
+function greet(id: number): Result<string, string> {
+  const Some(value: user) = findUser(id) else { return { kind: "Err", error: "no user " + id }; };
+  return { kind: "Ok", value: "hello, " + user };
+}
+
+console.log(JSON.stringify(greet(1)));
+console.log(JSON.stringify(greet(2)));
+"#,
+    );
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Ok","value":"hello, amy"}"#,
+            r#"{"kind":"Err","error":"no user 2"}"#,
+        ]
+    );
+}
+
 /* ------------------------------------------------------------------ */
 /* the generated output is plain TypeScript: tsc accepts it            */
 /* ------------------------------------------------------------------ */

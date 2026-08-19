@@ -116,7 +116,7 @@ rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Man
 |--------|-------------|
 | `` `try` cannot be used inside a match expression, a `result` block, a template interpolation, or another `try` — ... `` | 그 자리의 `return`은 둘러싼 함수가 아니라 match의 IIFE(또는 `result` 블록)에서 반환됩니다. 로직을 별도 함수로 추출하거나, `result` 블록 안이라면 `<-` 바인딩을 쓰세요 ([§5.4](./language.md#54-사용-위치-제약)). 위치는 `try`(선언 형태면 `const`/`let`/`var`) |
 | `let-else cannot be used inside a match expression, a `result` block, a template interpolation, or a `try` — ...` | `try`와 같은 위치 제약 ([§6.4](./language.md#64-사용-위치와-발산-제약)). 위치는 선언 키워드 |
-| ``let-else: the `else` block must end with a `return`, `throw`, `break`, or `continue` statement`` | `else`가 발산하지 않으면 뒤의 구조 분해가 케이스 미보장 상태로 실행됩니다. 검사는 구문 수준이라 `if (c) return a; else return b;`로 끝나는 블록도 거부됩니다. 위치는 `else` |
+| ``let-else: the `else` block must end with a `return`, `throw`, `break`, or `continue` statement`` | `else`가 발산하지 않으면 뒤의 구조 분해가 케이스 미보장 상태로 실행됩니다. 검사는 구문 수준이라 `if (c) return a; else return b;`로 끝나는 블록도 거부됩니다. 문장 경계는 최상위 `;`와 블록 문의 `}`이고 객체 리터럴·화살표 본문의 `}`는 아니므로 `return { … };`는 발산으로 인정됩니다 ([§6.4](./language.md#64-사용-위치와-발산-제약)). 위치는 `else` |
 
 ```rl
 function f(): number {
