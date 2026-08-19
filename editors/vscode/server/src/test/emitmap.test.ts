@@ -355,3 +355,77 @@ test("tuple destructuring over the std module reports nothing", { skip }, async 
   assert.deepEqual(await ts.diagnosticsFor(file), []);
 });
 
+
+/* --------------------------------------------------------------------------
+ * TASK-080: the names a construct *introduces* — a `try` declaration, a
+ * let-else / if let / match pattern binding — are copied from the source
+ * into the emitted declaration, so hovering one answers with its type
+ * instead of nothing. They used to be rebuilt by the compiler, which left
+ * them outside the map: the query never reached the service at all.
+ * -------------------------------------------------------------------- */
+
+const BINDING_SOURCE = [
+  'import { Option, Result } from "@rl/std";',
+  "",
+  "declare function load(): Result<number, string>;",
+  "declare function boxed(): Option<string>;",
+  "",
+  "export function run(): number {",
+  "  const total = try load();",
+  '  const Some(value: label) = boxed() else { throw new Error("none"); };',
+  "  if let Some(value: shown) = boxed() {",
+  "    console.log(shown);",
+  "  }",
+  "  const width = match (boxed()) {",
+  "    Some(value: text) => text.length,",
+  "    None => 0,",
+  "  };",
+  "  return total + label.length + width;",
+  "}",
+  "",
+].join("\n");
+
+/** Hovers the `needle` written inside `context` and returns the signature
+ * TypeScript answers with. */
+async function signatureOfBinding(
+  ts: TsgoProject,
+  file: string,
+  mapped: MappedDoc,
+  context: string,
+  needle: string,
+): Promise<string> {
+  const src = BINDING_SOURCE.indexOf(context) + context.indexOf(needle);
+  const at = mapped.srcToOut(src);
+  assert.notEqual(at, null, `${needle} in ${context} must be mapped`);
+  const info = await ts.quickInfoAt(file, at!);
+  assert.ok(info, `expected quick info for ${needle}`);
+  return info!.signature;
+}
+
+test("a try declaration's binding hovers with its Ok type", { skip }, async () => {
+  const { file, mapped, ts } = await stdProject(BINDING_SOURCE);
+  const signature = await signatureOfBinding(
+    ts,
+    file,
+    mapped,
+    "total = try load()",
+    "total",
+  );
+  assert.match(signature, /total: number/);
+});
+
+test("let-else and if let bindings hover with the extracted type", { skip }, async () => {
+  const { file, mapped, ts } = await stdProject(BINDING_SOURCE);
+  assert.match(
+    await signatureOfBinding(ts, file, mapped, "value: label)", "label"),
+    /label: string/,
+  );
+  assert.match(
+    await signatureOfBinding(ts, file, mapped, "value: shown)", "shown"),
+    /shown: string/,
+  );
+  assert.match(
+    await signatureOfBinding(ts, file, mapped, "value: text)", "text"),
+    /text: string/,
+  );
+});

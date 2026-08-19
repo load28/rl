@@ -93,30 +93,79 @@ pub(super) fn emit_match<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
     body
 }
 
-/// The shared destructuring statement of an arm, or `""` when it binds
-/// nothing. sema guarantees every or-pattern alternative binds the same
-/// set, so the first alternative speaks for all of them.
-fn bind_str(bindings: &Option<Vec<Binding>>) -> String {
-    bind_str_from(bindings, "$rl_m")
+/// The `name`/`name: alias` list inside a destructuring's braces, every
+/// name copied from the source (not rebuilt) so the emitted binding maps
+/// back to the pattern the user wrote — which is what lets the editor
+/// answer hover, go-to-definition and rename on a pattern binding.
+pub(super) fn binding_list<'a, 'b>(
+    e: &Emitter<'a>,
+    bindings: impl Iterator<Item = &'b Binding>,
+) -> Rope<'a> {
+    let mut rope = Rope::new();
+    for (i, b) in bindings.enumerate() {
+        if i > 0 {
+            rope.push_lit(", ");
+        }
+        let (name, at) = e.src_slice(b.name_span.start, b.name_span.end);
+        rope.push_src(name, at);
+        if let Some(span) = b.alias_span {
+            rope.push_lit(": ");
+            let (alias, at) = e.src_slice(span.start, span.end);
+            rope.push_src(alias, at);
+        }
+    }
+    rope
 }
 
-/// [`bind_str`] against an explicit temporary (tuple matches destructure
+/// [`binding_list`]'s unmapped twin: the same bytes written by the
+/// compiler instead of copied. Used for an or-pattern, whose one
+/// destructuring stands for every alternative — sema guarantees they bind
+/// the same set, so the bytes are the same either way, but they come from
+/// several patterns at once and belong to none of them. Claiming one would
+/// point the editor at an arbitrary alternative and let a rename rewrite
+/// that one alone.
+fn binding_list_lit(bindings: &[Binding]) -> String {
+    bindings
+        .iter()
+        .map(|b| match &b.alias {
+            Some(alias) => format!("{}: {}", b.name, alias),
+            None => b.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The shared destructuring statement of an arm, or an empty rope when it
+/// binds nothing. sema guarantees every or-pattern alternative binds the
+/// same set, so the first alternative speaks for all of them — and
+/// `mapped` says whether it speaks for itself alone (see
+/// [`binding_list_lit`]).
+fn bind_rope<'a>(e: &Emitter<'a>, bindings: &Option<Vec<Binding>>, mapped: bool) -> Rope<'a> {
+    bind_rope_from(e, bindings, "$rl_m", mapped)
+}
+
+/// [`bind_rope`] against an explicit temporary (tuple matches destructure
 /// each scrutinee separately: `$rl_m0`, `$rl_m1`, ...).
-fn bind_str_from(bindings: &Option<Vec<Binding>>, var: &str) -> String {
+fn bind_rope_from<'a>(
+    e: &Emitter<'a>,
+    bindings: &Option<Vec<Binding>>,
+    var: &str,
+    mapped: bool,
+) -> Rope<'a> {
+    let mut rope = Rope::new();
     match bindings {
         Some(bindings) if !bindings.is_empty() => {
-            let parts = bindings
-                .iter()
-                .map(|b| match &b.alias {
-                    Some(alias) => format!("{}: {}", b.name, alias),
-                    None => b.name.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("const {{ {} }} = {var}; ", parts)
+            rope.push_lit("const { ");
+            if mapped {
+                rope.append(binding_list(e, bindings.iter()));
+            } else {
+                rope.push_lit(binding_list_lit(bindings));
+            }
+            rope.push_lit(format!(" }} = {var}; "));
         }
-        _ => String::new(),
+        _ => {}
     }
+    rope
 }
 
 /// The if-chain condition and destructuring statements of one alternative,
@@ -124,11 +173,16 @@ fn bind_str_from(bindings: &Option<Vec<Binding>>, var: &str) -> String {
 /// the condition and destructures its plain bindings from that path. tsc
 /// narrows every path through the condition chain, so the destructurings
 /// need no type tricks. For an alternative without nested patterns this is
-/// exactly the old `kind === "Tag"` + [`bind_str`] pair.
-pub(super) fn pattern_conds_binds(alt: &TagPattern, root: &str) -> (String, String) {
+/// exactly the old `kind === "Tag"` + [`bind_rope`] pair.
+pub(super) fn pattern_conds_binds<'a>(
+    e: &Emitter<'a>,
+    alt: &TagPattern,
+    root: &str,
+) -> (String, Rope<'a>) {
     let mut conds = vec![format!("{root}.kind === \"{}\"", alt.tag)];
-    let mut binds = String::new();
+    let mut binds = Rope::new();
     collect_conds_binds(
+        e,
         alt.bindings.as_deref().unwrap_or_default(),
         root,
         &mut conds,
@@ -137,28 +191,25 @@ pub(super) fn pattern_conds_binds(alt: &TagPattern, root: &str) -> (String, Stri
     (conds.join(" && "), binds)
 }
 
-fn collect_conds_binds(
+fn collect_conds_binds<'a>(
+    e: &Emitter<'a>,
     bindings: &[Binding],
     root: &str,
     conds: &mut Vec<String>,
-    binds: &mut String,
+    binds: &mut Rope<'a>,
 ) {
-    let plain: Vec<String> = bindings
-        .iter()
-        .filter(|b| b.nested.is_none())
-        .map(|b| match &b.alias {
-            Some(alias) => format!("{}: {}", b.name, alias),
-            None => b.name.clone(),
-        })
-        .collect();
-    if !plain.is_empty() {
-        binds.push_str(&format!("const {{ {} }} = {root}; ", plain.join(", ")));
+    let mut plain = bindings.iter().filter(|b| b.nested.is_none()).peekable();
+    if plain.peek().is_some() {
+        binds.push_lit("const { ");
+        binds.append(binding_list(e, plain));
+        binds.push_lit(format!(" }} = {root}; "));
     }
     for b in bindings {
         if let Some(inner) = &b.nested {
             let path = format!("{root}.{}", b.name);
             conds.push(format!("{path}.kind === \"{}\"", inner.tag));
             collect_conds_binds(
+                e,
                 inner.bindings.as_deref().unwrap_or_default(),
                 &path,
                 conds,
@@ -223,22 +274,23 @@ fn emit_switch<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
         }
 
         let bind = match &arm.pattern {
-            Pattern::Tags(alts) => bind_str(&alts[0].bindings),
-            Pattern::Wildcard | Pattern::Literals(_) => String::new(),
+            Pattern::Tags(alts) => bind_rope(e, &alts[0].bindings, alts.len() == 1),
+            Pattern::Wildcard | Pattern::Literals(_) => Rope::new(),
         };
 
         cases.append(label);
+        cases.push_lit(": { ");
+        cases.append(bind);
         if arm.block {
             let body = e.emit_program(&arm.body).trim();
             // `break` (not `return`) so an arm whose block always returns doesn't
             // widen the match's type with `undefined`; if the block doesn't return,
             // the arm evaluates to undefined, which the inferred type then reflects.
-            cases.push_lit(format!(": {{ {bind}"));
             cases.append(body);
             cases.push_lit("\n      break; }\n");
         } else {
             let (body, nl) = expr_body(e, arm, "    ");
-            cases.push_lit(format!(": {{ {bind}return ("));
+            cases.push_lit("return (");
             cases.append(body);
             cases.push_lit(format!("{nl}); }}\n"));
         }
@@ -304,14 +356,14 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
             }
             TuplePattern::Elems(elems) => {
                 let mut conds: Vec<String> = Vec::new();
-                let mut bind = String::new();
+                let mut bind = Rope::new();
                 for (i, elem) in elems.iter().enumerate() {
                     let var = format!("$rl_m{i}");
                     if let Pattern::Tags(alts) = elem {
                         if alts.len() == 1 {
-                            let (cond, b) = pattern_conds_binds(&alts[0], &var);
+                            let (cond, b) = pattern_conds_binds(e, &alts[0], &var);
                             conds.push(cond);
-                            bind.push_str(&b);
+                            bind.append(b);
                         } else {
                             // or-pattern element: shared bindings, never
                             // nested (sema)
@@ -321,7 +373,7 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
                                 .collect::<Vec<_>>()
                                 .join(" || ");
                             conds.push(format!("({cond})"));
-                            bind.push_str(&bind_str_from(&alts[0].bindings, &var));
+                            bind.append(bind_rope_from(e, &alts[0].bindings, &var, false));
                         }
                     }
                 }
@@ -334,7 +386,8 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
                     inner.append(exit);
                     inner.push_lit("\n");
                 } else {
-                    inner.push_lit(format!("  if ({}) {{ {}", conds.join(" && "), bind));
+                    inner.push_lit(format!("  if ({}) {{ ", conds.join(" && ")));
+                    inner.append(bind);
                     inner.append(exit);
                     inner.push_lit(" }\n");
                 }
@@ -434,7 +487,7 @@ fn emit_if_chain<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
         match &arm.pattern {
             Pattern::Tags(alts) => {
                 let (cond, bind) = if alts.len() == 1 {
-                    pattern_conds_binds(&alts[0], "$rl_m")
+                    pattern_conds_binds(e, &alts[0], "$rl_m")
                 } else {
                     // or-pattern: shared bindings, never nested (sema)
                     let cond = alts
@@ -442,9 +495,10 @@ fn emit_if_chain<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
                         .map(|t| format!("$rl_m.kind === \"{}\"", t.tag))
                         .collect::<Vec<_>>()
                         .join(" || ");
-                    (cond, bind_str(&alts[0].bindings))
+                    (cond, bind_rope(e, &alts[0].bindings, false))
                 };
-                out.push_lit(format!("  if ({}) {{ {}", cond, bind));
+                out.push_lit(format!("  if ({}) {{ ", cond));
+                out.append(bind);
                 out.append(exit);
                 out.push_lit(" }\n");
             }

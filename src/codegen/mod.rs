@@ -144,8 +144,14 @@ impl<'a> Emitter<'a> {
         code.push_lit(format!("const {tmp} = ("));
         code.append(expr);
         code.push_lit(format!("); if ({tmp}.kind !== \"Ok\") return {tmp};"));
-        if let Some((kw, binding)) = &stmt.decl {
-            code.push_lit(format!(" {kw} {binding} = {tmp}.value;"));
+        if let Some((kw, binding_span)) = &stmt.decl {
+            // The binding is copied from the source, not rebuilt, so the
+            // emitted declaration carries a mapping back to the name the
+            // user wrote — which is what gives the editor a type for it.
+            code.push_lit(format!(" {kw} "));
+            let (binding, at) = self.src_slice(binding_span.start, binding_span.end);
+            code.push_src(binding, at);
+            code.push_lit(format!(" = {tmp}.value;"));
         }
         code
     }
@@ -174,16 +180,11 @@ impl<'a> Emitter<'a> {
         code.append(body);
         code.push_lit(format!("{nl} }}"));
         if !stmt.bindings.is_empty() {
-            let parts = stmt
-                .bindings
-                .iter()
-                .map(|b| match &b.alias {
-                    Some(alias) => format!("{}: {}", b.name, alias),
-                    None => b.name.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            code.push_lit(format!(" {} {{ {} }} = {tmp};", stmt.kw, parts));
+            // Same as `try`: the names come from the source, so the emitted
+            // destructuring maps back to the pattern.
+            code.push_lit(format!(" {} {{ ", stmt.kw));
+            code.append(matches::binding_list(self, stmt.bindings.iter()));
+            code.push_lit(format!(" }} = {tmp};"));
         }
         code
     }
@@ -199,12 +200,13 @@ impl<'a> Emitter<'a> {
         self.try_seq.set(n + 1);
         let tmp = format!("$rl_t{n}");
         let expr = self.emit_program(&stmt.expr).trim();
-        let (cond, binds) = matches::pattern_conds_binds(&stmt.pattern, &tmp);
+        let (cond, binds) = matches::pattern_conds_binds(self, &stmt.pattern, &tmp);
         let body = guard_line_comment(self.emit_program(&stmt.body).trim());
         let mut code = Rope::new();
         code.push_lit(format!("{{ const {tmp} = ("));
         code.append(expr);
-        code.push_lit(format!("); if ({cond}) {{ {binds}"));
+        code.push_lit(format!("); if ({cond}) {{ "));
+        code.append(binds);
         code.append(body);
         code.push_lit(" }");
         match &stmt.else_part {

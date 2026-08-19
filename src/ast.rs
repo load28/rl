@@ -280,11 +280,14 @@ pub(crate) struct TryStmt {
     /// Byte offset of the statement start (the declaration keyword, or `try`
     /// for the bare form), for error reporting.
     pub keyword_off: usize,
-    /// `Some((decl_keyword, binding_text))` for the declaration form, where
-    /// `binding_text` is the verbatim text between the keyword and `=`
-    /// (identifier or destructuring pattern, optionally type-annotated).
-    /// `None` for the bare `try <expr>;` form.
-    pub decl: Option<(String, String)>,
+    /// `Some((decl_keyword, binding_span))` for the declaration form, where
+    /// `binding_span` covers the (trimmed) bytes between the keyword and
+    /// `=` — an identifier or destructuring pattern, optionally
+    /// type-annotated. codegen copies those bytes from the source rather
+    /// than rebuilding them, so the emitted declaration carries a mapping
+    /// back to the name the user wrote. `None` for the bare `try <expr>;`
+    /// form.
+    pub decl: Option<(String, Span)>,
     /// The expression after `try`, recursively parsed.
     pub expr: Program,
 }
@@ -511,7 +514,13 @@ pub(crate) struct TagPattern {
 #[derive(Debug)]
 pub(crate) struct Binding {
     pub name: String,
+    /// Byte span of the field name as written — codegen copies it from the
+    /// source so the emitted destructuring maps back to the pattern.
+    pub name_span: Span,
     pub alias: Option<String>,
+    /// Byte span of the alias as written, when there is one. Same purpose
+    /// as [`Binding::name_span`].
+    pub alias_span: Option<Span>,
     /// `name: Tag(...)` — match the field's value against a nested tag
     /// pattern instead of binding the field. Mismatch falls through to the
     /// next arm, like a failing guard. (Recursion bottoms out through the

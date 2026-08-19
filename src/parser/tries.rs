@@ -49,12 +49,21 @@ pub(super) fn parse_try_decl<'t>(
     mut cur: Cursor<'t>,
     kw_span: Span,
 ) -> Option<(Cursor<'t>, usize, TryStmt)> {
-    let binding_start = cur.stop_byte_at(cur.idx);
+    let scan_start = cur.stop_byte_at(cur.idx);
     let (eq_idx, eq_byte) = binding_end(&cur)?;
-    let binding = cur.parser.src[binding_start..eq_byte].trim();
+    let raw = &cur.parser.src[scan_start..eq_byte];
+    // The span of the binding itself, whitespace on either side dropped:
+    // codegen copies these bytes so the emitted declaration maps back to
+    // the name the user wrote.
+    let binding_start = scan_start + (raw.len() - raw.trim_start().len());
+    let binding = raw.trim();
     if binding.is_empty() {
         return None;
     }
+    let binding_span = Span {
+        start: binding_start,
+        end: binding_start + binding.len(),
+    };
     // A real binding starts with the variable name or a destructuring
     // pattern. A leading reserved word means the scan ran across some other
     // construct (e.g. `const enum E { ... }` with a `= try` further down).
@@ -87,7 +96,7 @@ pub(super) fn parse_try_decl<'t>(
             keyword_off: kw_span.start,
             decl: Some((
                 cur.parser.src[kw_span.start..kw_span.end].to_string(),
-                binding.to_string(),
+                binding_span,
             )),
             expr,
         },
