@@ -136,7 +136,52 @@ JS API가 없으므로, hover·정의 이동·자동완성·참조 찾기·타�
 즉 이름을 얻는 유일한 길이 타입 문자열이고, 그것을 파싱해 의미를 정하는 것은
 이 재설계가 처음부터 금지한 것이다. 여기가 "억지로 맞추게 되는" 지점이다.
 
-**선택지** (결정 필요):
+### 재측정: 이름 없이 정확히 된다 (2026-08-19)
+
+"정확하게 구현 못하냐"는 물음에 다시 재봤다. 이름이 아니라 **판별자(`kind`)
+리터럴 집합**으로 고르면 정확하다:
+
+```
+Shape           -> tags: ["Circle","Point"]
+Option<string>  -> tags: ["None","Some"]     ← 제네릭 인스턴스도 같은 집합
+Token           -> tags: ["Eof","Num"]
+number          -> tags: null                 ← 태그드 유니언이 아니면 무답
+```
+
+`getTypeAtPosition` + `getPropertyOfType("kind")` + 리터럴 값 — 전부 구조적이고,
+문자열 파싱이 없다. 이것은 CLI의 tag 소진성이 이미 하는 질문과 **같은 질문**이다.
+유일한 비정밀성은 태그 집합이 완전히 같은 서로 다른 enum 둘인데, `match`의
+관점에서는 팔 구성이 같으므로 구별할 필요가 없다.
+
+즉 아래 (B)(문자열 파싱)와 (C)(TS 5 잔존)는 필요 없다. **(A)로 간다.**
+
+### 왜 LSP인가 — API로는 에디터를 못 덮는다 (실측)
+
+"LSP를 쓰는 것 자체가 이상하다"는 지적에 대해, API만으로 에디터 기능을 만들 수
+있는지 재봤다.
+
+| 기능 | API로 시도한 결과 |
+|------|-------------------|
+| hover | `getTypeAtPosition` + `typeToString` — 표시용 문자열로는 됨 |
+| definition | `getSymbolAtPosition`이 **별칭(import) 심볼**을 주어, 진짜 선언까지 `getAliasedSymbol` 홉이 더 필요 |
+| references | `getReferencesToSymbolInFile` — **한 파일 안만**. 크로스 파일은 직접 순회해야 함 |
+| completions | `getCompletionsAtPosition`이 **예외**를 던진다: `completion list needs auto imports` |
+| rename | 없음 |
+
+그리고 API의 `LanguageService` 표면은 다섯 개뿐이다 (import 편집 2, 노드 참조,
+시그니처 사용처, 자동완성). 즉 **TS 7은 의도적으로 나눠 놓았다** — API는 컴파일러
+질문(타입·심볼·진단·emit)용이고, **에디터 조작은 언어 서버(LSP)의 몫**이다.
+
+따라서 배치는 억지가 아니라 제품의 설계를 따르는 것이다:
+
+- **rl이 주인인 질문**(어느 enum인가, 소진성, `val`) → rlc → **API**. 구조적.
+- **TypeScript 에디터 조작**(hover/definition/completion/references/rename)
+  → **LSP**.
+
+API로 에디터 기능을 재구현하는 쪽이야말로 LSP가 이미 하는 일을 다시 만드는
+억지가 된다.
+
+**남은 선택지 기록** (위 재측정으로 (A) 확정):
 
 - (A) **이름 없이 고른다** — 후보 enum을 `kind` 프로퍼티의 리터럴 집합으로
   고른다. 구조적이고, CLI의 tag 소진성이 이미 하는 것과 같은 질문이다.
