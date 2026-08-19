@@ -168,6 +168,31 @@ fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
 }
 
 #[test]
+fn a_diagnostic_on_generated_code_still_names_the_construct_it_came_from() {
+    let root = require_tsgo!();
+    // A plain TypeScript enum is not an rl enum, so matching on one lowers
+    // to a `.kind` switch over a value that has no `kind`. The error is
+    // real; what matters here is that it is reported in the `.rl` file, at
+    // the construct rlc generated the code for, and labelled as generated.
+    let dir = project(&[(
+        "src/ts_enum.rl",
+        "export enum Plain { A, B }\n\
+         export function f(p: Plain): number {\n\
+         \x20 return match (p) { A => 1 };\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("src/ts_enum.rl:3:") && out.contains("ts(2339)"),
+        "reported in the .rl file: {out}"
+    );
+    assert!(
+        out.contains("(in code rlc generated for this construct)"),
+        "and labelled as generated rather than as the user's own line: {out}"
+    );
+}
+
+#[test]
 fn a_ts_file_and_an_rl_file_share_one_project_graph() {
     let root = require_tsgo!();
     let dir = project(&[

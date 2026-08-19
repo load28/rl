@@ -52,6 +52,24 @@ pub(crate) fn to_source(mappings: &[EmitMapping], out: usize) -> Option<usize> {
         .map(|m| m.src + (out - m.out))
 }
 
+/// Where an emitted byte came from, or — when it is compiler-written glue —
+/// where the nearest preceding verbatim byte came from.
+///
+/// A diagnostic on glue still belongs somewhere the user can look: the
+/// construct it was generated for starts at the last source byte copied
+/// before it. The caller says which of the two happened, so the message can
+/// too.
+pub(crate) fn to_source_or_nearest(mappings: &[EmitMapping], out: usize) -> Option<(usize, bool)> {
+    if let Some(exact) = to_source(mappings, out) {
+        return Some((exact, true));
+    }
+    mappings
+        .iter()
+        .filter(|m| m.out < out)
+        .max_by_key(|m| m.out)
+        .map(|m| (m.src + m.len.saturating_sub(1), false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +95,27 @@ mod tests {
         let text = "abc";
         assert_eq!(to_utf16(text, 99), 3);
         assert_eq!(from_utf16(text, 99), 3);
+    }
+
+    #[test]
+    fn glue_falls_back_to_the_nearest_preceding_source_byte() {
+        let mappings = [
+            EmitMapping {
+                src: 0,
+                out: 0,
+                len: 4,
+            },
+            EmitMapping {
+                src: 10,
+                out: 20,
+                len: 6,
+            },
+        ];
+        assert_eq!(to_source_or_nearest(&mappings, 22), Some((12, true)));
+        // Between the chunks: the last byte of the chunk before it.
+        assert_eq!(to_source_or_nearest(&mappings, 10), Some((3, false)));
+        // Before any chunk: nothing to point at.
+        assert_eq!(to_source_or_nearest(&mappings, 0), Some((0, true)));
     }
 
     #[test]

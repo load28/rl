@@ -196,6 +196,26 @@ valMutations:
   빌드돼 있지 않으면 조용히 skip한다 — 가드는 컴파일러의 해석 규칙을
   그대로 미러링한다.
 
+### parity 실측 (레거시 `--types` vs `--native-check`)
+
+같은 입력(`examples/shapes.rl`)에 두 경로를 돌려 비교했다.
+
+| 항목 | 레거시 | 네이티브 | 판정 |
+|------|--------|----------|------|
+| 선언 본문 | — | — | **바이트 동일** |
+| 파일 이름 | `shapes.rl.d.ts` | `src/shapes.d.ts` | 다름 |
+| 레이아웃 | 입력 디렉터리 기준 평탄화 | 프로젝트 루트 미러 | 다름 |
+| `@rl/std` 지정자 | `@rl/std` (에디터가 해석) | `../__rl_std__.ts` | 다름 |
+| `.d.ts.map` | 있음 (`sources`가 `.rl`) | **없음** | 갭 |
+| 배너 | `// @generated ... --sidecar` | 없음 | 다름 |
+
+네이티브 트리는 **그 자체로 해석된다** — 사이드카 트리에 소비자 `.ts`를 놓고
+tsgo를 돌려 종료 코드 0을 확인했다. 레거시 트리는 에디터가 `@rl/std`를
+해석해 줘야 성립한다. 두 규약은 양립하지 않으므로(파일 이름이 다르면
+트리 내부 상대 해석이 깨진다) 통일은 확장 프로그램 변경과 함께 해야 한다 —
+Phase 7의 일이다. `.d.ts.map`은 `rlc::build_sidecar`를 재사용해 붙일 수
+있지만 그 함수가 `<name>.rl.d.ts` 이름 규약을 전제하므로 같은 결정에 묶인다.
+
 ## 이슈 및 해결
 
 ### 이슈 1: `DocumentIdentifier`가 `{ fileName }`이 아니다
@@ -219,7 +239,20 @@ valMutations:
   `rlc --native-check -o <dir>`이 컴파일러가 emit한 `.d.ts`를 그대로 쓴다 —
   rlc는 선언 구문을 스스로 만들지 않는다.
 
-### 이슈 3: `include`가 디렉터리를 훑으면 가상 모듈이 안 보인다
+### 이슈 3: TypeScript enum에 `match`를 쓰면 생성 코드가 `.kind`를 참조한다
+
+- **증상**: `enum Plain { A, B }`(괄호 없는 케이스 = TS enum)에 `match`를 쓰면
+  `Property 'kind' does not exist on type 'Plain'`.
+- **원인**: 판별 규칙상 이것은 rl enum이 아니므로 통과되지만, `match` 방출은
+  `$rl_m.kind` switch다. **기존 경로도 동일**하다 (`rlc --types`가 같은 진단을
+  낸다) — 이번 작업의 회귀가 아니다.
+- **해결**: 이번에는 보고 방식만 맞췄다. 글루 코드에 떨어진 진단은 위치 없이
+  "rlc bug"라고 하던 것을, 가장 가까운 앞선 verbatim 바이트의 `.rl` 위치로
+  보고하고 `(in code rlc generated for this construct)`를 붙인다. 근본 해결
+  (`match` scrutinee가 rl enum이 아님을 rl 진단으로 보고)은 이제 타입을 물을
+  수 있으므로 가능해졌다 — 후속 태스크.
+
+### 이슈 4: `include`가 디렉터리를 훑으면 가상 모듈이 안 보인다
 
 - **증상**: `tsconfig.json`이 `"include": ["src"]`면 lowering 결과가 프로그램에
   들어오지 않는다.
@@ -232,7 +265,7 @@ valMutations:
 
 - [x] `cargo fmt --check`
 - [x] `cargo clippy --all-targets -- -D warnings`
-- [x] `cargo test` (기존 전량 + `tests/native.rs` 12건)
+- [x] `cargo test` (기존 전량 + `tests/native.rs` 13건)
 
 ## 결과
 

@@ -103,22 +103,28 @@ pub(crate) fn run(
         };
         reported += 1;
         match project::diagnostic_source_offset(file, diagnostic.start) {
-            Some(offset) => {
+            Some((offset, exact)) => {
                 let (line, col) = rlc::line_col(&file.source, offset);
                 println!(
-                    "{}:{}:{}: ts({}): {}",
+                    "{}:{}:{}: ts({}): {}{}",
                     file.source_path.display(),
                     line,
                     col,
                     diagnostic.code,
                     diagnostic.message,
+                    // Glue is not the user's code: by the error-layer
+                    // contract rlc's output must not draw type errors, so
+                    // say where it came from rather than pinning it on the
+                    // line the position landed near.
+                    if exact {
+                        ""
+                    } else {
+                        " (in code rlc generated for this construct)"
+                    },
                 );
             }
-            // Compiler-written glue. By the error-layer contract rlc's own
-            // output must not draw type errors, so this is an rlc bug and is
-            // named as one rather than pinned on the user's line.
             None => println!(
-                "{}: ts({}): {} (in generated code — this is an rlc bug)",
+                "{}: ts({}): {}",
                 file.source_path.display(),
                 diagnostic.code,
                 diagnostic.message,
@@ -138,7 +144,8 @@ pub(crate) fn run(
         let (line, col) = rlc::line_col(&file.source, anchor.offset);
         reported += 1;
         println!(
-            "{}:{}:{}: rl: match is not exhaustive: missing {}",
+            "{}:{}:{}: rl: match is not exhaustive: missing {} \
+             (add the missing arms or a final `_` arm)",
             file.source_path.display(),
             line,
             col,
@@ -162,7 +169,8 @@ pub(crate) fn run(
         let (line, col) = rlc::line_col(&file.source, anchor.offset);
         reported += 1;
         println!(
-            "{}:{}:{}: rl: match is not exhaustive: missing {}",
+            "{}:{}:{}: rl: match is not exhaustive: missing {} \
+             (add the missing arms or a final `_` arm)",
             file.source_path.display(),
             line,
             col,
@@ -225,7 +233,9 @@ pub(crate) fn run(
                 method,
             ),
             None => println!(
-                "{}:{}:{}: rl: cannot mutate through val binding `{}`",
+                "{}:{}:{}: rl: cannot mutate through val binding `{}` \
+                 (the binding is declared with `val`, so every access path \
+                 from it is read-only)",
                 file.source_path.display(),
                 line,
                 col,

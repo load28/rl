@@ -270,12 +270,19 @@ fn anchor(emit: &MappedEmit, source_byte: usize) -> Option<usize> {
     Some(mapper::to_utf16(&emit.code, out))
 }
 
-/// Where a TypeScript diagnostic belongs in the `.rl` source, or `None` when
-/// it landed on compiler-written glue — which, by the error-layer contract,
-/// is an rlc bug rather than something to report at a made-up position.
-pub(crate) fn diagnostic_source_offset(file: &Lowered, utf16_start: usize) -> Option<usize> {
+/// Where a TypeScript diagnostic belongs in the `.rl` source, and whether
+/// that position is exact.
+///
+/// A diagnostic on compiler-written glue is not the user's code, so its
+/// position is approximate — the construct it was generated for — and the
+/// message says so. By the error-layer contract it should not happen at
+/// all: rlc's own output must not draw type errors.
+pub(crate) fn diagnostic_source_offset(
+    file: &Lowered,
+    utf16_start: usize,
+) -> Option<(usize, bool)> {
     let out = mapper::from_utf16(&file.emit.code, utf16_start);
-    mapper::to_source(mappings(&file.emit), out)
+    mapper::to_source_or_nearest(mappings(&file.emit), out)
 }
 
 fn mappings(emit: &MappedEmit) -> &[EmitMapping] {
