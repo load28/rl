@@ -124,6 +124,48 @@ fn a_hand_written_ts_file_imports_an_rl_file_by_the_specifier_it_writes() {
 }
 
 #[test]
+fn naming_one_file_still_compiles_against_the_whole_project() {
+    let root = require_tsgo!();
+    let dir = project(&[
+        (
+            "src/token.rl",
+            "export enum Token { Num(value: number), Eof }\n",
+        ),
+        (
+            "src/parse.rl",
+            "import { Token } from \"./token.rl\";\n\
+             export function width(t: Token): number {\n\
+             \x20 return match (t) { Num(value) => value, Eof => 0 };\n\
+             }\n",
+        ),
+    ]);
+    let out_dir = dir.join("out");
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .args(["--native-check", "src/parse.rl", "-o"])
+        .arg(&out_dir)
+        .current_dir(&dir)
+        .env("RLC_TSGO_ROOT", root)
+        .output()
+        .expect("rlc runs");
+    // `./token.rl` was never named, but it is part of the project, so it is
+    // part of the graph — otherwise this would be TS2307.
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out_dir.join("src/parse.rl.d.ts").is_file(),
+        "the named input is written"
+    );
+    assert!(
+        !out_dir.join("src/token.rl.d.ts").exists(),
+        "what was not named is in the graph, not in the output"
+    );
+}
+
+#[test]
 fn a_declaration_carries_a_map_back_to_the_rl_source() {
     let root = require_tsgo!();
     let dir = project(&[(

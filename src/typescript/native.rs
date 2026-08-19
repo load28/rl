@@ -204,11 +204,27 @@ impl TypeScriptBackend for NativeBackend {
             .map_err(|e| format!("the host failed: {e}"))?;
         let _ = std::fs::remove_file(&script);
 
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        if out.status.code() == Some(5) {
             return Err(format!(
-                "the TypeScript backend failed: {}",
-                stderr.trim().lines().last().unwrap_or("no output")
+                "the TypeScript resolved at {} can check but cannot emit \
+                 declarations — that API is newer than the released package. \
+                 Drop -o, or point rlc at a built typescript-go checkout with \
+                 RLC_TSGO_ROOT",
+                self.toolchain.api.display(),
+            ));
+        }
+        if !out.status.success() {
+            // The whole of stderr: a host crash prints a stack, and the line
+            // that names the cause is rarely the last one.
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stderr = stderr.trim();
+            return Err(format!(
+                "the TypeScript backend failed:\n{}",
+                if stderr.is_empty() {
+                    "(no output)"
+                } else {
+                    stderr
+                }
             ));
         }
         parse_answers(&String::from_utf8_lossy(&out.stdout))

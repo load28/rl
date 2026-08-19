@@ -51,7 +51,19 @@ pub(crate) fn run(
     };
     let tsconfig = tsconfig.canonicalize().unwrap_or(tsconfig);
 
+    // The graph is the project's, not the command line's: every `.rl` file
+    // under the project root is lowered, because a named input may import
+    // one that was not named. What was named decides only what is written.
     let root = tsconfig.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let requested: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
+    let files = match project_sources(&root, out_dir) {
+        Ok(all) if !all.is_empty() => all,
+        Ok(_) => files,
+        Err(e) => {
+            eprintln!("rlc: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let lowered = match project::lower(&files) {
         Ok(lowered) => lowered,
         Err((file, error)) => {
@@ -87,7 +99,7 @@ pub(crate) fn run(
     // The declarations the compiler emitted for the lowered modules, laid
     // out under `-o` the way the sources are laid out under the project.
     if let Some(dir) = out_dir
-        && let Err(e) = write_declarations(&answers.declarations, &lowered, &root, dir)
+        && let Err(e) = write_declarations(&answers.declarations, &lowered, &requested, &root, dir)
     {
         eprintln!("rlc: {e}");
         return ExitCode::FAILURE;
@@ -270,10 +282,19 @@ pub(crate) fn run(
 fn write_declarations(
     declarations: &[super::backend::Declaration],
     lowered: &[project::Lowered],
+    requested: &std::collections::HashSet<PathBuf>,
     root: &Path,
     out_dir: &Path,
 ) -> std::io::Result<()> {
     for declaration in declarations {
+        let source = lowered
+            .iter()
+            .find(|f| project::declaration_path_of(f) == declaration.path);
+        // Only what was asked for is written; the rest of the project is in
+        // the graph so that it resolves, not so that it is emitted.
+        if source.is_some_and(|f| !requested.contains(&f.source_path)) {
+            continue;
+        }
         let relative = declaration.path.strip_prefix(root).unwrap_or(
             declaration
                 .path
@@ -285,10 +306,7 @@ fn write_declarations(
         let dir = target.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(dir)?;
 
-        match lowered
-            .iter()
-            .find(|f| project::declaration_path_of(f) == declaration.path)
-        {
+        match source {
             Some(file) => {
                 let sidecar = rlc::build_sidecar(
                     &file.source,
@@ -313,6 +331,33 @@ fn display_literal(literal: &rlc::Literal) -> String {
         rlc::Literal::BigInt(d) => format!("{d}n"),
         rlc::Literal::Boolean(b) => b.to_string(),
     }
+}
+
+/// Every `.rl` file of the project, as absolute paths. `node_modules`, dot
+/// directories and the output tree are skipped — nothing there is a source.
+fn project_sources(root: &Path, out_dir: Option<&Path>) -> std::io::Result<Vec<PathBuf>> {
+    let out = out_dir.and_then(|d| d.canonicalize().ok());
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if Some(&dir) == out.as_ref() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name.starts_with('.') || name == "node_modules" {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rl") {
+                files.push(path.canonicalize()?);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 /// The `.rl` files of the inputs, as absolute paths — the compiler resolves

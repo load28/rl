@@ -32,7 +32,8 @@
  * not this host's.
  *
  * Exit codes: 0 = ran (type errors, if any, are in `diagnostics`),
- * 2 = the TypeScript API could not be loaded, 3 = malformed job.
+ * 2 = the TypeScript API could not be loaded, 3 = malformed job,
+ * 5 = the resolved TypeScript has no declaration emit API.
  * ----------------------------------------------------------------------- */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -186,6 +187,11 @@ async function main() {
     // lowered module exactly as it would for a hand-written one, so rlc
     // never generates TypeScript declaration syntax itself.
     if (job.emitDeclarations) {
+      // Declaration emit is newer than the checker API: a released 7.0
+      // client can check but cannot emit.
+      if (typeof project.program.getDeclarationEmit !== "function") {
+        fail(5, "rlc host: the resolved TypeScript has no declaration emit API");
+      }
       const emitted = project.program.getDeclarationEmit(
         (job.modules ?? []).map((m) => m.path),
       );
