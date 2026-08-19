@@ -5,32 +5,13 @@
  * nothing". */
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import { TsgoProject, documentUri, fileNameOf } from "../tsgo";
-import type { OpenDoc } from "../tsproject";
-
-/**
- * The `tsgo` executable, from the same places rlc looks: a built
- * typescript-go checkout, or the executable an installed package ships.
- */
-function findTsgo(): string | null {
-  const root = process.env.RLC_TSGO_ROOT;
-  if (root) {
-    const built = path.join(root, "built/local/tsgo");
-    if (fs.existsSync(built)) return built;
-  }
-  for (const dir of [process.cwd(), path.join(process.cwd(), "../../..")]) {
-    for (const pkg of ["@typescript/typescript-linux-x64", "@typescript/native-preview-linux-x64"]) {
-      const exe = path.join(dir, "node_modules", pkg, "lib", "tsc");
-      if (fs.existsSync(exe)) return exe;
-    }
-  }
-  return null;
-}
+import type { OpenDoc } from "../tstypes";
+import { findTsgo } from "./toolchain";
 
 const TSGO = findTsgo();
 const skip = TSGO === null ? "no tsgo executable" : false;
@@ -85,6 +66,36 @@ test("a document is named the way the compiler names it", () => {
   assert.equal(documentUri("/p/src/x.ts"), "file:///p/src/x.ts");
   assert.equal(fileNameOf("file:///p/src/x.rl.ts"), "/p/src/x.rl");
   assert.equal(fileNameOf("file:///p/src/x.ts"), "/p/src/x.ts");
+  // The compiler's own library lives inside the executable, under a URI no
+  // editor can open. An answer about it is not an answer about a file.
+  assert.equal(fileNameOf("bundled:///libs/lib.es5.d.ts"), null);
+});
+
+test("a definition is only offered when a file is behind it", { skip }, async () => {
+  const { dir, rl, lowered } = workspace();
+  // `length` is declared in the standard library, which a built
+  // typescript-go carries *inside* the executable and names
+  // `bundled:///libs/lib.es5.d.ts` — there is no document for an editor to
+  // open. A toolchain that reads its libraries off disk answers with a real
+  // path instead. Either is fine; what must never happen is a location an
+  // editor is told to open and cannot.
+  const text = lowered.replace("return label;", "return label.length;");
+  const ts = project(dir, new Map([[rl, text]]));
+  try {
+    for (const definition of await ts.definitionsAt(rl, text.indexOf("length;"))) {
+      assert.ok(fs.existsSync(definition.fileName), definition.fileName);
+      assert.equal(
+        definition.fileText.slice(
+          definition.start,
+          definition.start + definition.length,
+        ),
+        "length",
+      );
+    }
+  } finally {
+    ts.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("hover answers for a buffer the disk never saw", { skip }, async () => {

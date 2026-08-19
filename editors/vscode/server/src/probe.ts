@@ -2,7 +2,7 @@
  * Completion probes — types for a construct the user has not finished.
  *
  * The TypeScript language service answers over the *emitted* TypeScript of
- * an .rl buffer (tsproject.ts, virtual.ts): rl syntax is nothing its parser
+ * an .rl buffer (tsgo.ts, virtual.ts): rl syntax is nothing its parser
  * can resolve through — a `|>` pipeline collapses the statement it is in,
  * and a `match` arm's pattern bindings do not exist as declarations at all.
  *

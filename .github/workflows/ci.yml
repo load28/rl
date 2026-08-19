@@ -91,6 +91,15 @@ jobs:
         working-directory: editors/vscode
         run: npm ci
 
+      # Every TypeScript answer the server gives comes from the compiler's
+      # own language server, so the tests that ask for one skip without a
+      # `tsgo` on hand. It goes in the repository root rather than beside
+      # the extension: the extension's resolution walks `node_modules` up
+      # from the workspace, and `editors/vscode/node_modules/typescript` is
+      # the TypeScript 5 that *builds* the extension.
+      - name: Install TypeScript 7 for the language server
+        run: npm install --no-save --no-package-lock typescript@7
+
       - name: Build
         working-directory: editors/vscode
         run: npx tsc -b
@@ -99,18 +108,17 @@ jobs:
         working-directory: editors/vscode
         run: |
           export PATH="$GITHUB_WORKSPACE/target/debug:$PATH"
-          node --test "server/out/test/*.test.js"
+          node --test "server/out/test/*.test.js" 2>&1 | tee /tmp/extension.log
 
-      # TASK-059: the vsix must carry TypeScript's own lib*.d.ts. Without
-      # them the language server still starts and type-checks against no
-      # globals at all, reporting invented errors on correct code — a
-      # failure no unit test sees, because it lives in the packaging.
-      - name: Guard — packaged vsix carries TypeScript's libraries
-        working-directory: editors/vscode
+      # A skip here is not a pass: these tests skip silently when a tool is
+      # missing, which is exactly what this job installs. The one skip a
+      # released TypeScript 7 cannot avoid is declaration emit, which the
+      # package does not expose — the `native` job builds a compiler that
+      # does and runs the whole suite with nothing skipped.
+      - name: Guard — nothing skipped for a tool this job installed
         run: |
-          count=$(npx @vscode/vsce@3 ls --no-dependencies | grep -c "typescript/lib/lib" || true)
-          echo "lib*.d.ts in the package: $count"
-          test "$count" -ge 90
+          ! grep -q "SKIP rlc not on PATH" /tmp/extension.log
+          ! grep -q "SKIP no tsgo executable" /tmp/extension.log
 
   native:
     name: native backend (typescript-go)
@@ -169,16 +177,17 @@ jobs:
           npm ci
           npx tsc -b
 
-      - name: Test — on-save sidecars through the native backend
+      - name: Test — the extension against a compiler that can emit
         working-directory: editors/vscode
         env:
           RLC_TSGO_ROOT: ${{ github.workspace }}/typescript-go
         run: |
           export PATH="$GITHUB_WORKSPACE/target/debug:$PATH"
-          node --test "server/out/test/sidecar.test.js" 2>&1 | tee /tmp/sidecar.log
-          # The tests skip when no compiler can emit declarations; this job
-          # built one, so a skip here means the wiring broke.
-          grep -q "# skipped 0" /tmp/sidecar.log
+          node --test "server/out/test/*.test.js" 2>&1 | tee /tmp/extension-native.log
+          # Every guard in the suite is satisfiable here — the compiler is
+          # on PATH, it can serve a language server, and it can emit
+          # declarations — so a skip means the wiring broke.
+          grep -q "^# skipped 0$" /tmp/extension-native.log
 
   msrv:
     name: build on MSRV

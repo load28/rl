@@ -63,6 +63,49 @@ export function findCompiler(
   return "rlc";
 }
 
+/**
+ * The `tsgo` executable the TypeScript delegation runs, from the same places
+ * the compiler looks: a built typescript-go checkout named by
+ * `RLC_TSGO_ROOT`, or the executable an installed `typescript` package ships
+ * beside its own files. Empty when there is none — the delegation then has
+ * no answers, which the caller reports rather than hides.
+ */
+export function findTsgo(workspaceRoots: string[]): string {
+  const root = process.env.RLC_TSGO_ROOT;
+  if (root) {
+    const built = path.join(root, "built/local/tsgo");
+    if (exists(built)) return built;
+  }
+  const platform = `${process.platform}-${process.arch}`;
+  // The workspace first — a project that pins a TypeScript pins the
+  // compiler its own code is checked by — and the server's own directory
+  // after it, which is where a toolchain installed for the editor sits.
+  for (const start of [...workspaceRoots, process.cwd()]) {
+    let dir = start;
+    while (true) {
+      for (const pkg of [
+        `@typescript/typescript-${platform}`,
+        `@typescript/native-preview-${platform}`,
+      ]) {
+        const exe = path.join(dir, "node_modules", pkg, "lib", "tsc");
+        if (exists(exe)) return exe;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  return "";
+}
+
+function exists(file: string): boolean {
+  try {
+    return fs.existsSync(file);
+  } catch {
+    return false;
+  }
+}
+
 /** Run `rlc --check` on the buffer contents and parse stderr diagnostics. */
 export function runCheck(
   compiler: string,
@@ -300,6 +343,50 @@ const stdModules = new Map<string, string | null>();
  * has never run `rlc --types`. Null when the compiler is missing or
  * predates `--emit-std` — the caller then leaves the specifier unresolved.
  */
+/**
+ * Makes `"@rl/std"` resolvable in `root`, by putting the standard library
+ * where TypeScript looks for a package of that name.
+ *
+ * The compiler serves the library from memory; a language server cannot —
+ * module resolution reads the file system, not the buffers a client has
+ * opened. So for the editor the library has to *be* there. Only our own
+ * scoped package is ever written, and never over one that already exists:
+ * a project that installs `@rl/std` itself keeps its own copy.
+ *
+ * Returns the package directory, or null when the library could not be
+ * produced (no compiler) or already resolves on its own.
+ */
+export function ensureStdModule(compiler: string, root: string): string | null {
+  const pkg = path.join(root, "node_modules", "@rl", "std");
+  const entry = path.join(pkg, "index.ts");
+  if (exists(entry)) return pkg;
+  if (exists(pkg)) return null; // something else owns the name
+
+  const source = stdModuleSource(compiler);
+  if (source === null) return null;
+  try {
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(entry, source);
+    fs.writeFileSync(
+      path.join(pkg, "package.json"),
+      JSON.stringify({ name: "@rl/std", version: "0.0.0", types: "index.ts" }, null, 2) + "\n",
+    );
+    return pkg;
+  } catch {
+    return null;
+  }
+}
+
+/** The standard library's source, as the compiler writes it. */
+function stdModuleSource(compiler: string): string | null {
+  try {
+    const code = String(execFileSync(compiler, ["--emit-std"], EXEC_SYNC_OPTIONS));
+    return code.trim() === "" ? null : code;
+  } catch {
+    return null;
+  }
+}
+
 export function stdModulePath(compiler: string): string | null {
   const cached = stdModules.get(compiler);
   if (cached !== undefined) return cached;

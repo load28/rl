@@ -1,33 +1,29 @@
 /* End-to-end tests for the virtual-document pipeline (TASK-050): the real
- * `rlc --emit-map` output served to the TypeScript language service via
- * TsProject, with offsets translated through MappedDoc. These drive the
- * real compiler binary, so they skip when it is not on PATH — same rule as
- * the sidecar tests. */
+ * `rlc --emit-map` output served to the TypeScript language server via
+ * TsgoProject, with offsets translated through MappedDoc. These drive the
+ * real compiler *and* a real tsgo, so they skip when either is missing. */
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { runEmitMap, runEmitMapFileSync, stdModulePath } from "../rlc";
-import { TsProject } from "../tsproject";
+import { ensureStdModule, runEmitMap, runEmitMapFileSync } from "../rlc";
 import { MappedDoc } from "../virtual";
+import type { TsgoProject } from "../tsgo";
+import { openProject } from "./tracked";
+import { COMPILER, compilerAvailable, findTsgo } from "./toolchain";
 
-const COMPILER = "rlc";
-
-function compilerAvailable(): boolean {
-  try {
-    execFileSync(COMPILER, ["-v"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const skip = compilerAvailable() ? false : "rlc not on PATH";
+const TSGO = findTsgo();
+const skip = !compilerAvailable()
+  ? "rlc not on PATH"
+  : TSGO === null
+    ? "no tsgo executable"
+    : false;
 
 const SOURCE = [
+  'import { disc } from "./helpers";',
+  "",
   "enum Shape {",
   "  Circle(radius: number),",
   "  Rect(w: number, h: number),",
@@ -38,44 +34,37 @@ const SOURCE = [
   "const shape = getShape();",
   "",
   "const area = match (shape) {",
-  "  Circle(radius) => Math.PI * radius * radius,",
+  "  Circle(radius) => disc(radius * radius),",
   "  Rect(w, h) => w * h,",
   "  Point => 0,",
   "};",
   "",
 ].join("\n");
 
+/** A hand-written TypeScript file the source imports, so a definition that
+ * leaves an arm body lands somewhere an editor can actually open. The
+ * compiler's own standard library is embedded in the executable and has no
+ * file behind it. */
+const HELPERS = "export function disc(x: number): number {\n  return x * Math.PI;\n}\n";
+
 /** The source compiled and served as a virtual document. */
 async function virtualProject(): Promise<{
   file: string;
   mapped: MappedDoc;
-  ts: TsProject;
+  ts: TsgoProject;
 }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-emitmap-test-"));
   const file = path.join(dir, "shapes.rl");
   fs.writeFileSync(file, SOURCE);
+  fs.writeFileSync(path.join(dir, "helpers.ts"), HELPERS);
   const result = await runEmitMap(COMPILER, SOURCE, file);
   assert.ok(result, "rlc --emit-map failed");
   const mapped = new MappedDoc(SOURCE, result!.code, result!.mappings);
-  const ts = new TsProject(
-    (fileName) =>
-      fileName === file ? { text: mapped.code, version: "1:emitted" } : null,
-    () => [file],
-    dir,
+  const ts = openProject(TSGO as string, dir, (fileName) =>
+    fileName === file ? { text: mapped.code, version: "1:emitted" } : null,
   );
   return { file, mapped, ts };
 }
-
-test("emitted virtual doc types the scrutinee exactly", { skip }, async () => {
-  const { file, mapped, ts } = await virtualProject();
-  const src = SOURCE.indexOf("shape) {");
-  const at = mapped.srcToOut(src);
-  assert.notEqual(at, null, "scrutinee must be mapped");
-  const info = ts.typeAt(file, at!, { start: at!, end: at! + "shape".length });
-  assert.ok(info, "expected a type");
-  assert.equal(info!.name, "Shape");
-  assert.equal(info!.declFile, file);
-});
 
 test(
   "hover inside a match arm body works on the virtual doc",
@@ -87,7 +76,7 @@ test(
     const src = SOURCE.indexOf("radius * radius");
     const at = mapped.srcToOut(src);
     assert.notEqual(at, null, "arm body must be mapped");
-    const info = ts.quickInfoAt(file, at!);
+    const info = await ts.quickInfoAt(file, at!);
     assert.ok(info, "expected quick info");
     assert.ok(
       info!.signature.includes("radius: number"),
@@ -103,15 +92,20 @@ test(
   "definition from an arm body maps back to source coordinates",
   { skip },
   async () => {
-    // `Math.PI` inside the arm body resolves into lib.d.ts; the querying
-    // side goes through the mapping, the result side is a plain TS file.
+    // `disc` inside the arm body is declared in a hand-written `.ts`; the
+    // querying side goes through the mapping, the result side is a plain
+    // TS file, in its own coordinates.
     const { file, mapped, ts } = await virtualProject();
-    const src = SOURCE.indexOf("Math.PI");
+    const src = SOURCE.indexOf("disc(radius");
     const at = mapped.srcToOut(src);
     assert.notEqual(at, null);
-    const defs = ts.definitionsAt(file, at!);
-    assert.ok(defs.length > 0, "expected a definition for Math");
-    assert.ok(defs[0].fileName.endsWith(".d.ts"));
+    const defs = await ts.definitionsAt(file, at!);
+    assert.equal(defs.length, 1, JSON.stringify(defs));
+    assert.equal(defs[0].fileName, path.join(path.dirname(file), "helpers.ts"));
+    assert.equal(
+      defs[0].fileText.slice(defs[0].start, defs[0].start + defs[0].length),
+      "disc",
+    );
   },
 );
 
@@ -146,7 +140,7 @@ async function stdProject(
 ): Promise<{
   file: string;
   mapped: MappedDoc;
-  ts: TsProject;
+  ts: TsgoProject;
 }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-std-test-"));
   const file = path.join(dir, "calc.rl");
@@ -154,13 +148,9 @@ async function stdProject(
   const result = await runEmitMap(COMPILER, source, file);
   assert.ok(result, "rlc --emit-map failed");
   const mapped = new MappedDoc(source, result!.code, result!.mappings);
-  const ts = new TsProject(
-    (fileName) =>
-      fileName === file ? { text: mapped.code, version: "1:emitted" } : null,
-    () => [file],
-    dir,
-    () => stdModulePath(COMPILER),
-    defaultLib,
+  ensureStdModule(COMPILER, dir);
+  const ts = openProject(TSGO as string, dir, (fileName) =>
+    fileName === file ? { text: mapped.code, version: "1:emitted" } : null,
   );
   return { file, mapped, ts };
 }
@@ -170,7 +160,7 @@ test("a pipeline step over the std module is not `any`", { skip }, async () => {
   const src = PIPE_SOURCE.indexOf("andThenP");
   const at = mapped.srcToOut(src);
   assert.notEqual(at, null, "pipeline step must be mapped");
-  const info = ts.quickInfoAt(file, at!);
+  const info = await ts.quickInfoAt(file, at!);
   assert.ok(info, "expected quick info");
   assert.ok(
     info!.signature.includes("Result<number, string>"),
@@ -186,7 +176,7 @@ test(
     const src = PIPE_SOURCE.indexOf("trim");
     const at = mapped.srcToOut(src);
     assert.notEqual(at, null, "postfix step must be mapped");
-    const info = ts.quickInfoAt(file, at!);
+    const info = await ts.quickInfoAt(file, at!);
     assert.ok(info, "expected quick info");
     assert.ok(
       info!.signature.includes("String.trim(): string"),
@@ -240,24 +230,19 @@ test(
       onDisk!.mappings,
     );
 
-    const ts = new TsProject(
-      (fileName) => {
-        if (fileName === main)
-          return { text: mapped.code, version: "1:emitted" };
-        if (fileName === shapes) {
-          return { text: diskDoc.code, version: "disk-1:emitted" };
-        }
-        return null;
-      },
-      () => [main],
-      dir,
-      () => stdModulePath(COMPILER),
-    );
+    ensureStdModule(COMPILER, dir);
+    const ts = openProject(TSGO as string, dir, (fileName) => {
+      if (fileName === main) return { text: mapped.code, version: "1:emitted" };
+      if (fileName === shapes) {
+        return { text: diskDoc.code, version: "disk-1:emitted" };
+      }
+      return null;
+    });
 
     const src = IMPORTER.indexOf("radius * radius");
     const at = mapped.srcToOut(src);
     assert.notEqual(at, null, "arm body must be mapped");
-    const info = ts.quickInfoAt(main, at!);
+    const info = await ts.quickInfoAt(main, at!);
     assert.ok(info, "expected quick info");
     assert.ok(
       info!.signature.includes("radius: number"),
@@ -285,7 +270,7 @@ const BAD_PIPE = [
 
 test("a type error inside a pipeline is reported", { skip }, async () => {
   const { file, mapped, ts } = await stdProject(BAD_PIPE);
-  const diagnostics = ts.diagnosticsFor(file);
+  const diagnostics = await ts.diagnosticsFor(file);
   assert.equal(diagnostics.length, 1, JSON.stringify(diagnostics));
   assert.equal(diagnostics[0].code, 2339); // property does not exist
   assert.match(diagnostics[0].message, /'length' does not exist on type/);
@@ -313,7 +298,7 @@ const BAD_ARM = [
 
 test("a type error inside a match arm is reported", { skip }, async () => {
   const { file, mapped, ts } = await stdProject(BAD_ARM);
-  const diagnostics = ts.diagnosticsFor(file);
+  const diagnostics = await ts.diagnosticsFor(file);
   assert.equal(diagnostics.length, 1, JSON.stringify(diagnostics));
   assert.equal(diagnostics[0].code, 2339);
   const start = mapped.outToSrc(diagnostics[0].start);
@@ -326,7 +311,7 @@ test("a type error inside a match arm is reported", { skip }, async () => {
 
 test("clean rl syntax reports nothing", { skip }, async () => {
   const { file, ts } = await stdProject(PIPE_SOURCE);
-  assert.deepEqual(ts.diagnosticsFor(file), []);
+  assert.deepEqual(await ts.diagnosticsFor(file), []);
 });
 
 test("raw .rl text is never type-checked", { skip }, async () => {
@@ -336,13 +321,10 @@ test("raw .rl text is never type-checked", { skip }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-rawdiag-test-"));
   const file = path.join(dir, "shapes.rl");
   fs.writeFileSync(file, SOURCE);
-  const ts = new TsProject(
-    (fileName) =>
-      fileName === file ? { text: SOURCE, version: "1:raw" } : null,
-    () => [file],
-    dir,
+  const ts = openProject(TSGO as string, dir, (fileName) =>
+    fileName === file ? { text: SOURCE, version: "1:raw" } : null,
   );
-  assert.deepEqual(ts.diagnosticsFor(file), []);
+  assert.deepEqual(await ts.diagnosticsFor(file), []);
 });
 
 /* --------------------------------------------------------------------------
@@ -370,20 +352,6 @@ const TUPLE_SOURCE = [
 
 test("tuple destructuring over the std module reports nothing", { skip }, async () => {
   const { file, ts } = await stdProject(TUPLE_SOURCE);
-  assert.equal(ts.typeEnvironmentError(), null);
-  assert.deepEqual(ts.diagnosticsFor(file), []);
+  assert.deepEqual(await ts.diagnosticsFor(file), []);
 });
 
-test(
-  "a program without the default library reports nothing",
-  { skip },
-  async () => {
-    const { file, ts } = await stdProject(TUPLE_SOURCE, null);
-    assert.notEqual(
-      ts.typeEnvironmentError(),
-      null,
-      "a missing default library must be reported as an environment error",
-    );
-    assert.deepEqual(ts.diagnosticsFor(file), []);
-  },
-);

@@ -39,7 +39,9 @@ import * as path from "node:path";
 
 import * as probe from "./probe";
 import * as sidecar from "./sidecar";
-import * as tsproject from "./tsproject";
+import { positionAt as positionOf } from "./lsp";
+import type * as tsproject from "./tstypes";
+import { TsgoProject } from "./tsgo";
 import * as virtual from "./virtual";
 
 const connection = createConnection(ProposedFeatures.all);
@@ -365,10 +367,18 @@ function fromServiceSpan(
  * the fallback for definitions and hover, and — over a virtual document
  * only — for the type diagnostics `validate` merges into rlc's own. */
 
-let tsProjectInstance: tsproject.TsProject | null = null;
+let tsProjectInstance: TsgoProject | null = null;
 
-function getTsProject(): tsproject.TsProject {
-  tsProjectInstance ??= new tsproject.TsProject(
+function getTsProject(): TsgoProject {
+  if (tsProjectInstance === null) {
+    // The language server reads modules from disk, so the standard library
+    // has to be somewhere it can find — see `ensureStdModule`.
+    const root = workspaceRoots[0];
+    if (root) rlc.ensureStdModule(currentCompiler(), root);
+  }
+  tsProjectInstance ??= new TsgoProject(
+    rlc.findTsgo(workspaceRoots),
+    workspaceRoots[0] ?? process.cwd(),
     (fileName) => {
       // A probe stands in for the buffer while one is installed — the
       // completion path below serves the emitted TypeScript of a source
@@ -392,14 +402,7 @@ function getTsProject(): tsproject.TsProject {
       }
       return null;
     },
-    () =>
-      documents
-        .all()
-        .map((d) => URI.parse(d.uri))
-        .filter((u) => u.scheme === "file")
-        .map((u) => u.fsPath),
-    workspaceRoots[0] ?? process.cwd(),
-    () => rlc.stdModulePath(currentCompiler()),
+    (message) => connection.console.warn(message),
   );
   return tsProjectInstance;
 }
@@ -471,29 +474,44 @@ async function probeFor(
 
 /** Runs `query` with `p` standing in for its buffer. Synchronous by
  * construction — nothing but `query` may see the probe's text. */
-function withProbe<T>(p: InstalledProbe, query: () => T): T {
-  installedProbe = p;
-  try {
-    return query();
-  } finally {
-    installedProbe = null;
-  }
+/** Queries run one at a time: a probe is installed for the duration of one,
+ * and the buffer it stands in for must not change under another. */
+let queries: Promise<unknown> = Promise.resolve();
+
+function serialize<T>(query: () => Promise<T>): Promise<T> {
+  const next = queries.then(query, query);
+  queries = next.catch(() => undefined);
+  return next;
 }
 
-function tsDefinitions(doc: TextDocument, offset: number): Location[] | null {
+function withProbe<T>(p: InstalledProbe, query: () => Promise<T>): Promise<T> {
+  return serialize(async () => {
+    installedProbe = p;
+    try {
+      return await query();
+    } finally {
+      installedProbe = null;
+    }
+  });
+}
+
+async function tsDefinitions(
+  doc: TextDocument,
+  offset: number,
+): Promise<Location[] | null> {
   const uri = URI.parse(doc.uri);
   if (uri.scheme !== "file") return null;
   const at = toServiceOffset(uri.fsPath, doc, offset);
   if (at === null) return null;
-  const definitions = getTsProject().definitionsAt(uri.fsPath, at);
+  const definitions = await getTsProject().definitionsAt(uri.fsPath, at);
   const locations: Location[] = [];
   for (const d of definitions) {
     const span = fromServiceSpan(d.fileName, d.fileText, d.start, d.length);
     if (!span) continue;
     locations.push(
       Location.create(URI.file(d.fileName).toString(), {
-        start: tsproject.positionAt(span.text, span.start),
-        end: tsproject.positionAt(span.text, span.end),
+        start: positionOf(span.text, span.start),
+        end: positionOf(span.text, span.end),
       }),
     );
   }
@@ -543,24 +561,24 @@ interface TsCompletionData {
  * items use `0`/`1`). Signature and docs are left to the resolve step:
  * TypeScript computes them per entry, so asking eagerly would type-check
  * every member of the type on every keystroke. */
-function tsCompletions(
+async function tsCompletions(
   doc: TextDocument,
   offset: number,
   activeProbe: InstalledProbe | null = null,
-): { items: CompletionItem[]; member: boolean } {
+): Promise<{ items: CompletionItem[]; member: boolean }> {
   const uri = URI.parse(doc.uri);
   if (uri.scheme !== "file") return { items: [], member: false };
 
   let list: tsproject.TsCompletionList;
   if (activeProbe) {
-    list = withProbe(activeProbe, () =>
+    list = await withProbe(activeProbe, () =>
       getTsProject().completionsAt(activeProbe.fsPath, activeProbe.offset),
     );
     lastProbe = activeProbe;
   } else {
     const at = toServiceOffset(uri.fsPath, doc, offset);
     if (at === null) return { items: [], member: false };
-    list = getTsProject().completionsAt(uri.fsPath, at);
+    list = await getTsProject().completionsAt(uri.fsPath, at);
   }
 
   return {
@@ -597,22 +615,22 @@ async function tsCompletionsProbed(
   offset: number,
   atMember: boolean,
 ): Promise<CompletionItem[]> {
-  const plain = tsCompletions(doc, offset);
+  const plain = await tsCompletions(doc, offset);
   if (!atMember) return plain.items;
   if (plain.member && plain.items.length > 0) return plain.items;
 
   const built = await probeFor(doc, offset);
   if (!built) return plain.member ? plain.items : [];
-  const probed = tsCompletions(doc, offset, built);
+  const probed = await tsCompletions(doc, offset, built);
   return probed.member ? probed.items : [];
 }
 
-function tsHover(doc: TextDocument, offset: number) {
+async function tsHover(doc: TextDocument, offset: number) {
   const uri = URI.parse(doc.uri);
   if (uri.scheme !== "file") return null;
   const at = toServiceOffset(uri.fsPath, doc, offset);
   if (at === null) return null;
-  const info = getTsProject().quickInfoAt(uri.fsPath, at);
+  const info = await getTsProject().quickInfoAt(uri.fsPath, at);
   if (!info || info.signature === "") return null;
   const mapped = activeVirtual(uri.fsPath, doc.version);
   let start = info.start;
@@ -785,14 +803,11 @@ async function validate(doc: TextDocument): Promise<void> {
     // Awaiting gave the buffer another chance to move on.
     const fresh = documents.get(doc.uri);
     if (!fresh || fresh.version !== doc.version) return;
-    diagnostics.push(...typeDiagnostics(fresh, docName));
+    diagnostics.push(...(await typeDiagnostics(fresh, docName)));
   }
 
   void connection.sendDiagnostics({ uri: doc.uri, diagnostics });
 }
-
-/** One warning per session when the TS environment cannot type-check. */
-let typeEnvironmentWarned = false;
 
 /**
  * TypeScript's type errors for a buffer, moved onto the `.rl` source.
@@ -804,25 +819,16 @@ let typeEnvironmentWarned = false;
  * responsibility, never something to report at the user (CLAUDE.md, error
  * layers).
  */
-function typeDiagnostics(doc: TextDocument, fsPath: string): Diagnostic[] {
+async function typeDiagnostics(
+  doc: TextDocument,
+  fsPath: string,
+): Promise<Diagnostic[]> {
   const mapped = activeVirtual(fsPath, doc.version);
   if (!mapped) return [];
 
-  // A program without TypeScript's own lib.d.ts reports errors that are
-  // artifacts of the missing globals, not of the buffer. `diagnosticsFor`
-  // returns nothing in that state; say so once so it is not silent.
-  const broken = getTsProject().typeEnvironmentError();
-  if (broken !== null) {
-    if (!typeEnvironmentWarned) {
-      typeEnvironmentWarned = true;
-      connection.console.warn(`rl: ${broken}`);
-    }
-    return [];
-  }
-
   const text = doc.getText();
   const out: Diagnostic[] = [];
-  for (const d of getTsProject().diagnosticsFor(fsPath)) {
+  for (const d of await getTsProject().diagnosticsFor(fsPath)) {
     const span = fromServiceSpan(fsPath, mapped.code, d.start, d.length);
     if (!span || span.text !== text) continue;
     // An empty span (an error at a position, not over one) would render as
@@ -1069,13 +1075,11 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
 
   // Arm pattern position → case tags (not yet covered) + `_`.
   if (ctx?.patternPosition) {
-    // Structural inference first (an `Enum.` mention in the scrutinee, or a
-    // unique owner of the written tags) — it is exact when it fires. Then
-    // the TypeScript-inferred type of the scrutinee expression, matched
-    // against the visible rl enums (TASK-050). Only then the full pool.
-    const inferred =
-      analysis.inferEnum(masked, ctx.match, visible) ??
-      tsScrutineeEnum(doc, ctx.match, visible);
+    // Structural inference (an `Enum.` mention in the scrutinee, or a unique
+    // owner of the written tags) — exact when it fires. Otherwise the whole
+    // visible pool: TypeScript 7 has no structural way to name the type of
+    // the scrutinee, and offering a superset beats naming the wrong enum.
+    const inferred = analysis.inferEnum(masked, ctx.match, visible);
     const pool = inferred ? [inferred] : visible;
     const covered = new Set(analysis.armTags(masked, ctx.match));
     const items: CompletionItem[] = [];
@@ -1148,14 +1152,8 @@ connection.onCompletionResolve(
       data.probe && lastProbe?.version === data.probe ? lastProbe : null;
     let detail: tsproject.TsCompletionDetail | null;
     if (from) {
-      detail = withProbe(from, () =>
-        getTsProject().completionDetail(
-          from.fsPath,
-          from.offset,
-          data.name,
-          data.source,
-          data.entry,
-        ),
+      detail = await withProbe(from, () =>
+        getTsProject().completionDetail(from.fsPath, from.offset, data.name),
       );
     } else if (data.probe) {
       return item; // its probe is gone; the buffer has moved on
@@ -1163,13 +1161,7 @@ connection.onCompletionResolve(
       await ensureVirtual(doc);
       const at = toServiceOffset(uri.fsPath, doc, data.offset);
       if (at === null) return item;
-      detail = getTsProject().completionDetail(
-        uri.fsPath,
-        at,
-        data.name,
-        data.source,
-        data.entry,
-      );
+      detail = await getTsProject().completionDetail(uri.fsPath, at, data.name);
     }
     if (!detail) return item;
     if (detail.signature !== "") item.detail = detail.signature;
@@ -1201,7 +1193,7 @@ connection.onSignatureHelp(async (params): Promise<SignatureHelp | null> => {
   await ensureVirtual(doc);
   const at = toServiceOffset(uri.fsPath, doc, doc.offsetAt(params.position));
   if (at === null) return null;
-  const help = getTsProject().signatureHelpAt(uri.fsPath, at);
+  const help = await getTsProject().signatureHelpAt(uri.fsPath, at);
   if (!help || help.signatures.length === 0) return null;
   return {
     signatures: help.signatures.map(
@@ -1224,58 +1216,6 @@ connection.onSignatureHelp(async (params): Promise<SignatureHelp | null> => {
     activeParameter: help.activeParameter,
   };
 });
-
-/**
- * The visible rl enum a match scrutinee has, according to TypeScript's
- * inferred type of the scrutinee expression (TASK-050). The type name must
- * match a visible enum (pre-alias import names included), and when
- * TypeScript reports the declaring file it must be the file that enum
- * actually lives in — a same-named unrelated TS type is not a hit. Null
- * on any doubt: the caller falls back to the full visible pool.
- */
-function tsScrutineeEnum(
-  doc: TextDocument,
-  m: analysis.MatchInfo,
-  visible: analysis.EnumInfo[],
-): analysis.EnumInfo | null {
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme !== "file") return null;
-
-  // The scrutinee expression, whitespace-trimmed, in source coordinates.
-  const text = doc.getText();
-  let start = m.scrutOpen + 1;
-  let end = m.scrutClose;
-  while (start < end && /\s/.test(text[start])) start++;
-  while (end > start && /\s/.test(text[end - 1])) end--;
-  if (start >= end) return null;
-
-  let queryStart = start;
-  let queryEnd = end;
-  const mapped = activeVirtual(uri.fsPath, doc.version);
-  if (mapped) {
-    const s = mapped.srcToOut(start);
-    const e = mapped.srcToOut(end - 1);
-    if (s === null || e === null || e < s) return null;
-    queryStart = s;
-    queryEnd = e + 1;
-  }
-  const info = getTsProject().typeAt(uri.fsPath, queryStart, {
-    start: queryStart,
-    end: queryEnd,
-  });
-  if (!info) return null;
-
-  return (
-    visible.find((e) => {
-      if (e.name !== info.name && e.imported?.name !== info.name) return false;
-      // Built-ins (Option/Result) have no on-disk declaration to compare.
-      if (e.builtin) return true;
-      if (info.declFile === null) return true;
-      const declared = e.imported ? e.imported.path : uri.fsPath;
-      return path.resolve(info.declFile) === path.resolve(declared);
-    }) ?? null
-  );
-}
 
 function constructorItem(
   e: analysis.EnumInfo,
@@ -1439,17 +1379,17 @@ connection.onReferences(async (params): Promise<Location[] | null> => {
   // exactly, and rl-specific spans degrade to an empty result.
   const at = toServiceOffset(uri.fsPath, doc, offset);
   if (at === null) return null;
-  const references = getTsProject()
-    .referencesAt(uri.fsPath, at)
-    .filter((r) => params.context.includeDeclaration || !r.isDefinition);
+  const references = (await getTsProject().referencesAt(uri.fsPath, at)).filter(
+    (r) => params.context.includeDeclaration || !r.isDefinition,
+  );
   const locations: Location[] = [];
   for (const r of references) {
     const span = fromServiceSpan(r.fileName, r.fileText, r.start, r.length);
     if (!span) continue;
     locations.push(
       Location.create(URI.file(r.fileName).toString(), {
-        start: tsproject.positionAt(span.text, span.start),
-        end: tsproject.positionAt(span.text, span.end),
+        start: positionOf(span.text, span.start),
+        end: positionOf(span.text, span.end),
       }),
     );
   }
@@ -1480,7 +1420,7 @@ connection.onRenameRequest(async (params) => {
 
   const at = toServiceOffset(uri.fsPath, doc, offset);
   if (at === null) return null;
-  const locations = getTsProject().renameAt(uri.fsPath, at);
+  const locations = await getTsProject().renameAt(uri.fsPath, at);
   if (!locations || locations.length === 0) return null;
   const changes: Record<string, TextEdit[]> = {};
   for (const l of locations) {
@@ -1492,8 +1432,8 @@ connection.onRenameRequest(async (params) => {
     (changes[target] ??= []).push(
       TextEdit.replace(
         {
-          start: tsproject.positionAt(span.text, span.start),
-          end: tsproject.positionAt(span.text, span.end),
+          start: positionOf(span.text, span.start),
+          end: positionOf(span.text, span.end),
         },
         params.newName,
       ),

@@ -13,6 +13,7 @@
  * the caller maps them to the `.rl` source with the emit map — exactly as it
  * already does.
  * ----------------------------------------------------------------------- */
+import { dirname, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
 import {
@@ -26,13 +27,14 @@ import {
 import type {
   OpenDoc,
   TsCompletion,
+  TsCompletionDetail,
   TsCompletionList,
   TsDefinition,
   TsDiagnostic,
   TsQuickInfo,
   TsReference,
   TsSignatureHelp,
-} from "./tsproject";
+} from "./tstypes";
 
 /** The document name a file takes in the server's world. An `.rl` file is
  * served as the TypeScript it lowers to, under the name that TypeScript
@@ -41,8 +43,12 @@ export function documentUri(fileName: string): string {
   return pathToFileURL(fileName.endsWith(".rl") ? `${fileName}.ts` : fileName).toString();
 }
 
-/** The inverse: which file an answer is about. */
-export function fileNameOf(uri: string): string {
+/** The inverse: which file an answer is about, or null when the answer is
+ * not about a file at all. The compiler carries its standard library inside
+ * the executable and names it `bundled:///libs/lib.es5.d.ts`; there is no
+ * document behind such a URI for an editor to open. */
+export function fileNameOf(uri: string): string | null {
+  if (!uri.startsWith("file:")) return null;
   const path = fileURLToPath(uri);
   return path.endsWith(".rl.ts") ? path.slice(0, -".ts".length) : path;
 }
@@ -58,6 +64,9 @@ export class TsgoProject {
   /** The text last served for a file, needed to turn offsets into positions
    * and answers back into offsets. */
   private readonly served = new Map<string, string>();
+  /** The raw items of the last completion answers, so one can be resolved
+   * later: the server resolves the item it produced, not a name. */
+  private readonly lastCompletion = new Map<string, unknown>();
 
   constructor(
     executable: string,
@@ -83,8 +92,22 @@ export class TsgoProject {
     return this.served.get(fileName) ?? null;
   }
 
-  /** Serves the current text of `fileName`, and returns it. */
+  /**
+   * Serves the current text of `fileName`, and returns it.
+   *
+   * The `.rl` modules it imports are served too, transitively. That is not
+   * an optimization: the server resolves `"./x.rl"` to `x.rl.ts`, and that
+   * name only exists as a document *this client serves* — an `.rl` module
+   * nobody served is a module the server cannot find, and everything
+   * flowing across the import becomes `any` behind a TS2307.
+   */
   private async serve(fileName: string): Promise<string | null> {
+    const text = await this.serveOne(fileName);
+    if (text !== null) await this.serveImports(fileName, text, new Set([fileName]));
+    return text;
+  }
+
+  private async serveOne(fileName: string): Promise<string | null> {
     const open = this.getOpenDoc(fileName);
     if (!open) return this.served.get(fileName) ?? null;
     if (this.served.get(fileName) !== open.text) {
@@ -92,6 +115,20 @@ export class TsgoProject {
       await this.client.open(documentUri(fileName), open.text);
     }
     return open.text;
+  }
+
+  private async serveImports(
+    fileName: string,
+    text: string,
+    seen: Set<string>,
+  ): Promise<void> {
+    for (const specifier of rlImports(text)) {
+      const target = resolve(dirname(fileName), specifier);
+      if (seen.has(target)) continue;
+      seen.add(target);
+      const imported = await this.serveOne(target);
+      if (imported !== null) await this.serveImports(target, imported, seen);
+    }
   }
 
   /** Hover: the signature TypeScript shows, and the span it covers. */
@@ -153,6 +190,7 @@ export class TsgoProject {
     const out: TsDefinition[] = [];
     for (const location of raw) {
       const target = fileNameOf(location.uri);
+      if (target === null) continue;
       const targetText = await this.textOf(target);
       if (targetText === null) continue;
       out.push({ fileName: target, fileText: targetText, ...spanOf(targetText, location.range) });
@@ -174,6 +212,10 @@ export class TsgoProject {
       sortText?: string;
       data?: unknown;
     }[];
+    this.lastCompletion.clear();
+    for (const item of items) {
+      this.lastCompletion.set(`${fileName}\u0000${offset}\u0000${item.label}`, item);
+    }
     return {
       entries: items.map(
         (item): TsCompletion => ({
@@ -186,6 +228,34 @@ export class TsgoProject {
       // A member completion is one the server answered for a `.` — the
       // caller uses this to tell a real member list from the global scope.
       member: isMemberContext(text, offset),
+    };
+  }
+
+  /**
+   * The signature and documentation behind one completion entry, which the
+   * server fills in only when asked — a list of a thousand entries carries
+   * no types until one is looked at.
+   */
+  async completionDetail(
+    fileName: string,
+    offset: number,
+    name: string,
+  ): Promise<TsCompletionDetail | null> {
+    const key = `${fileName}\u0000${offset}\u0000${name}`;
+    // The server resolves the item *it* produced, not a name, so the list
+    // has to have been asked for first. A caller that wants one entry's
+    // type without having shown a list has not asked; ask for it here.
+    if (!this.lastCompletion.has(key)) await this.completionsAt(fileName, offset);
+    const item = this.lastCompletion.get(key);
+    if (!item) return null;
+    const resolved = (await this.client.ask("completionItem/resolve", item)) as {
+      detail?: string;
+      documentation?: string | { value?: string };
+    } | null;
+    if (!resolved) return null;
+    return {
+      signature: resolved.detail ?? "",
+      documentation: textOfDocs(resolved.documentation),
     };
   }
 
@@ -226,8 +296,10 @@ export class TsgoProject {
     const out: TsReference[] = [];
     for (const [editedUri, edits] of Object.entries(edit.changes)) {
       const target = fileNameOf(editedUri);
+      // A file whose text cannot be read — or that is not a file at all —
+      // cannot be renamed in safely.
+      if (target === null) return null;
       const targetText = await this.textOf(target);
-      // A file whose text cannot be read cannot be renamed in safely.
       if (targetText === null) return null;
       for (const one of edits) {
         out.push({
@@ -284,7 +356,15 @@ export class TsgoProject {
     const answer = (await this.client.ask("textDocument/diagnostic", {
       textDocument: { uri: documentUri(fileName) },
     })) as { items?: LspDiagnostic[] } | null;
-    return (answer?.items ?? [])
+    const items = answer?.items ?? [];
+    // TypeScript numbers its parse errors 1000–1999 and its checker errors
+    // from 2000 up. A text with a parse error is not TypeScript at all —
+    // raw `.rl` source, or a buffer mid-edit — and the checker's recovery
+    // invents errors all through it, so none of them is reported.
+    if (items.some((item) => typeof item.code === "number" && item.code < 2000)) {
+      return [];
+    }
+    return items
       .filter((item) => (item.severity ?? 1) <= 2)
       .map((item) => ({
         ...spanOf(text, item.range),
@@ -339,6 +419,16 @@ function textOfDocs(documentation: string | { value?: string } | undefined): str
 function spanOfLabel(signature: string, label: string): [number, number] {
   const start = signature.indexOf(label);
   return start < 0 ? [0, 0] : [start, start + label.length];
+}
+
+/** The relative `.rl` specifiers a text imports. Static forms only — the
+ * same shapes the compiler rewrites, and the only ones whose target is
+ * known without evaluating anything. */
+function rlImports(text: string): string[] {
+  const out: string[] = [];
+  const pattern = /(?:\bfrom|\bimport|\brequire\s*\()\s*["'](\.[^"']*\.rl)["']/g;
+  for (const match of text.matchAll(pattern)) out.push(match[1]);
+  return out;
 }
 
 /** Whether the position follows a `.`, which is what makes an answer a

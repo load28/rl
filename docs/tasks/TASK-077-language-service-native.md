@@ -1,9 +1,9 @@
 # TASK-077: 언어 서비스를 네이티브 백엔드로
 
-- **상태**: 진행 중
+- **상태**: 완료
 - **시작일**: 2026-08-19
-- **완료일**: —
-- **커밋**: —
+- **완료일**: 2026-08-19
+- **커밋**: (아래 "결과" 참조)
 
 ## 목적
 
@@ -120,6 +120,27 @@ JS API가 없으므로, hover·정의 이동·자동완성·참조 찾기·타�
 - 2026-08-19: `server/src/test/tsgo.test.ts` 10건 — 실제 tsgo 상대로 통과.
   디스크에 없는 버퍼에 대해 hover가 답하고, definition이 디스크의 `.ts`로
   건너가고, 편집 후 재질의가 새 텍스트로 답하는 것을 확인.
+- 2026-08-19: 교체 완료. `server/src/tsproject.ts`(인프로세스 TS 5 언어
+  서비스)와 그 테스트를 **삭제**하고, `server.ts`가 `TsgoProject`를 쓰도록
+  바꿨다. 결과 타입들은 `server/src/tstypes.ts`로 옮겼다. LSP는 비동기이므로
+  `withProbe`/`tsDefinitions`/`tsCompletions`/`tsHover`/`typeDiagnostics`가
+  전부 async가 되고, 프로브 설치 구간은 `serialize()`로 직렬화한다.
+- 2026-08-19: `tsScrutineeEnum`(타입 *이름*을 묻던 자리) 제거 — 위 "막힌
+  지점"의 결론대로 rl 자신의 `analysis.inferEnum`이 정확한 경우를 답하고,
+  나머지는 보이는 enum 전체가 후보다.
+- 2026-08-19: `sidecar.ts`를 `rlc --native-sidecar` 한 번 호출로 다시 쓰고,
+  `rlc.ts`에 `findTsgo`(워크스페이스 → 프로세스 디렉터리 순 탐색)와
+  `ensureStdModule`을 넣었다.
+- 2026-08-19: 확장 테스트 전체를 `TsgoProject`로 이식하고, 서버가 살아 있는
+  채로 프로세스가 끝나지 않도록 `test/tracked.ts`(테스트마다 dispose)와
+  중복되던 도구 탐색을 모은 `test/toolchain.ts`를 추가했다.
+- 2026-08-19: `editors/vscode/server/package.json`에서 `typescript` 런타임
+  의존을 제거하고, `.vscodeignore`의 lib*.d.ts 예외와 그것을 지키던 CI VSIX
+  가드를 삭제했다 (TASK-059/061). tsgo가 자기 라이브러리를 들고 다닌다.
+- 2026-08-19: CI — `extension` 잡에 typescript@7 설치를 넣고 "이 잡이 설치한
+  도구 때문에 스킵된 테스트는 없다"를 검사한다. 선언 emit이 필요한 사이드카
+  테스트는 릴리스 패키지로는 못 도니, `native` 잡(직접 빌드한 typescript-go)이
+  확장 스위트 **전체**를 `# skipped 0`으로 돌린다.
 
 ### 막힌 지점: 타입의 *이름*을 구조적으로 얻을 방법이 없다
 
@@ -202,6 +223,57 @@ API로 에디터 기능을 재구현하는 쪽이야말로 LSP가 이미 하는 
 - **해결**: `dispatch`가 서버 요청에 항상 답한다 (`workspace/configuration`은
   `[{}]`, 나머지는 `null`).
 
+### 이슈 3: `@rl/std`가 LSP 너머에서 해석되지 않았다
+
+- **증상**: 표준 라이브러리를 import한 버퍼가 `TS2307`로 끝나고 모든 값이
+  `any`가 됐다.
+- **원인**: 베어 지정자 해석은 `node_modules/@rl/std/package.json`을 **디스크**
+  에서 찾는다. `didOpen`으로 그 경로의 문서를 열어도 패키지가 생기지는 않는다.
+- **해결**: `rlc.ensureStdModule`이 워크스페이스에 패키지를 써 둔다(이미 있는
+  패키지는 건드리지 않는다).
+
+### 이슈 4: import한 `.rl` 모듈이 해석되지 않았다
+
+- **증상**: `import { Shape } from "./shapes.rl"`가 `TS2307`이 되고, 그 값을
+  스크루티니로 쓴 match 팔의 바인딩이 타입을 잃었다.
+- **원인**: 서버는 `./shapes.rl`을 `shapes.rl.ts`로 해석하는데, 그 이름은
+  **이 클라이언트가 열어 준 문서로만** 존재한다. 열린 적 없는 `.rl` 모듈은
+  서버에게 없는 파일이다. (이슈 3과 달리 상대 지정자는 열린 버퍼로 해석된다 —
+  베어 지정자만 디스크의 패키지를 요구한다. 둘을 실측으로 갈라 확인했다.)
+- **해결**: `TsgoProject.serve()`가 텍스트의 상대 `.rl` 지정자를 따라가며
+  전이적으로 함께 연다(순환은 방문 집합으로 끊는다).
+
+### 이슈 5: 원본 `.rl` 텍스트에 타입 에러가 붙었다
+
+- **증상**: lowering이 아직 없어 원문을 그대로 서빙하는 동안, TypeScript가
+  `match`를 복구 파싱하며 만들어낸 에러들이 그대로 보고됐다.
+- **원인**: 예전 인프로세스 서비스는 `getSyntacticDiagnostics`를 먼저 물어
+  하나라도 있으면 침묵했는데, LSP의 pull 진단은 구문/의미를 한 배열로 준다.
+- **해결**: TypeScript의 번호 규약(파스 에러 1000–1999, 체커 에러 2000+)으로
+  가른다. 파스 에러가 하나라도 있으면 그 파일의 진단은 전부 버린다.
+
+### 이슈 6: `bundled:///`는 파일이 아니다
+
+- **증상**: 팔 본문에서 `Math.PI`로 정의 이동을 하면 `fileURLToPath`가
+  `ERR_INVALID_URL_SCHEME`로 던졌다.
+- **원인**: 직접 빌드한 tsgo는 표준 라이브러리를 실행 파일 안에 넣고 다니며
+  `bundled:///libs/lib.es5.d.ts`라고 부른다. 열 수 있는 문서가 없다.
+- **해결**: `fileNameOf`가 `file:` 이외의 스킴에 `null`을 돌려주고, 정의는
+  건너뛰고 이름 바꾸기는 거부한다. 열 수 없는 위치를 에디터에 건네는 것보다
+  아무것도 안 주는 쪽이 낫다. (라이브러리를 디스크에서 읽는 릴리스 패키지는
+  진짜 경로를 주므로, 테스트는 "돌려준 위치 뒤에는 반드시 파일이 있다"를
+  검사한다.)
+
+### 이슈 7: 완성 항목의 상세가 항상 비어 있었다
+
+- **증상**: `completionDetail`이 `null`을 돌려줬다.
+- **원인**: 서버는 **자기가 만든 항목**을 resolve하지, 이름으로 찾아주지
+  않는다. 목록을 먼저 요청하지 않은 호출자에게는 resolve할 항목이 없다.
+- **해결**: 캐시에 없으면 그 자리에서 목록을 먼저 요청한다. 덧붙여 TS 7은
+  항목을 **질의 위치에 인스턴스화해서** 돌려준다 —
+  `Result<U, ErrorOf<R> | F>`가 아니라 `Result<number, string>`. 표현의 차이라
+  테스트를 그쪽에 맞췄다.
+
 ### 이슈 2: 사이드카 종료 코드가 "막힘"과 "보고됨"을 구분하지 못했다
 
 - **증상**: 중복 케이스 같은 rl 에러로 lowering이 막혔는데 `--native-sidecar`가
@@ -213,11 +285,32 @@ API로 에디터 기능을 재구현하는 쪽이야말로 LSP가 이미 하는 
 
 ## 검증
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test`
-- [ ] 확장 프로그램 `node --test`
+- [x] `cargo fmt --check`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test` — 전부 통과 (`RLC_TSGO_ROOT`를 준 상태에서 native 17건 포함)
+- [x] 확장 프로그램 `node --test` — 70건, **skipped 0**
+      (직접 빌드한 typescript-go 기준). 릴리스 `typescript@7`만 있는 환경에서는
+      선언 emit이 없어 사이드카 8건이 스킵되고 나머지 62건이 통과한다.
 
 ## 결과
 
-*작업 완료 시 기록.*
+에디터의 TypeScript 답변이 전부 **컴파일러 자신의 언어 서버**에서 온다.
+인프로세스 TypeScript는 저장소에서 사라졌다 — `import * as ts from
+"typescript"`를 하는 코드가 하나도 없고, 확장 프로그램의 런타임 의존에서도
+빠졌다.
+
+전송이 둘로 갈린 것(위 "남는 진짜 제약" 4번)은 우회가 아니라 TypeScript 7의
+설계다: API는 컴파일러 질문(타입·심볼·진단·emit), LSP는 에디터 조작.
+
+변경 파일:
+
+- 추가: `server/src/tstypes.ts`, `server/src/test/toolchain.ts`,
+  `server/src/test/tracked.ts`
+- 삭제: `server/src/tsproject.ts`, `server/src/test/tsproject.test.ts`
+- 수정: `server/src/{server,tsgo,rlc,sidecar,probe}.ts`,
+  `server/src/test/{completion,emitmap,tsgo}.test.ts`,
+  `server/package.json`, `.vscodeignore`, `.github/workflows/ci.yml`
+
+### 남은 것
+
+- TASK-075: `types_host.mjs`와 레거시 `--types` 경로 제거 (패리티 확인 후).

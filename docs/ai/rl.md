@@ -167,7 +167,7 @@ const f = (val u: U) => u.name;     // arrows, methods, catch (val e), for (val 
 - `npm i -D rl-lang typescript` → prebuilt `rlc` binary (linux-x64/arm64, darwin-x64/arm64, win32-x64), run via `npx rlc`. typescript 5 or 6 required for `--types` (TS7 has no JS compiler API — `npm i -D typescript@6` if only 7 resolves).
 - Other platforms / no npm: `cargo install --git https://github.com/load28/rl`; to keep using the npm launcher, set env `RLC_BINARY=/path/to/rlc`.
 - Update: `npm i -D rl-lang@latest` (binary follows package version); verify `npx rlc -v`; then re-run `npx rlc --types src` and rebuild.
-- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, rl + type diagnostics, completion incl. std combinators, signature help, go-to-def).
+- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, rl + type diagnostics, completion incl. std combinators, signature help, go-to-def). Everything TypeScript answers comes from the compiler's own language server (`tsgo --lsp`); the extension bundles no TypeScript, so install `typescript@7` in the project (or point `RLC_TSGO_ROOT` at a built typescript-go) or those features go quiet.
 
 ## Setup
 
