@@ -90,12 +90,15 @@ pub(crate) fn run(
     }
 
     match pass.once(&files) {
+        // Nothing could be written: an rl-level error left nothing to lower,
+        // so a caller keeping a previous result should keep it.
+        Ok(report) if report.blocked => ExitCode::FAILURE,
         // Writing is what a sidecar run is for: the declarations are emitted
         // even when the code has type errors (they are reported, and a stale
         // sidecar would be worse than one built from erroring code), so the
         // exit code reflects whether the files were written. A run that only
         // checks fails on anything it reported.
-        Ok(reported) if emit || reported == 0 => ExitCode::SUCCESS,
+        Ok(report) if emit || report.reported == 0 => ExitCode::SUCCESS,
         Ok(_) => ExitCode::FAILURE,
         Err(e) => {
             eprintln!("rlc: {e}");
@@ -117,11 +120,19 @@ struct Pass<'a> {
     emit: bool,
 }
 
+/// What one pass found.
+struct Report {
+    /// How many diagnostics were printed.
+    reported: usize,
+    /// Whether the pass could not run at all: an rl-level error left nothing
+    /// to lower, so nothing was asked and nothing was written.
+    blocked: bool,
+}
+
 impl Pass<'_> {
     /// Lowers `files`, asks the compiler about them and reports what comes
-    /// back. Returns how much was reported; an rl-level error that leaves
-    /// nothing to lower counts as one.
-    fn once(&self, files: &[PathBuf]) -> Result<usize, String> {
+    /// back.
+    fn once(&self, files: &[PathBuf]) -> Result<Report, String> {
         let lowered = match project::lower(files) {
             Ok(lowered) => lowered,
             Err((file, error)) => {
@@ -132,7 +143,10 @@ impl Pass<'_> {
                     error.col,
                     error.message
                 );
-                return Ok(1);
+                return Ok(Report {
+                    reported: 1,
+                    blocked: true,
+                });
             }
         };
 
@@ -312,7 +326,10 @@ impl Pass<'_> {
             }
         }
 
-        Ok(reported)
+        Ok(Report {
+            reported,
+            blocked: false,
+        })
     }
 }
 
@@ -346,10 +363,10 @@ fn watch_loop(pass: &Pass<'_>, root: &Path, out_dir: Option<&Path>) -> ExitCode 
         if first || current != stamps {
             let started = std::time::Instant::now();
             match pass.once(&files) {
-                Ok(reported) => eprintln!(
+                Ok(report) => eprintln!(
                     "rlc: {} file(s), {} reported in {} ms — watching",
                     files.len(),
-                    reported,
+                    report.reported,
                     started.elapsed().as_millis()
                 ),
                 Err(e) => eprintln!("rlc: {e}"),
