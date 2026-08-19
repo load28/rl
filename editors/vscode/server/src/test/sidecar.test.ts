@@ -1,7 +1,8 @@
 /* Tests for on-save sidecar regeneration. These drive the real `rlc`
- * binary (the sidecar is written by `rlc --sidecar`), so they skip when the
- * compiler is not on PATH — same rule as the compiler's own integration
- * tests. */
+ * binary, which in turn drives a real TypeScript compiler (the declarations
+ * are the compiler's; only the map is rlc's). They skip when either is
+ * missing — the guard runs the same command the feature runs, so a skip
+ * means "no toolchain", never "the refresh quietly did nothing". */
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
@@ -22,7 +23,31 @@ function compilerAvailable(): boolean {
   }
 }
 
-const skip = compilerAvailable() ? false : "rlc not on PATH";
+/**
+ * Whether a TypeScript that can *emit declarations* is resolvable — the
+ * probe runs the same command the refresh runs, so a skip means the
+ * toolchain cannot do this, never that the refresh quietly did nothing.
+ * A released 7.0 package can check but not emit; a built typescript-go
+ * checkout can do both.
+ */
+function toolchainAvailable(): boolean {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-toolchain-probe-"));
+  try {
+    fs.writeFileSync(path.join(dir, "probe.rl"), "export const n: number = 1;\n");
+    execFileSync(COMPILER, ["--native-sidecar", "probe.rl"], { cwd: dir, stdio: "pipe" });
+    return fs.existsSync(path.join(dir, "probe.rl.d.ts"));
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const skip = !compilerAvailable()
+  ? "rlc not on PATH"
+  : !toolchainAvailable()
+    ? "no TypeScript compiler for rlc to drive"
+    : false;
 
 const SOURCE = [
   "/** 알림 한 건. */",
@@ -141,15 +166,33 @@ test("a file that no longer compiles keeps its last good sidecar", { skip }, asy
   await refreshSidecar(COMPILER, rl, "always");
   const before = fs.readFileSync(`${rl}.d.ts`, "utf8");
 
-  // Adding a case without an arm makes the match non-exhaustive, which is a
-  // compile error — the editor should keep showing the last declarations
-  // rather than lose them mid-edit.
+  // A duplicate case is an rl-level error: there is nothing to lower, so
+  // there are no declarations to emit, and the editor should keep showing
+  // the last good ones rather than lose them mid-edit.
+  fs.writeFileSync(rl, SOURCE.replace("  Warn(text: string),", "  Warn(text: string),\n  Info(text: string),"));
+  const result = await refreshSidecar(COMPILER, rl, "refresh");
+
+  assert.equal(result.kind, "failed", JSON.stringify(result));
+  assert.equal(fs.readFileSync(`${rl}.d.ts`, "utf8"), before);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a match that is not exhaustive still refreshes the sidecar", { skip }, async () => {
+  const dir = workspace();
+  const rl = path.join(dir, "notice.rl");
+
+  await refreshSidecar(COMPILER, rl, "always");
+
+  // Exhaustiveness is a question about a type, so the checker answers it —
+  // and it answers it *after* the declarations are emitted. The arm is
+  // missing, the diagnostic says so, and the sidecar still describes the
+  // new case, which is what the file being edited actually exports.
   fs.writeFileSync(rl, SOURCE.replace("  Warn(text: string),", "  Warn(text: string),\n  Debug(),"));
   const result = await refreshSidecar(COMPILER, rl, "refresh");
 
-  assert.equal(result.kind, "failed");
-  assert.match((result as { detail: string }).detail, /not exhaustive/);
-  assert.equal(fs.readFileSync(`${rl}.d.ts`, "utf8"), before);
+  assert.equal(result.kind, "written", JSON.stringify(result));
+  assert.match(fs.readFileSync(`${rl}.d.ts`, "utf8"), /Debug/);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });

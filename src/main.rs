@@ -704,6 +704,7 @@ fn main() -> ExitCode {
     let mut check = false;
     let mut types = false;
     let mut native_check = false;
+    let mut native_sidecar = false;
     let mut project: Option<PathBuf> = None;
     let mut banner = true;
     let mut verify = true;
@@ -730,6 +731,10 @@ fn main() -> ExitCode {
             "--check" => check = true,
             "--types" => types = true,
             "--native-check" => native_check = true,
+            "--native-sidecar" => {
+                native_check = true;
+                native_sidecar = true;
+            }
             "--project" => match it.next() {
                 Some(path) => project = Some(PathBuf::from(path)),
                 None => {
@@ -833,6 +838,7 @@ fn main() -> ExitCode {
             project.as_deref(),
             node.as_deref(),
             out_dir.as_deref(),
+            native_sidecar,
         );
     }
 

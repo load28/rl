@@ -14,7 +14,7 @@
  *
  * Protocol (stdin → stdout, both JSON, one object each):
  *
- *   { tsgoBin (nullable), apiModule, cwd, tsconfig,
+ *   { tsgoBin (nullable), apiModule, cwd, tsconfig (nullable),
  *     modules: [{ path, text }],          // lowered .rl → virtual .ts
  *     literalChecks: [{ module, start, covered: [...] }],
  *     tagChecks: [{ module, start, covered: [...] }],
@@ -24,7 +24,7 @@
  *   { diagnostics: [{ file, start, end, code, message }],
  *     literalMissing: [{ index, missing }],
  *     tagMissing: [{ index, missing }],
- *     symbols: [{ index, id, name, declaredIn }],
+ *     symbols: [{ index, id, name, builtin }],
  *     declarations: [{ path, text }] }
  *
  * `start`/`end` are UTF-16 code-unit offsets — TypeScript's own coordinate
@@ -131,9 +131,20 @@ async function main() {
 
   const out = { diagnostics: [], literalMissing: [], tagMissing: [], symbols: [], declarations: [] };
   try {
-    const snapshot = api.updateSnapshot({ openProjects: [job.tsconfig] });
-    const project = snapshot.getProject(job.tsconfig);
-    if (!project) fail(3, "rlc host: no project for " + job.tsconfig);
+    // With a `tsconfig.json` the project is the user's own. Without one —
+    // a workspace that never configured TypeScript — the modules are opened
+    // directly and the compiler infers a project for them, which is what an
+    // editor does for a loose file.
+    const paths = (job.modules ?? []).map((m) => m.path);
+    const snapshot = api.updateSnapshot(
+      job.tsconfig ? { openProjects: [job.tsconfig] } : { openFiles: paths },
+    );
+    const project = job.tsconfig
+      ? snapshot.getProject(job.tsconfig)
+      : paths.map((p) => snapshot.getDefaultProjectForFile(p)).find(Boolean);
+    if (!project) {
+      fail(3, "rlc host: no project for " + (job.tsconfig ?? paths[0] ?? "<nothing>"));
+    }
 
     // The whole program, not just the lowered modules: a hand-written `.ts`
     // and an `.rl` are in one project, so an error in either is this run's to
@@ -151,6 +162,11 @@ async function main() {
     }
 
     const checker = project.checker;
+    /** Whether a declaration lives in one of TypeScript's own lib files. */
+    const isDefaultLibrary = (declaration) => {
+      const file = declaration.path && project.program.getSourceFile(String(declaration.path));
+      return file ? project.program.isSourceFileDefaultLibrary(file) : false;
+    };
 
     // Literal-match exhaustiveness: the type TypeScript computes AT the
     // scrutinee — narrowing included — decides what the arms miss.
@@ -176,11 +192,16 @@ async function main() {
     (job.symbolChecks ?? []).forEach((check, index) => {
       const symbol = checker.getSymbolAtPosition(check.module, check.start);
       if (!symbol) return; // `any`, unresolved — never a verdict
+      const declarations = symbol.declarations ?? [];
       out.symbols.push({
         index,
         id: symbol.id,
         name: symbol.name,
-        declaredIn: (symbol.declarations ?? []).map((d) => String(d.path ?? "")).filter(Boolean),
+        // Whether this is one of TypeScript's own declarations is the
+        // compiler's answer, not a guess from the path: a released package
+        // reads its libraries from disk while a built checkout serves them
+        // from `bundled:///`, and both are the same fact.
+        builtin: declarations.length > 0 && declarations.every(isDefaultLibrary),
       });
     });
     // Declaration emit, in memory. The compiler writes the `.d.ts` for a

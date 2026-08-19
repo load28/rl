@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use super::backend::{Resolution, TypeScriptBackend};
-use super::native::{NativeBackend, is_builtin};
+use super::native::NativeBackend;
 use super::project;
 
 /// Runs the check. Returns failure when anything was reported, exactly like
@@ -23,6 +23,7 @@ pub(crate) fn run(
     project_arg: Option<&Path>,
     node: Option<&Path>,
     out_dir: Option<&Path>,
+    emit: bool,
 ) -> ExitCode {
     let files = match collect(inputs) {
         Ok(files) if files.is_empty() => {
@@ -36,25 +37,26 @@ pub(crate) fn run(
         }
     };
 
-    let tsconfig = match project_arg
+    // The project's own configuration is what the checker runs with. A
+    // workspace without one still works: the compiler infers a project for
+    // the modules, exactly as an editor does for a loose file.
+    let tsconfig = project_arg
         .map(PathBuf::from)
         .or_else(|| find_tsconfig(&files))
-    {
-        Some(path) => path,
-        None => {
-            eprintln!(
-                "rlc: no tsconfig.json found above the inputs — the project's own \
-                 configuration is what the checker runs with; name it with --project"
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-    let tsconfig = tsconfig.canonicalize().unwrap_or(tsconfig);
+        .map(|path| path.canonicalize().unwrap_or(path));
 
     // The graph is the project's, not the command line's: every `.rl` file
     // under the project root is lowered, because a named input may import
     // one that was not named. What was named decides only what is written.
-    let root = tsconfig.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let root = match &tsconfig {
+        Some(path) => path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+        // No configuration: the sources' own directories are the project.
+        None => files
+            .first()
+            .and_then(|f| f.parent())
+            .unwrap_or(Path::new("."))
+            .to_path_buf(),
+    };
     let requested: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
     let files = match project_sources(&root, out_dir) {
         Ok(all) if !all.is_empty() => all,
@@ -78,7 +80,7 @@ pub(crate) fn run(
         }
     };
 
-    let backend = match NativeBackend::new(node.map(PathBuf::from)) {
+    let backend = match NativeBackend::new(node.map(PathBuf::from), &root) {
         Ok(backend) => backend,
         Err(e) => {
             eprintln!("rlc: {e}");
@@ -87,8 +89,8 @@ pub(crate) fn run(
     };
 
     let (mut query, probes) = project::query(&lowered, &root);
-    query.emit_declarations = out_dir.is_some();
-    let answers = match backend.ask(&tsconfig, &query) {
+    query.emit_declarations = emit;
+    let answers = match backend.ask(tsconfig.as_deref(), &root, &query) {
         Ok(answers) => answers,
         Err(e) => {
             eprintln!("rlc: {e}");
@@ -98,8 +100,9 @@ pub(crate) fn run(
 
     // The declarations the compiler emitted for the lowered modules, laid
     // out under `-o` the way the sources are laid out under the project.
-    if let Some(dir) = out_dir
-        && let Err(e) = write_declarations(&answers.declarations, &lowered, &requested, &root, dir)
+    if emit
+        && let Err(e) =
+            write_declarations(&answers.declarations, &lowered, &requested, inputs, out_dir)
     {
         eprintln!("rlc: {e}");
         return ExitCode::FAILURE;
@@ -229,7 +232,7 @@ pub(crate) fn run(
         }
         if let Some(method) = mutation.method {
             match symbols.get(&method) {
-                Some(resolution) if is_builtin(resolution) => {}
+                Some(resolution) if resolution.builtin => {}
                 // A user-defined method, or one the checker could not
                 // resolve: rl says nothing.
                 _ => continue,
@@ -264,10 +267,15 @@ pub(crate) fn run(
         }
     }
 
-    if reported > 0 {
-        ExitCode::FAILURE
-    } else {
+    // Writing is what a sidecar run is for: the declarations are emitted
+    // even when the code has type errors (they are reported, and a stale
+    // sidecar would be worse than one built from erroring code), so the exit
+    // code reflects whether the files were written. A run that only checks
+    // fails on anything it reported.
+    if emit || reported == 0 {
         ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
@@ -283,42 +291,45 @@ fn write_declarations(
     declarations: &[super::backend::Declaration],
     lowered: &[project::Lowered],
     requested: &std::collections::HashSet<PathBuf>,
-    root: &Path,
-    out_dir: &Path,
+    inputs: &[String],
+    out_dir: Option<&Path>,
 ) -> std::io::Result<()> {
     for declaration in declarations {
-        let source = lowered
-            .iter()
-            .find(|f| project::declaration_path_of(f) == declaration.path);
         // Only what was asked for is written; the rest of the project is in
         // the graph so that it resolves, not so that it is emitted.
-        if source.is_some_and(|f| !requested.contains(&f.source_path)) {
+        let Some(file) = lowered
+            .iter()
+            .find(|f| project::declaration_path_of(f) == declaration.path)
+            .filter(|f| requested.contains(&f.source_path))
+        else {
             continue;
-        }
-        let relative = declaration.path.strip_prefix(root).unwrap_or(
-            declaration
-                .path
-                .file_name()
-                .map(Path::new)
-                .unwrap_or(&declaration.path),
-        );
-        let target = out_dir.join(relative);
-        let dir = target.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir)?;
+        };
 
-        match source {
-            Some(file) => {
-                let sidecar = rlc::build_sidecar(
-                    &file.source,
-                    &declaration.text,
-                    &crate::relative_path(dir, &file.source_path),
-                );
-                std::fs::write(&target, &sidecar.declarations)?;
-                std::fs::write(target.with_extension("ts.map"), &sidecar.map)?;
-            }
-            // The standard library has no `.rl` source to map back to.
-            None => std::fs::write(&target, &declaration.text)?,
-        }
+        // The same placement `--types` and `--sidecar` use: beside the
+        // source, or mirroring the input layout under `-o`.
+        let name = format!(
+            "{}.d.ts",
+            file.source_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+        let target = match out_dir {
+            Some(dir) => dir
+                .join(crate::input_relative(&file.source_path, inputs))
+                .with_file_name(name),
+            None => file.source_path.with_file_name(name),
+        };
+        let dir = target.parent().unwrap_or(Path::new(".")).to_path_buf();
+        std::fs::create_dir_all(&dir)?;
+
+        let sidecar = rlc::build_sidecar(
+            &file.source,
+            &declaration.text,
+            &crate::relative_path(&dir, &file.source_path),
+        );
+        std::fs::write(&target, &sidecar.declarations)?;
+        std::fs::write(target.with_extension("ts.map"), &sidecar.map)?;
     }
     Ok(())
 }

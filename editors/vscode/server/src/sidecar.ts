@@ -6,18 +6,15 @@
  * when that declaration carries a map whose `sources` is the `.rl` file
  * (see `docs/reference/cli.md`, "에디터 사이드카").
  *
- * `rlc --sidecar` builds both, but it needs the declaration *body*, which
- * requires type inference — tsc's job. So this module does the middle step:
- * compile the saved `.rl` with rlc, run TypeScript's declaration emit over
- * that output in memory, and hand the result back to `rlc --sidecar`.
+ * Both come from one `rlc` run: the compiler lowers the `.rl` files, hands
+ * them to the real TypeScript project the workspace is configured with, and
+ * writes what that project emits — declarations from the compiler, map from
+ * rlc. Nothing here knows about TypeScript's API, so nothing here breaks
+ * when that API changes.
  * ----------------------------------------------------------------------- */
 import { execFile } from "node:child_process";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-
-import * as ts from "typescript";
 
 /** What to do when an `.rl` file is saved. */
 export type SidecarMode = "off" | "refresh" | "always";
@@ -28,22 +25,11 @@ export type SidecarResult =
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; detail: string };
 
-const DECLARATION_OPTIONS: ts.CompilerOptions = {
-  target: ts.ScriptTarget.ES2022,
-  module: ts.ModuleKind.Preserve,
-  moduleResolution: ts.ModuleResolutionKind.Bundler,
-  allowImportingTsExtensions: true,
-  declaration: true,
-  emitDeclarationOnly: true,
-  skipLibCheck: true,
-  strict: true,
-};
-
 /**
  * Rebuilds the sidecar for one `.rl` file.
  *
  * In `"refresh"` mode (the default) a sidecar is only rewritten when one is
- * already there — a project opts in by running `rlc --sidecar` once, and
+ * already there — a project opts in by running `rlc --types` once, and
  * nothing appears in a workspace that never asked for it. `"always"` creates
  * it on first save.
  */
@@ -59,41 +45,16 @@ export async function refreshSidecar(
   // Declarations either sit next to the source or in their own tree (which
   // TypeScript merges back with `rootDirs`); the refresh has to look where
   // they actually are.
-  const declarationTarget =
-    outDir === undefined
-      ? `${rlPath}.d.ts`
-      : path.join(outDir, `${path.basename(rlPath)}.d.ts`);
+  const base =
+    outDir === undefined ? rlPath : path.join(outDir, path.basename(rlPath));
+  const declarationTarget = `${base}.d.ts`;
   if (mode === "refresh" && !exists(declarationTarget)) {
     return { kind: "skipped", reason: "no sidecar to refresh" };
   }
 
-  const compiled = await compileToTs(compiler, rlPath);
-  if (compiled.kind !== "ok") return compiled;
-
-  const declarations = emitDeclarations(rlPath, compiled.text);
-  if (declarations === undefined) {
-    return { kind: "failed", detail: "TypeScript emitted no declarations" };
-  }
-
-  const stem = path.basename(rlPath, ".rl");
-  const scratch = path.join(
-    os.tmpdir(),
-    `rl-sidecar-${crypto.createHash("sha1").update(rlPath).digest("hex").slice(0, 12)}`,
-  );
-  try {
-    fs.mkdirSync(scratch, { recursive: true });
-    fs.writeFileSync(path.join(scratch, `${stem}.d.ts`), declarations);
-  } catch (e) {
-    return { kind: "failed", detail: String(e) };
-  }
-
-  const written = await runSidecar(compiler, scratch, rlPath, outDir);
-  try {
-    fs.rmSync(scratch, { recursive: true, force: true });
-  } catch {
-    // a leftover temp directory is harmless
-  }
-  return written;
+  const args = ["--native-sidecar", rlPath];
+  if (outDir !== undefined) args.push("-o", outDir);
+  return run(compiler, args, [declarationTarget, `${base}.d.ts.map`]);
 }
 
 function exists(file: string): boolean {
@@ -104,84 +65,23 @@ function exists(file: string): boolean {
   }
 }
 
-type Compiled = { kind: "ok"; text: string } | SidecarResult;
-
-/** `rlc -p --rewrite-imports ts <file>` — the TypeScript rlc would write. */
-function compileToTs(compiler: string, rlPath: string): Promise<Compiled> {
-  return new Promise((resolve) => {
-    execFile(
-      compiler,
-      ["-p", "--rewrite-imports", "ts", rlPath],
-      { timeout: 15000, maxBuffer: 8 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err) {
-          const detail = stderr.trim() || String(err);
-          resolve({ kind: "failed", detail });
-          return;
-        }
-        resolve({ kind: "ok", text: stdout });
-      },
-    );
-  });
-}
-
 /**
- * Declaration emit over rlc's output, in memory.
- *
- * The compiled text is served at the path rlc would have written it to, so
- * its relative imports resolve against the real sibling files.
+ * One `rlc` run. Type errors in the saved file do not fail it — the sidecar
+ * is written either way, and a stale one would be worse than one built from
+ * code that does not check yet.
  */
-function emitDeclarations(rlPath: string, compiled: string): string | undefined {
-  const emittedPath = path.join(path.dirname(rlPath), `${path.basename(rlPath, ".rl")}.ts`);
-  const host = ts.createCompilerHost(DECLARATION_OPTIONS, true);
-  const readFile = host.readFile.bind(host);
-  const fileExists = host.fileExists.bind(host);
-  const getSourceFile = host.getSourceFile.bind(host);
-
-  host.fileExists = (file) => (samePath(file, emittedPath) ? true : fileExists(file));
-  host.readFile = (file) => (samePath(file, emittedPath) ? compiled : readFile(file));
-  host.getSourceFile = (file, languageVersion, onError, shouldCreate) =>
-    samePath(file, emittedPath)
-      ? ts.createSourceFile(file, compiled, languageVersion, true, ts.ScriptKind.TS)
-      : getSourceFile(file, languageVersion, onError, shouldCreate);
-
-  let declarations: string | undefined;
-  host.writeFile = (file, text) => {
-    if (file.endsWith(".d.ts")) declarations = text;
-  };
-
-  const program = ts.createProgram([emittedPath], DECLARATION_OPTIONS, host);
-  program.emit(undefined, undefined, undefined, true);
-  return declarations;
-}
-
-function samePath(a: string, b: string): boolean {
-  return path.resolve(a) === path.resolve(b);
-}
-
-/** `rlc --sidecar <dir> <file.rl>` — writes the two files next to the source. */
-function runSidecar(
-  compiler: string,
-  declarationDir: string,
-  rlPath: string,
-  outDir?: string,
-): Promise<SidecarResult> {
-  const args = ["--sidecar", declarationDir];
-  if (outDir !== undefined) args.push("-o", outDir);
-  args.push(rlPath);
-  const base = outDir === undefined ? rlPath : path.join(outDir, path.basename(rlPath));
-
+function run(compiler: string, args: string[], files: string[]): Promise<SidecarResult> {
   return new Promise((resolve) => {
     execFile(
       compiler,
       args,
-      { timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
+      { timeout: 30000, maxBuffer: 8 * 1024 * 1024 },
       (err, _stdout, stderr) => {
         if (err) {
           resolve({ kind: "failed", detail: stderr.trim() || String(err) });
           return;
         }
-        resolve({ kind: "written", files: [`${base}.d.ts`, `${base}.d.ts.map`] });
+        resolve({ kind: "written", files });
       },
     );
   });

@@ -50,6 +50,9 @@ GitHub Release 업로드까지 수행합니다.
 | `--no-verify` | 필드 타입 검사와 생성물 자가 검사 생략 |
 | `--rewrite-imports <js\|ts\|off>` | `.rl` 지정자의 방출 형태 ([`language.md` §9.2](./language.md#92-방출-형태---rewrite-imports)). 그 외 값은 에러 |
 | `--sidecar <dir>` | 선언을 받아 사이드카만 씁니다 ([아래](#에디터-사이드카---sidecar-저수준)) |
+| `--native-check` | TypeScript 7 네이티브 컴파일러로 프로젝트를 검사합니다 ([아래](#네이티브-백엔드---native-check--native-sidecar)) |
+| `--native-sidecar` | 같은 경로로 검사하고 사이드카까지 씁니다 |
+| `--project <tsconfig>` | 네이티브 경로가 쓸 `tsconfig.json` (기본: 입력 위쪽에서 탐색) |
 | `--symbols` | rl enum 선언과 `.rl` import를 JSON으로 ([아래](#심볼-출력---symbols)) |
 | `--emit-map` | 방출 TypeScript와 원본↔출력 바이트 매핑을 JSON으로 ([아래](#방출-매핑---emit-map)) |
 
@@ -334,6 +337,49 @@ rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
 
 에디터가 맵을 따라가려면 그 `.ts`를 포함하는 `tsconfig.json`이 있어야 합니다 —
 추론 프로젝트로 열리면 맵 추적이 동작하지 않습니다.
+
+## 네이티브 백엔드 (`--native-check` / `--native-sidecar`)
+
+`.rl`을 ordinary TypeScript로 낮춘 뒤 **사용자의 실제 TypeScript 프로젝트**에
+넣어 TypeScript 7 네이티브 컴파일러(typescript-go)에게 묻습니다. `.ts`와
+`.rl`이 하나의 프로그램 안에 있으므로 서로를 봅니다.
+
+```sh
+rlc --native-check src                  # 진단만
+rlc --native-sidecar src -o .rl-types   # 진단 + 사이드카
+rlc --native-check src --project ./tsconfig.app.json
+```
+
+- **설정이 필요 없습니다.** `src/token.rl`은 프로그램 안에서 `src/token.rl.ts`가
+  되므로, 사람이 쓴 `.ts`의 `import "./token.rl"`이 평범한 TypeScript 해석으로
+  그 모듈을 찾습니다. `paths`도 `allowImportingTsExtensions`도 필요 없습니다.
+  `@rl/std`는 가상 `node_modules/@rl/std`로 해석되므로 지정자가 바 상태로
+  남습니다.
+- **그래프는 프로젝트 전체**입니다 — 인자로 준 파일이 프로젝트의 다른 `.rl`을
+  import해도 해석됩니다. 인자는 *무엇을 쓸지*만 정합니다.
+- **소진성과 `val`을 체커가 답합니다.** match 위치에서 실제로 좁혀진 타입을
+  쓰므로, 앞선 가드가 제거한 케이스는 요구하지 않습니다. `val`은 심볼 동일성으로
+  바인딩을 짝짓고, 내장 메서드 판정도 컴파일러가 합니다.
+- 진단은 `.rl` 원본 위치로, rl 진단은 `rl:`, 타입 진단은 `ts(코드):`로 구분해
+  보고합니다.
+- `--native-sidecar`는 쓰기 모드라 타입 에러가 있어도 사이드카를 갱신하고
+  0으로 끝납니다. 검사 결과로 종료 코드를 받으려면 `--native-check`를 씁니다.
+
+### 컴파일러 해석
+
+먼저 나오는 것을 씁니다.
+
+| 순서 | 무엇 |
+|------|------|
+| 1 | `RLC_TSGO_API` (+ 선택적 `RLC_TSGO_BIN`) |
+| 2 | `RLC_TSGO_ROOT` — 빌드된 typescript-go 체크아웃 |
+| 3 | `../typescript-go` — 마찬가지로 빌드된 것 |
+| 4 | 프로젝트 위쪽의 `node_modules/typescript` 또는 `@typescript/native-preview` |
+
+4번(설치된 패키지)은 API 클라이언트와 네이티브 실행 파일을 함께 배포하므로
+`npm i -D typescript@7`만으로 동작합니다. 다만 **선언 emit은 아직 릴리스에
+없어** `--native-sidecar`에는 빌드된 체크아웃이 필요합니다 — 그 경우 rlc가
+그렇게 말합니다.
 
 ## 출력과 종료 코드
 

@@ -36,6 +36,15 @@ jobs:
       - name: Install TypeScript
         run: npm install -g typescript@6
 
+      # The native backend (TASK-073/074) drives TypeScript 7's own compiler
+      # through its API client. Without one the `tests/native.rs` suite skips
+      # silently, so the gate installs it and points rlc at it.
+      - name: Install TypeScript 7 for the native backend
+        run: |
+          mkdir -p "$HOME/ts7" && cd "$HOME/ts7"
+          npm install --no-save typescript@7
+          echo "RLC_TSGO_API=$HOME/ts7/node_modules/typescript/dist/api/sync/api.js" >> "$GITHUB_ENV"
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -49,6 +58,12 @@ jobs:
         run: |
           tsc --version
           node --version
+          # The native suite needs a TypeScript 7 API client to check
+          # against; declaration emit needs more than a release has, and is
+          # covered by the `native` job below.
+          test -f "$RLC_TSGO_API"
+          cargo test --test native 2>&1 | tee /tmp/native.log
+          grep -q "16 passed" /tmp/native.log
 
   extension:
     name: vscode extension
@@ -96,6 +111,74 @@ jobs:
           count=$(npx @vscode/vsce@3 ls --no-dependencies | grep -c "typescript/lib/lib" || true)
           echo "lib*.d.ts in the package: $count"
           test "$count" -ge 90
+
+  native:
+    name: native backend (typescript-go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Pinned: the API client and the `tsgo` executable speak a protocol
+      # with no version negotiation, so both have to come from one build —
+      # and a floating `main` would break this gate on someone else's
+      # commit. Bumping it is a task, not a side effect.
+      - name: Check out typescript-go
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/typescript-go
+          ref: c6b013f5706d58582f566df778cc0df2683b58f5
+          path: typescript-go
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: typescript-go/go.mod
+          cache-dependency-path: typescript-go/go.sum
+
+      - name: Build the compiler and its API client
+        working-directory: typescript-go
+        run: |
+          go build -o built/local/tsgo ./cmd/tsgo
+          npm ci
+          npx tsc -b _packages/native-preview
+
+      - name: Build rlc
+        run: cargo build
+
+      - name: Test — the native backend end to end
+        env:
+          RLC_TSGO_ROOT: ${{ github.workspace }}/typescript-go
+        run: |
+          cargo test --test native 2>&1 | tee /tmp/native.log
+          grep -q "16 passed" /tmp/native.log
+
+      - name: Build the extension
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npx tsc -b
+
+      - name: Test — on-save sidecars through the native backend
+        working-directory: editors/vscode
+        env:
+          RLC_TSGO_ROOT: ${{ github.workspace }}/typescript-go
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/debug:$PATH"
+          node --test "server/out/test/sidecar.test.js" 2>&1 | tee /tmp/sidecar.log
+          # The tests skip when no compiler can emit declarations; this job
+          # built one, so a skip here means the wiring broke.
+          grep -q "# skipped 0" /tmp/sidecar.log
 
   msrv:
     name: build on MSRV

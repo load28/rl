@@ -15,20 +15,48 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const BIN_IN_TREE: &str = "built/local/tsgo";
 const API_IN_TREE: &str = "_packages/native-preview/dist/api/sync/api.js";
 
-/// The typescript-go tree rlc would resolve, when both halves are built.
-fn toolchain_root() -> Option<PathBuf> {
+/// What rlc will find, mirroring its own resolution rules.
+#[derive(Clone)]
+enum Toolchain {
+    /// A built typescript-go checkout, named through `RLC_TSGO_ROOT`.
+    Tree(PathBuf),
+    /// An installed package, which rlc finds on its own.
+    Installed,
+}
+
+fn toolchain() -> Option<Toolchain> {
+    // rlc's own order: a directly named client wins over any checkout, so
+    // the guard has to agree or a test will run against a compiler the
+    // guard did not vet.
+    if let Some(api) = std::env::var_os("RLC_TSGO_API").filter(|v| !v.is_empty()) {
+        return Path::new(&api).exists().then_some(Toolchain::Installed);
+    }
     let root = match std::env::var_os("RLC_TSGO_ROOT") {
         Some(root) if !root.is_empty() => PathBuf::from(root),
         _ => PathBuf::from("../typescript-go"),
     };
-    (root.join(BIN_IN_TREE).exists() && root.join(API_IN_TREE).exists()).then_some(root)
+    (root.join(BIN_IN_TREE).exists() && root.join(API_IN_TREE).exists())
+        .then_some(Toolchain::Tree(root))
 }
 
+/// Any resolvable compiler — enough to check.
 macro_rules! require_tsgo {
     () => {
-        match toolchain_root() {
-            Some(root) => root,
+        match toolchain() {
+            Some(toolchain) => toolchain,
             None => return,
+        }
+    };
+}
+
+/// A compiler that can also emit declarations. The released 7.0 client
+/// cannot (its `Program` has no `getDeclarationEmit`), so these need a
+/// built checkout until a release catches up.
+macro_rules! require_emit {
+    () => {
+        match toolchain() {
+            Some(Toolchain::Tree(root)) => Toolchain::Tree(root),
+            _ => return,
         }
     };
 }
@@ -75,17 +103,26 @@ fn project(files: &[(&str, &str)]) -> PathBuf {
     dir
 }
 
+/// Runs rlc in `dir` with the toolchain the guard resolved.
+fn run(dir: &Path, toolchain: &Toolchain, args: &[&str]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rlc"));
+    command.args(args).current_dir(dir);
+    match toolchain {
+        Toolchain::Tree(root) => {
+            command.env("RLC_TSGO_ROOT", root);
+        }
+        // Nothing to set: rlc finds the installed package itself.
+        Toolchain::Installed => {}
+    }
+    command.output().expect("rlc runs")
+}
+
 /// Runs `rlc --native-check src` in `dir`, returning its stdout.
-fn check(dir: &Path, root: &Path) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
-        .args(["--native-check", "src"])
-        .current_dir(dir)
-        .env("RLC_TSGO_ROOT", root)
-        .output()
-        .expect("rlc runs");
+fn check(dir: &Path, toolchain: &Toolchain) -> String {
+    let out = run(dir, toolchain, &["--native-check", "src"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !stderr.contains("rlc: no tsgo") && !stderr.contains("rlc: no TypeScript API"),
+        !stderr.contains("no TypeScript compiler found"),
         "the toolchain guard passed but rlc disagreed: {stderr}"
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
@@ -125,7 +162,7 @@ fn a_hand_written_ts_file_imports_an_rl_file_by_the_specifier_it_writes() {
 
 #[test]
 fn naming_one_file_still_compiles_against_the_whole_project() {
-    let root = require_tsgo!();
+    let root = require_emit!();
     let dir = project(&[
         (
             "src/token.rl",
@@ -140,13 +177,16 @@ fn naming_one_file_still_compiles_against_the_whole_project() {
         ),
     ]);
     let out_dir = dir.join("out");
-    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
-        .args(["--native-check", "src/parse.rl", "-o"])
-        .arg(&out_dir)
-        .current_dir(&dir)
-        .env("RLC_TSGO_ROOT", root)
-        .output()
-        .expect("rlc runs");
+    let out = run(
+        &dir,
+        &root,
+        &[
+            "--native-sidecar",
+            "src/parse.rl",
+            "-o",
+            out_dir.to_str().unwrap(),
+        ],
+    );
     // `./token.rl` was never named, but it is part of the project, so it is
     // part of the graph — otherwise this would be TS2307.
     assert!(
@@ -156,18 +196,18 @@ fn naming_one_file_still_compiles_against_the_whole_project() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        out_dir.join("src/parse.rl.d.ts").is_file(),
+        out_dir.join("parse.rl.d.ts").is_file(),
         "the named input is written"
     );
     assert!(
-        !out_dir.join("src/token.rl.d.ts").exists(),
+        !out_dir.join("token.rl.d.ts").exists(),
         "what was not named is in the graph, not in the output"
     );
 }
 
 #[test]
 fn a_declaration_carries_a_map_back_to_the_rl_source() {
-    let root = require_tsgo!();
+    let root = require_emit!();
     let dir = project(&[(
         "src/token.rl",
         "export enum Token { Num(value: number), Eof }\n\
@@ -176,13 +216,11 @@ fn a_declaration_carries_a_map_back_to_the_rl_source() {
          }\n",
     )]);
     let out_dir = dir.join("out");
-    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
-        .args(["--native-check", "src", "-o"])
-        .arg(&out_dir)
-        .current_dir(&dir)
-        .env("RLC_TSGO_ROOT", root)
-        .output()
-        .expect("rlc runs");
+    let out = run(
+        &dir,
+        &root,
+        &["--native-sidecar", "src", "-o", out_dir.to_str().unwrap()],
+    );
     assert!(
         out.status.success(),
         "{}",
@@ -191,12 +229,12 @@ fn a_declaration_carries_a_map_back_to_the_rl_source() {
 
     // The sidecar takes the name a `"./token.rl"` specifier resolves to
     // when no compiler is running — which is what makes it a sidecar.
-    let declarations = fs::read_to_string(out_dir.join("src/token.rl.d.ts")).expect("the sidecar");
+    let declarations = fs::read_to_string(out_dir.join("token.rl.d.ts")).expect("the sidecar");
     assert!(
         declarations.contains("//# sourceMappingURL=token.rl.d.ts.map"),
         "and points at its map: {declarations}"
     );
-    let map = fs::read_to_string(out_dir.join("src/token.rl.d.ts.map")).expect("the map");
+    let map = fs::read_to_string(out_dir.join("token.rl.d.ts.map")).expect("the map");
     assert!(
         map.contains("token.rl\"") && map.contains("\"mappings\""),
         "whose sources is the .rl file, so go-to-definition lands there: {map}"
@@ -205,7 +243,7 @@ fn a_declaration_carries_a_map_back_to_the_rl_source() {
 
 #[test]
 fn declarations_are_emitted_by_the_compiler_itself() {
-    let root = require_tsgo!();
+    let root = require_emit!();
     let dir = project(&[(
         "src/shape.rl",
         "export enum Shape { Circle(radius: number), Point }\n\
@@ -214,20 +252,18 @@ fn declarations_are_emitted_by_the_compiler_itself() {
          }\n",
     )]);
     let out_dir = dir.join("out");
-    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
-        .args(["--native-check", "src", "-o"])
-        .arg(&out_dir)
-        .current_dir(&dir)
-        .env("RLC_TSGO_ROOT", root)
-        .output()
-        .expect("rlc runs");
+    let out = run(
+        &dir,
+        &root,
+        &["--native-sidecar", "src", "-o", out_dir.to_str().unwrap()],
+    );
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let declaration = fs::read_to_string(out_dir.join("src/shape.rl.d.ts")).expect("a .d.ts");
+    let declaration = fs::read_to_string(out_dir.join("shape.rl.d.ts")).expect("a .d.ts");
     // rlc writes no declaration syntax of its own: this is what the compiler
     // emits for the module rlc lowered, exactly as for a hand-written one.
     assert!(
@@ -242,7 +278,7 @@ fn declarations_are_emitted_by_the_compiler_itself() {
 
 #[test]
 fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
-    let root = require_tsgo!();
+    let root = require_emit!();
     let dir = project(&[(
         "src/parse.rl",
         "import { Result } from \"@rl/std\";\n\
@@ -252,13 +288,11 @@ fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
          }\n",
     )]);
     let out_dir = dir.join("out");
-    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
-        .args(["--native-check", "src", "-o"])
-        .arg(&out_dir)
-        .current_dir(&dir)
-        .env("RLC_TSGO_ROOT", root)
-        .output()
-        .expect("rlc runs");
+    let out = run(
+        &dir,
+        &root,
+        &["--native-sidecar", "src", "-o", out_dir.to_str().unwrap()],
+    );
     assert!(
         out.status.success(),
         "@rl/std has to resolve, and its types have to check: {}{}",
@@ -268,7 +302,7 @@ fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
     // The library is a module of the project, resolved by ordinary node
     // resolution — so the specifier stays bare, in the source and in the
     // declaration alike, and no `paths` entry is involved in this compile.
-    let declaration = fs::read_to_string(out_dir.join("src/parse.rl.d.ts")).expect("a .d.ts");
+    let declaration = fs::read_to_string(out_dir.join("parse.rl.d.ts")).expect("a .d.ts");
     assert!(
         declaration.contains("from \"@rl/std\""),
         "the declaration keeps the specifier the user wrote: {declaration}"

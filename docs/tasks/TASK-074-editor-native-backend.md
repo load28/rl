@@ -101,7 +101,22 @@ TASK-073이 만든 네이티브 백엔드의 선언 트리와, 에디터가 소�
   tsconfig에서 `allowImportingTsExtensions`를 **제거**했다.
 - 2026-08-19: `native.rs` — 툴체인 해석에 설치된 npm 패키지 추가(결정 4),
   경로를 절대 경로로 정규화(호스트는 프로젝트 디렉터리에서 실행되므로 상대
-  경로는 어느 쪽으로도 해석되지 않는다).
+  경로는 어느 쪽으로도 해석되지 않는다). 해석 기준점을 cwd가 아니라
+  프로젝트 루트로 — 워크스페이스 자신의 TypeScript를 쓴다.
+- 2026-08-19: 그래프를 프로젝트 전체로, 인자는 "무엇을 쓸지"만 정하게 변경.
+  tsconfig 없는 워크스페이스는 inferred project로 처리(에디터가 낱개 파일에
+  하는 것과 같다).
+- 2026-08-19: `--native-sidecar` 추가(쓰기 모드, 배치는 레거시 그대로) 후
+  확장 프로그램 `server/src/sidecar.ts`를 그 한 번의 호출로 재작성 —
+  **인프로세스 TypeScript 선언 emit이 사라졌다** (`import * as ts` 제거).
+- 2026-08-19: 확장 테스트 갱신 — 가드가 실제로 쓰는 명령을 프로브하고,
+  "소진성 실패 시 사이드카 유지" 테스트는 lowering을 막는 에러(중복 케이스)로
+  바꿨다. 소진성은 이제 emit을 막지 않으므로 그 동작을 새 테스트로 남겼다.
+  전체 71건 통과.
+- 2026-08-19: CI — `native` 잡 신설(typescript-go를 커밋 고정해 빌드,
+  `cargo test --test native`와 확장 사이드카 테스트를 스킵 0으로 강제).
+  `check` 잡에는 `typescript@7`을 설치해 검사 경로가 스킵되지 않게 했다.
+- 2026-08-19: `docs/reference/cli.md`에 네이티브 백엔드 절 추가.
 
 ## 이슈 및 해결
 
@@ -114,11 +129,27 @@ TASK-073이 만든 네이티브 백엔드의 선언 트리와, 에디터가 소�
 - **해결**: 지금은 해석용으로만 둔다. 레거시의 `rl.d.ts`가 필요한지는
   `--types` 정리(TASK-075)에서 결정한다.
 
+### 결정 5: 사이드카 배치는 레거시 규약 그대로
+
+`--native-sidecar`는 `--types`/`--sidecar`와 같은 자리에 쓴다 — 원본 옆이거나
+`-o` 아래 입력 레이아웃 기준. 확장 프로그램이 찾는 위치가 그대로여야
+갈아끼우기가 드롭인이 된다.
+
+### 결정 6: 내장 여부는 경로가 아니라 컴파일러에게 묻는다
+
+- **상황**: `val` 판정이 선언 파일 경로가 `bundled:///libs/`로 시작하는지로
+  내장을 가렸다. 릴리스된 7.0.2는 lib을 디스크(`node_modules/@typescript/...`)
+  에서 읽으므로 그 접두사가 없다 — 실측으로 테스트 1건이 실패했다.
+- **해결**: 호스트가 `program.isSourceFileDefaultLibrary`로 묻는다. 두 배포
+  형태에서 같은 사실을 얻는다. 두 툴체인 모두에서 16건 통과 확인.
+
 ## 검증
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test`
+- [x] `cargo fmt --check`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test` (`tests/native.rs` 16건 — 빌드된 체크아웃과 릴리스
+      npm 패키지 양쪽에서)
+- [x] 확장 프로그램 `node --test` 71건 (스킵 0)
 
 ## 결과
 

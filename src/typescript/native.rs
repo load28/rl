@@ -38,8 +38,9 @@ const HOST: &str = include_str!("host.mjs");
 /// 1. `RLC_TSGO_API` (+ optional `RLC_TSGO_BIN`) — named directly.
 /// 2. `RLC_TSGO_ROOT` — a typescript-go checkout, built in place.
 /// 3. `../typescript-go`, likewise built.
-/// 4. an installed package, searched for in `node_modules` from the current
-///    directory upwards.
+/// 4. an installed package, searched for in `node_modules` from the project
+///    upwards — the workspace's own TypeScript, which is the one its code is
+///    written against.
 ///
 /// No path is compiled in, and a tree that is not built yet is reported as
 /// such rather than guessed around.
@@ -60,7 +61,7 @@ const API_IN_TREE: &str = "_packages/native-preview/dist/api/sync/api.js";
 impl Toolchain {
     /// Resolves the toolchain from the environment. The error names what is
     /// missing and how to produce it.
-    pub(crate) fn resolve() -> Result<Toolchain, String> {
+    pub(crate) fn resolve(from: &Path) -> Result<Toolchain, String> {
         if let Some(api) = env_path("RLC_TSGO_API") {
             return Toolchain {
                 bin: env_path("RLC_TSGO_BIN"),
@@ -75,7 +76,7 @@ impl Toolchain {
         if tree.api.exists() {
             return tree.check();
         }
-        match installed() {
+        match installed(from) {
             Some(toolchain) => toolchain.check(),
             None => Err(format!(
                 "no TypeScript compiler found — install one                  (`npm i -D typescript@7`), or build a typescript-go checkout                  (`go build -o {BIN_IN_TREE} ./cmd/tsgo` plus `npm ci && npx tsc                  -b _packages/native-preview`) and point rlc at it with                  RLC_TSGO_ROOT"
@@ -122,11 +123,11 @@ impl Toolchain {
 }
 
 /// The API client of an installed package, searched for in `node_modules`
-/// from the current directory upwards. The client resolves the executable
-/// shipped beside it, so only the client is named.
-fn installed() -> Option<Toolchain> {
+/// from `from` upwards. The client resolves the executable shipped beside
+/// it, so only the client is named.
+fn installed(from: &Path) -> Option<Toolchain> {
     const PACKAGES: [&str; 2] = ["typescript", "@typescript/native-preview"];
-    let mut dir = std::env::current_dir().ok()?;
+    let mut dir = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
     loop {
         for package in PACKAGES {
             let api = dir
@@ -164,17 +165,17 @@ pub(crate) struct NativeBackend {
 
 impl NativeBackend {
     /// Resolves the toolchain and prepares a backend over it.
-    pub(crate) fn new(node: Option<PathBuf>) -> Result<NativeBackend, String> {
+    pub(crate) fn new(node: Option<PathBuf>, from: &Path) -> Result<NativeBackend, String> {
         Ok(NativeBackend {
-            toolchain: Toolchain::resolve()?,
+            toolchain: Toolchain::resolve(from)?,
             node: node.unwrap_or_else(|| PathBuf::from("node")),
         })
     }
 }
 
 impl TypeScriptBackend for NativeBackend {
-    fn ask(&self, tsconfig: &Path, query: &Query) -> Result<Answers, String> {
-        let cwd = tsconfig.parent().unwrap_or(Path::new(".")).to_path_buf();
+    fn ask(&self, tsconfig: Option<&Path>, root: &Path, query: &Query) -> Result<Answers, String> {
+        let cwd = root.to_path_buf();
         let job = job_json(&self.toolchain, tsconfig, &cwd, query);
 
         // The host is written beside the run rather than piped in: node reads
@@ -234,7 +235,7 @@ impl TypeScriptBackend for NativeBackend {
 /// The job the host reads on stdin — see `host.mjs` for the protocol.
 fn job_json(
     toolchain: &Toolchain,
-    tsconfig: &Path,
+    tsconfig: Option<&Path>,
     cwd: &Path,
     query: &Query,
 ) -> serde_json::Value {
@@ -325,14 +326,7 @@ fn parse_answers(stdout: &str) -> Result<Answers, String> {
             index: v["index"].as_u64().unwrap_or_default() as usize,
             id: v["id"].as_i64().unwrap_or_default(),
             name: v["name"].as_str().unwrap_or_default().to_string(),
-            declared_in: v["declaredIn"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| s.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            builtin: v["builtin"].as_bool().unwrap_or(false),
         });
     }
     for d in array(&value, "declarations") {
@@ -356,18 +350,4 @@ fn json_literal(value: &serde_json::Value) -> Option<rlc::Literal> {
         serde_json::Value::Bool(b) => Some(rlc::Literal::Boolean(*b)),
         _ => None,
     }
-}
-
-/// TypeScript's own lib declarations carry this prefix in the native
-/// compiler: they are embedded in the binary rather than read from disk.
-/// A method declared there — and only there — is a built-in.
-pub(crate) const BUNDLED_LIB_PREFIX: &str = "bundled:///libs/";
-
-/// Whether a resolved symbol is declared in TypeScript's own lib files.
-pub(crate) fn is_builtin(resolution: &Resolution) -> bool {
-    !resolution.declared_in.is_empty()
-        && resolution
-            .declared_in
-            .iter()
-            .all(|d| d.starts_with(BUNDLED_LIB_PREFIX))
 }

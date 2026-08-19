@@ -125,10 +125,10 @@ pub(crate) struct Resolution {
     pub id: i64,
     /// The symbol's name.
     pub name: String,
-    /// The files the symbol is declared in. TypeScript's own lib files carry
-    /// the `bundled:///libs/` prefix, which is what makes a method a
-    /// built-in rather than a user-defined one that shares a name.
-    pub declared_in: Vec<String>,
+    /// Whether every declaration of this symbol is one of TypeScript's own
+    /// — the compiler's answer, which is what makes a method a built-in
+    /// rather than a user-defined one that shares a name.
+    pub builtin: bool,
 }
 
 /// One emitted declaration file, in memory.
@@ -155,9 +155,15 @@ pub(crate) struct Answers {
 /// configuration, module resolution and the file list, and rlc only adds the
 /// modules it lowered.
 pub(crate) trait TypeScriptBackend {
-    /// Answers every question of `query` against the project rooted at
-    /// `tsconfig`. Returns a human-readable message when the backend itself
-    /// could not run — never when the *code* has errors, which are
-    /// [`Answers::diagnostics`].
-    fn ask(&self, tsconfig: &std::path::Path, query: &Query) -> Result<Answers, String>;
+    /// Answers every question of `query` against the project `tsconfig`
+    /// configures, or — when there is none — against a project inferred for
+    /// the query's own modules, rooted at `root`. Returns a human-readable
+    /// message when the backend itself could not run, never when the *code*
+    /// has errors, which are [`Answers::diagnostics`].
+    fn ask(
+        &self,
+        tsconfig: Option<&std::path::Path>,
+        root: &std::path::Path,
+        query: &Query,
+    ) -> Result<Answers, String>;
 }
