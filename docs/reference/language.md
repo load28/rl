@@ -591,6 +591,18 @@ const $rl_t0 = (findUser(id)); if ($rl_t0.kind !== "Some") { return "who?"; } co
   `return`/`throw`/`break`/`continue`로 시작해야 합니다.
   `if (c) return a; else return b;`는 실제로 발산해도 거부됩니다 — 블록을
   발산 키워드로 끝내도록 재구성하세요.
+- 문장 경계는 최상위 `;`와 **블록 문**(`if`/`for`/`while`/`try`/`switch`/
+  함수·클래스 본문 등)의 닫는 `}`입니다. 식의 중괄호 — 객체 리터럴,
+  화살표 함수 본문 — 는 문장을 끝내지 않으므로
+  `else { return { kind: "Err", error: e }; };`는 그대로 `return`으로
+  읽힙니다:
+
+  ```rl
+  const Some(value: user) = findUser(id) else {
+    log("missing");
+    return { kind: "Err", error: "no user" };   // 발산으로 인정
+  };
+  ```
 - `= try 식 else { ... };` 조합은 지원하지 않습니다.
 
 ### 6.5 `if let` 문 — 조건부 값 추출

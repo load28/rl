@@ -222,3 +222,107 @@ const total = result {
     let out = map_offset(&m, at).expect("destructuring binding is mapped");
     assert_eq!(&m.code[out..out + pattern.len()], pattern);
 }
+
+/// The byte offset of `needle` inside the first occurrence of `context`.
+fn offset_in(src: &str, context: &str, needle: &str) -> usize {
+    let ctx = src
+        .find(context)
+        .unwrap_or_else(|| panic!("{context:?} is not in the source"));
+    ctx + context
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} is not in {context:?}"))
+}
+
+/// Asserts the `needle` written inside `context` reaches the output through
+/// the map, unchanged.
+fn assert_mapped_in(src: &str, m: &rlc::MappedEmit, context: &str, needle: &str) {
+    let at = offset_in(src, context, needle);
+    let out = map_offset(m, at)
+        .unwrap_or_else(|| panic!("expected a mapping for {needle:?} in {context:?}"));
+    assert_eq!(&m.code[out..out + needle.len()], needle);
+}
+
+#[test]
+fn try_declaration_bindings_are_mapped_to_emitted_declarations() {
+    // The binding is where the editor asks what `try` produced, so it has
+    // to reach `const n = $rl_t0.value;` through the map.
+    let src = r#"import { Result } from "@rl/std";
+declare function load(): Result<number, string>;
+function run(): Result<number, string> {
+  const n = try load();
+  let { a, b }: { a: number; b: number } = try load();
+  return { kind: "Ok", value: n + a + b };
+}
+"#;
+    let m = emit_mapped(src);
+    assert_mapping_invariants(src, &m);
+
+    assert_mapped_in(src, &m, "n = try load", "n");
+    // The whole trimmed binding, type annotation included.
+    let pattern = "{ a, b }: { a: number; b: number }";
+    assert_mapped_in(src, &m, pattern, pattern);
+}
+
+#[test]
+fn pattern_bindings_are_mapped_to_their_destructurings() {
+    // Every binding a pattern introduces — match arm, let-else, if let,
+    // nested — is copied from the source into the emitted destructuring,
+    // so the editor can hover it and jump to it.
+    let src = r#"import { Option } from "@rl/std";
+enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
+declare function getShape(): Shape;
+declare function boxed(): Option<Shape>;
+
+const area = match (getShape()) {
+  Circle(radius) => radius,
+  Rect(w: width, h: height) => width * height,
+  Point => 0,
+};
+
+function run(): void {
+  const Circle(radius: letRadius) = getShape() else { return; };
+  if let Rect(w: ifWidth) = getShape() {
+    console.log(ifWidth, letRadius);
+  }
+  const nested = match (boxed()) {
+    Some(value: Circle(radius: inner)) => inner,
+    _ => 0,
+  };
+  console.log(area, nested);
+}
+"#;
+    let m = emit_mapped(src);
+    assert_mapping_invariants(src, &m);
+
+    // A shorthand binding: the field name is the variable name.
+    assert_mapped_in(src, &m, "Circle(radius) => radius", "radius");
+    // An aliased one maps the field and the alias separately — the `: `
+    // between them is the compiler's, and the source spacing is not.
+    assert_mapped_in(src, &m, "Rect(w: width, h: height)", "width");
+    assert_mapped_in(src, &m, "Rect(w: width, h: height)", "height");
+    // let-else and if let, the two statement forms.
+    assert_mapped_in(src, &m, "Circle(radius: letRadius)", "letRadius");
+    assert_mapped_in(src, &m, "Rect(w: ifWidth)", "ifWidth");
+    // A nested pattern's binding, destructured from the inner path.
+    assert_mapped_in(src, &m, "Circle(radius: inner)", "inner");
+}
+
+#[test]
+fn or_pattern_bindings_are_left_unmapped() {
+    // One destructuring stands for every alternative, so it belongs to no
+    // single one: claiming a source position would point the editor at an
+    // arbitrary alternative (and let a rename rewrite that one alone).
+    let src = r#"enum E { A(x: number), B(x: number), C }
+declare function get(): E;
+const v = match (get()) {
+  A(x) | B(x) => x,
+  C => 0,
+};
+"#;
+    let m = emit_mapped(src);
+    assert_mapping_invariants(src, &m);
+    assert!(m.code.contains("const { x } = $rl_m;"));
+    assert_eq!(map_offset(&m, offset_in(src, "A(x) | B(x)", "x")), None);
+    // The arm body still is mapped — only the binding list is not.
+    assert_mapped_in(src, &m, "=> x,", "x");
+}

@@ -374,12 +374,13 @@ pub(super) fn parse_bindings(mut cur: Cursor, allow_nested: bool) -> Option<Vec<
         if cur.peek().is_none() {
             break;
         }
-        let (name, _) = cur.eat_ident()?;
+        let (name, name_span) = cur.eat_ident()?;
         if is_reserved(name) {
             return None;
         }
 
         let mut alias = None;
+        let mut alias_span = None;
         let mut nested = None;
         if cur.eat_punct(b':').is_some() {
             let (rhs, rhs_span) = cur.eat_ident()?;
@@ -399,11 +400,14 @@ pub(super) fn parse_bindings(mut cur: Cursor, allow_nested: bool) -> Option<Vec<
                 });
             } else {
                 alias = Some(rhs.to_string());
+                alias_span = Some(rhs_span);
             }
         }
         bindings.push(Binding {
             name: name.to_string(),
+            name_span,
             alias,
+            alias_span,
             nested,
         });
 

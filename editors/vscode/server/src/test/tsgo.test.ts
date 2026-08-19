@@ -205,6 +205,45 @@ test("rename names every place the name is written", { skip }, async () => {
   }
 });
 
+test(
+  "renaming a destructuring shorthand keeps TypeScript's expansion",
+  { skip },
+  async () => {
+    // What an rl pattern binding compiles to. TypeScript cannot rewrite
+    // `{ value }` to the new name alone — it expands the shorthand — and
+    // the caller has to carry that expansion back into the pattern, or the
+    // rename would silently rebind a different field.
+    const { dir, rl } = workspace();
+    const lowered = [
+      'import { describe } from "./user";',
+      'export function render(o: { value: "idle" | "loading" }): string {',
+      "  const { value } = o;",
+      "  return describe(value);",
+      "}",
+      "",
+    ].join("\n");
+    const ts = project(dir, new Map([[rl, lowered]]));
+    try {
+      const locations = await ts.renameAt(rl, lowered.indexOf("value } = o"));
+      assert.ok(locations, "the binding can be renamed");
+      const declaration = locations!.find(
+        (l) => l.start === lowered.indexOf("value } = o"),
+      );
+      assert.ok(declaration, JSON.stringify(locations));
+      assert.equal(declaration!.newText, "value: rlRenamePlaceholder");
+      // An ordinary use is replaced by the bare name.
+      const use = locations!.find(
+        (l) => l.start === lowered.indexOf("value)"),
+      );
+      assert.ok(use, JSON.stringify(locations));
+      assert.equal(use!.newText, "rlRenamePlaceholder");
+    } finally {
+      ts.dispose();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
 test("what cannot be renamed answers null rather than nothing", { skip }, async () => {
   const { dir, rl, lowered } = workspace();
   const ts = project(dir, new Map([[rl, lowered]]));

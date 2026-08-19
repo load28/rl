@@ -40,6 +40,7 @@ import * as path from "node:path";
 import * as probe from "./probe";
 import * as sidecar from "./sidecar";
 import { positionAt as positionOf } from "./lsp";
+import { RENAME_PLACEHOLDER } from "./tstypes";
 import type * as tsproject from "./tstypes";
 import { TsgoProject } from "./tsgo";
 import * as virtual from "./virtual";
@@ -1552,6 +1553,17 @@ connection.onRenameRequest(async (params) => {
     // A rename edit that cannot be mapped back would silently skip an
     // occurrence and corrupt the rename — refuse the whole operation.
     if (!span) return null;
+    // What TypeScript writes at this location, which is not always the bare
+    // name: a destructuring shorthand — what an rl pattern binding
+    // `Some(value)` compiles to — expands to `value: <new>`, and rl's
+    // pattern grammar spells an aliased binding the same way. Dropping the
+    // expansion would rebind a *different* field under the new name, so an
+    // answer whose shape we cannot account for refuses the rename instead.
+    let newText = params.newName;
+    if (l.newText !== undefined && l.newText !== RENAME_PLACEHOLDER) {
+      if (!l.newText.includes(RENAME_PLACEHOLDER)) return null;
+      newText = l.newText.split(RENAME_PLACEHOLDER).join(params.newName);
+    }
     const target = URI.file(l.fileName).toString();
     (changes[target] ??= []).push(
       TextEdit.replace(
@@ -1559,7 +1571,7 @@ connection.onRenameRequest(async (params) => {
           start: positionOf(span.text, span.start),
           end: positionOf(span.text, span.end),
         },
-        params.newName,
+        newText,
       ),
     );
   }

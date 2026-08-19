@@ -740,6 +740,79 @@ fn let_else_expression_may_be_a_match() {
 }
 
 #[test]
+fn let_else_diverges_when_the_return_value_is_an_object_literal() {
+    // The `}` of an object literal ends no statement, so `return { ... };`
+    // is still a `return` — the shape every `Result`-returning function
+    // writes.
+    let out = ok(
+        "function f(): number {\n  const Some(v) = find() else { return { kind: \"Err\", error: \"no\" }; };\n  return v;\n}\n",
+    );
+    assert!(
+        out.contains("{ return { kind: \"Err\", error: \"no\" }; }"),
+        "{out}"
+    );
+    // Same with a statement in front of it, and with an rl construct as
+    // the returned value.
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { log(\"x\"); return { k: 1 }; };\n  return v;\n}\n",
+    );
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { return match (o) { A => 1, _ => 0 }; };\n  return v;\n}\n",
+    );
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { throw { code: 1 }; };\n  return v;\n}\n",
+    );
+}
+
+#[test]
+fn let_else_divergence_still_sees_block_statements() {
+    // A *block* statement's `}` does end a statement, so the diverging
+    // keyword after one is found — that is the half the object-literal fix
+    // must not break.
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { if (c) { log(\"x\"); } return 0; };\n  return v;\n}\n",
+    );
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { try { log(\"x\"); } catch (e) { log(\"y\"); } return 0; };\n  return v;\n}\n",
+    );
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { for (const x of xs) { log(x); } return 0; };\n  return v;\n}\n",
+    );
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { function g() { return 1; } return g(); };\n  return v;\n}\n",
+    );
+    // An arrow body and a declaration's initializer close nothing, and the
+    // `;` after them is what starts the next statement.
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { const g = () => { return 1; }; return g(); };\n  return v;\n}\n",
+    );
+    ok(
+        "function f(): number {\n  const Some(v) = find() else { const o = { n: 1 }; return o.n; };\n  return v;\n}\n",
+    );
+}
+
+#[test]
+fn let_else_non_diverging_else_ending_in_a_brace_is_still_an_error() {
+    // The fix must not turn every trailing `}` into a divergence. None of
+    // these ends with one of the four keywords.
+    for body in [
+        "const o = { n: 1 };",
+        "if (c) { return 1; }",
+        "for (const x of xs) { log(x); }",
+        "{ return 1; }",
+    ] {
+        let e = err(&format!(
+            "function f(): number {{\n  const Some(v) = find() else {{ {body} }};\n  return v;\n}}\n"
+        ));
+        assert!(
+            e.message.contains("must end with a `return`"),
+            "{body}: {}",
+            e.message
+        );
+    }
+}
+
+#[test]
 fn let_else_non_diverging_else_is_error() {
     let e =
         err("function f(): number {\n  const Some(v) = find() else { log(); };\n  return v;\n}\n");

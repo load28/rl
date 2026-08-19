@@ -24,6 +24,7 @@ import {
   offsetAt,
   positionAt,
 } from "./lsp";
+import { RENAME_PLACEHOLDER } from "./tstypes";
 import type {
   OpenDoc,
   TsCompletion,
@@ -289,8 +290,10 @@ export class TsgoProject {
     const edit = (await this.client.ask("textDocument/rename", {
       textDocument: { uri },
       position,
-      newName: "rlRenamePlaceholder",
-    })) as { changes?: Record<string, { range: LspRange }[]> } | null;
+      newName: RENAME_PLACEHOLDER,
+    })) as {
+      changes?: Record<string, { range: LspRange; newText?: string }[]>;
+    } | null;
     if (!edit?.changes) return null;
 
     const out: TsReference[] = [];
@@ -306,6 +309,7 @@ export class TsgoProject {
           fileName: target,
           fileText: targetText,
           isDefinition: false,
+          newText: one.newText,
           ...spanOf(targetText, one.range),
         });
       }

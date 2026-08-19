@@ -95,9 +95,20 @@ export interface TsDiagnostic {
   warning: boolean;
 }
 
+/** The name a rename asks TypeScript for, so the answer's `newText` can be
+ * read as "the new name, in whatever shape this location needs it". */
+export const RENAME_PLACEHOLDER = "rlRenamePlaceholder";
+
 /** One reference or rename location. */
 export interface TsReference extends TsDefinition {
   isDefinition: boolean;
+  /** Rename only: the text TypeScript wants at this location, with
+   * [`RENAME_PLACEHOLDER`] standing in for the new name. Usually the
+   * placeholder alone; a destructuring shorthand (`{ value }`, which is
+   * what an rl pattern binding compiles to) expands to `value: <new>`
+   * instead, and the caller has to keep that expansion to rename the
+   * binding without silently rebinding a different field. */
+  newText?: string;
 }
 
 /** The TypeScript-inferred type at a position (see [`TsProject.typeAt`]):
