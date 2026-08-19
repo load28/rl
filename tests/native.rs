@@ -627,6 +627,41 @@ fn an_any_receiver_is_never_called_a_mutation() {
 }
 
 #[test]
+fn a_call_is_checked_against_the_declaration_it_resolves_to() {
+    // Two functions share a name; which one a call names is the callee
+    // symbol's answer, not the name's. The outer call reaches the
+    // top-level declaration (mutable parameter — an error); the inner
+    // call reaches the block's val-parameter arrow (fine). The
+    // name-keyed model had to skip both as ambiguous.
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/who.rl",
+        "type U = { name: string };\n\
+         export function go(): void {\n\
+         \x20 val const user: U = { name: \"a\" };\n\
+         \x20 handle(user);\n\
+         \x20 {\n\
+         \x20   const handle = (val u: U): void => {};\n\
+         \x20   handle(user);\n\
+         \x20 }\n\
+         }\n\
+         function handle(u: U): void { u.name = \"b\"; }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.contains("cannot pass val binding `user`"))
+            .count(),
+        1,
+        "only the call that names the mutable-parameter declaration: {out}"
+    );
+    assert!(
+        out.contains("src/who.rl:4:10") && out.contains("mutable parameter `u` of `handle`"),
+        "reported at the outer call's argument: {out}"
+    );
+}
+
+#[test]
 fn an_answer_past_the_pipe_buffer_still_arrives() {
     // A few hundred diagnostics make the host's one-line answer larger
     // than a pipe buffer (64 KB on Linux). The host must flush the whole

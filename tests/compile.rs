@@ -2723,6 +2723,51 @@ d.count = 2;
 }
 
 #[test]
+fn val_probes_carry_the_callee_and_the_declarations_it_may_name() {
+    // The call-capability check's pairing is delegated: probes hand over
+    // every declaration (as a node) and every call's callee (as a node),
+    // and which call names which declaration is symbol identity — so
+    // nothing is matched by name here, and an "ambiguous" name is not a
+    // concept collection needs.
+    const SRC: &str = "\
+val const user = { name: \"a\" };
+function handle(u: { name: string }): void {}
+handle(user);
+handle(user.name, user);
+";
+    let probes = rlc::val_probes(SRC);
+    assert_eq!(probes.functions.len(), 1);
+    let function = &probes.functions[0];
+    assert_eq!(function.name, "handle");
+    assert_eq!(&SRC[function.ident..function.ident + 6], "handle");
+    assert_eq!(
+        function.params,
+        vec![rlc::ValParam {
+            name: Some("u".into()),
+            is_val: false,
+        }]
+    );
+    let seen: Vec<(&str, &str, usize)> = probes
+        .passes
+        .iter()
+        .map(|p| (p.name.as_str(), p.callee.as_str(), p.arg_index))
+        .collect();
+    // Every plain-path argument is collected with its position — including
+    // `user.name` at index 0 and `user` at index 1 of the second call.
+    assert_eq!(
+        seen,
+        [
+            ("user", "handle", 0),
+            ("user", "handle", 0),
+            ("user", "handle", 1),
+        ]
+    );
+    for pass in &probes.passes {
+        assert_eq!(&SRC[pass.callee_at..pass.callee_at + 6], "handle");
+    }
+}
+
+#[test]
 fn a_type_argument_list_does_not_declare_a_val_binding() {
     // `<...>` is not a bracket the scanner matches, so the comma in
     // `Map<string, number>` used to look like a declarator separator and

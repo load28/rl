@@ -92,7 +92,8 @@
 | TASK-082 | TS7 semantic unification 제안서 검토와 개선 계획 확정 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-082](./TASK-082-ts7-semantic-unification-review.md) |
 | TASK-083 | host 질의 batch화와 mutator 정책의 판정 시점 이동 — 동작 불변 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-083](./TASK-083-host-batch-and-mutator-policy.md) |
 | TASK-084 | 큰 프로젝트에서의 host 스케일 — 응답 파이프 데드락 수정과 공유 타입 메모이제이션 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-084](./TASK-084-host-large-project-scale.md) |
+| TASK-085 | call-capability 검사의 callee를 symbol identity로 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-085](./TASK-085-callee-symbol-pairing.md) |
 
 ## 다음 태스크 번호
 
-**TASK-085**
+**TASK-086**

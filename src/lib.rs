@@ -67,7 +67,10 @@ pub use error::CompileError;
 pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};
 pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
-pub use val::{Mutation, ValBinding, ValMethodCall, ValPass, ValProbes, is_builtin_mutator_name};
+pub use val::{
+    Mutation, ValBinding, ValFn, ValMethodCall, ValParam, ValPass, ValProbes,
+    is_builtin_mutator_name,
+};
 
 use error::RlError;
 
