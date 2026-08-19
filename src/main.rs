@@ -839,6 +839,7 @@ fn main() -> ExitCode {
             node.as_deref(),
             out_dir.as_deref(),
             native_sidecar,
+            watch,
         );
     }
 
@@ -1217,7 +1218,7 @@ fn write_output(out_path: &Path, code: &str) -> Result<(), String> {
 }
 
 /// How often `--watch` re-reads the inputs' timestamps.
-const WATCH_INTERVAL: Duration = Duration::from_millis(300);
+pub(crate) const WATCH_INTERVAL: Duration = Duration::from_millis(300);
 
 /// `--watch`: compile once, then keep compiling what changes.
 ///

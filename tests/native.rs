@@ -129,6 +129,56 @@ fn check(dir: &Path, toolchain: &Toolchain) -> String {
 }
 
 #[test]
+fn watching_re_checks_against_the_compiler_it_already_started() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/color.rl",
+        "export enum Color { Red(), Green() }\n\
+         export function name(c: Color): string {\n\
+         \x20 return match (c) { Red => \"red\", Green => \"green\" };\n\
+         }\n",
+    )]);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rlc"));
+    command
+        .args(["--native-check", "src", "-w"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Toolchain::Tree(root) = &root {
+        command.env("RLC_TSGO_ROOT", root);
+    }
+    let mut child = command.spawn().expect("rlc runs");
+
+    // Let the first pass finish, then add a case with no arm: the watch has
+    // to see the edit through the compiler it is already holding.
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    write(
+        &dir,
+        "src/color.rl",
+        "export enum Color { Red(), Green(), Blue() }\n\
+         export function name(c: Color): string {\n\
+         \x20 return match (c) { Red => \"red\", Green => \"green\" };\n\
+         }\n",
+    );
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let _ = child.kill();
+    let out = child.wait_with_output().expect("rlc exits");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("missing \"Blue\""),
+        "the second pass saw the edit: {stdout}{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("— watching").count(),
+        2,
+        "one pass at startup and one for the edit: {stderr}"
+    );
+}
+
+#[test]
 fn a_hand_written_ts_file_imports_an_rl_file_by_the_specifier_it_writes() {
     let root = require_tsgo!();
     // `"./shape.rl"` is what a user writes, and it needs no configuration:

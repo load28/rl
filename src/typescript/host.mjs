@@ -12,20 +12,28 @@
  * `tsgo` binary speak an unversioned MessagePack protocol and must come from
  * the same build, so both are resolved from that one tree.
  *
- * Protocol (stdin → stdout, both JSON, one object each):
+ * The host is a **session**: one line of JSON in, one line of JSON out, for
+ * as long as stdin stays open. The compiler is started once and the project
+ * is opened once; a later request only says what changed. That is what makes
+ * a watch or an editor viable — reopening a real project per keystroke is
+ * not.
  *
- *   { tsgoBin (nullable), apiModule, cwd, tsconfig (nullable),
- *     modules: [{ path, text }],          // lowered .rl → virtual .ts
- *     literalChecks: [{ module, start, covered: [...] }],
- *     tagChecks: [{ module, start, covered: [...] }],
- *     symbolChecks: [{ module, start }],
- *     emitDeclarations: boolean }
+ *   open   { tsgoBin (nullable), apiModule, cwd, tsconfig (nullable) }
+ *       →  { ok: true }
  *
- *   { diagnostics: [{ file, start, end, code, message }],
- *     literalMissing: [{ index, missing }],
- *     tagMissing: [{ index, missing }],
- *     symbols: [{ index, id, name, builtin }],
- *     declarations: [{ path, text }] }
+ *   ask    { modules: [{ path, text }],   // lowered .rl → virtual .ts
+ *            literalChecks: [{ module, start, covered: [...] }],
+ *            tagChecks: [{ module, start, covered: [...] }],
+ *            symbolChecks: [{ module, start }],
+ *            emitDeclarations: boolean }
+ *       →  { diagnostics: [{ file, start, end, code, message }],
+ *            literalMissing: [{ index, missing }],
+ *            tagMissing: [{ index, missing }],
+ *            symbols: [{ index, id, name, builtin }],
+ *            declarations: [{ path, text }] }
+ *
+ * An `ask` may also answer `{ error: "..." }`, which fails that request
+ * without ending the session. EOF on stdin ends it.
  *
  * `start`/`end` are UTF-16 code-unit offsets — TypeScript's own coordinate
  * space. Mapping them back to `.rl` byte positions is rlc's job (`mapper`),
@@ -39,23 +47,33 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import process from "node:process";
 
-/** Reads the whole of stdin. */
-function readStdin() {
-  const chunks = [];
+/**
+ * Reads stdin one line at a time, blocking. The client waits for each
+ * answer before sending the next request, so a single buffer is enough.
+ */
+function lineReader() {
   const buf = Buffer.alloc(65536);
-  while (true) {
-    let n;
-    try {
-      n = fs.readSync(0, buf, 0, buf.length, null);
-    } catch (e) {
-      if (e.code === "EAGAIN") continue;
-      if (e.code === "EOF") break;
-      throw e;
+  let pending = "";
+  return function readLine() {
+    while (true) {
+      const newline = pending.indexOf("\n");
+      if (newline >= 0) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        return line;
+      }
+      let n;
+      try {
+        n = fs.readSync(0, buf, 0, buf.length, null);
+      } catch (e) {
+        if (e.code === "EAGAIN") continue;
+        if (e.code === "EOF") n = 0;
+        else throw e;
+      }
+      if (n === 0) return pending.length > 0 ? ((p) => ((pending = ""), p))(pending) : null;
+      pending += buf.subarray(0, n).toString("utf8");
     }
-    if (n === 0) break;
-    chunks.push(Buffer.from(buf.subarray(0, n)));
-  }
-  return Buffer.concat(chunks).toString("utf8");
+  };
 }
 
 /**
@@ -64,14 +82,7 @@ function readStdin() {
  * takes its place, including in directory listings, so a `tsconfig.json`
  * that globs a directory picks it up exactly as it would a hand-written file.
  */
-function layeredFileSystem(modules) {
-  const files = new Map(modules.map((m) => [m.path, m.text]));
-  const dirs = new Set();
-  for (const p of files.keys()) {
-    for (let d = path.dirname(p); d && d !== path.dirname(d); d = path.dirname(d)) {
-      dirs.add(d);
-    }
-  }
+function layeredFileSystem(files, dirs) {
   return {
     fileExists: (f) => (files.has(f) ? true : undefined),
     // `undefined` falls back to the real disk; `null` would mean "absent".
@@ -107,43 +118,82 @@ function fail(code, message) {
 }
 
 async function main() {
-  let job;
+  const readLine = lineReader();
+  let open;
   try {
-    job = JSON.parse(readStdin());
+    open = JSON.parse(readLine());
   } catch (e) {
-    fail(3, "rlc host: malformed job: " + e.message);
+    fail(3, "rlc host: malformed open request: " + e.message);
   }
 
-  let API, createVirtualFileSystem;
+  let API;
   try {
-    ({ API } = await import(job.apiModule));
+    ({ API } = await import(open.apiModule));
   } catch (e) {
-    fail(2, "rlc host: cannot load the TypeScript API from " + job.apiModule + ": " + e.message);
+    fail(2, "rlc host: cannot load the TypeScript API from " + open.apiModule + ": " + e.message);
   }
 
+  // The modules rlc serves, mutated in place between requests: the file
+  // system the compiler holds is this one, so an updated text is visible as
+  // soon as the snapshot is told the file changed.
+  const files = new Map();
+  const dirs = new Set();
   const api = new API({
-    cwd: job.cwd,
+    cwd: open.cwd,
     // Omitted for an installed package: the client runs the executable
     // shipped beside it, which is the one it was built against.
-    ...(job.tsgoBin ? { tsserverPath: job.tsgoBin } : {}),
-    fs: layeredFileSystem(job.modules ?? []),
+    ...(open.tsgoBin ? { tsserverPath: open.tsgoBin } : {}),
+    fs: layeredFileSystem(files, dirs),
   });
+  process.stdout.write(JSON.stringify({ ok: true }) + "\n");
 
-  const out = { diagnostics: [], literalMissing: [], tagMissing: [], symbols: [], declarations: [] };
+  let opened = false;
   try {
+    while (true) {
+      const line = readLine();
+      if (line === null) break;
+      let answer;
+      try {
+        answer = handle(JSON.parse(line));
+        opened = true;
+      } catch (e) {
+        answer = { error: String((e && e.stack) || e) };
+      }
+      process.stdout.write(JSON.stringify(answer) + "\n");
+    }
+  } finally {
+    api.close();
+  }
+
+  /** One `ask`: refresh the served modules, then answer every question. */
+  function handle(job) {
+    const out = {
+      diagnostics: [],
+      literalMissing: [],
+      tagMissing: [],
+      symbols: [],
+      declarations: [],
+    };
+    const changes = serve(files, dirs, job.modules ?? []);
     // With a `tsconfig.json` the project is the user's own. Without one —
     // a workspace that never configured TypeScript — the modules are opened
     // directly and the compiler infers a project for them, which is what an
     // editor does for a loose file.
+    //
+    // Opening happens once; from then on the snapshot is only told what
+    // changed, which is the whole point of keeping this process alive.
     const paths = (job.modules ?? []).map((m) => m.path);
-    const snapshot = api.updateSnapshot(
-      job.tsconfig ? { openProjects: [job.tsconfig] } : { openFiles: paths },
-    );
-    const project = job.tsconfig
-      ? snapshot.getProject(job.tsconfig)
+    const params = opened
+      ? { fileChanges: changes }
+      : open.tsconfig
+        ? { openProjects: [open.tsconfig] }
+        : { openFiles: paths };
+    const snapshot = api.updateSnapshot(params);
+    const project = open.tsconfig
+      ? snapshot.getProject(open.tsconfig)
       : paths.map((p) => snapshot.getDefaultProjectForFile(p)).find(Boolean);
     if (!project) {
-      fail(3, "rlc host: no project for " + (job.tsconfig ?? paths[0] ?? "<nothing>"));
+      throw new Error("no project for " + (open.tsconfig ?? paths[0] ?? "<nothing>"));
     }
 
     // The whole program, not just the lowered modules: a hand-written `.ts`
@@ -211,6 +261,7 @@ async function main() {
       // Declaration emit is newer than the checker API: a released 7.0
       // client can check but cannot emit.
       if (typeof project.program.getDeclarationEmit !== "function") {
+        process.exitCode = 5;
         fail(5, "rlc host: the resolved TypeScript has no declaration emit API");
       }
       const emitted = project.program.getDeclarationEmit(
@@ -220,11 +271,35 @@ async function main() {
         out.declarations.push({ path, text: file.text });
       }
     }
-  } finally {
-    api.close();
+    return out;
   }
+}
 
-  process.stdout.write(JSON.stringify(out));
+/**
+ * Replaces the served modules with `modules`, reporting what changed so the
+ * snapshot can be updated rather than rebuilt.
+ */
+function serve(files, dirs, modules) {
+  const changed = [];
+  const created = [];
+  const deleted = [];
+  const seen = new Set();
+  for (const module of modules) {
+    seen.add(module.path);
+    if (!files.has(module.path)) created.push(module.path);
+    else if (files.get(module.path) !== module.text) changed.push(module.path);
+    files.set(module.path, module.text);
+    for (let d = path.dirname(module.path); d && d !== path.dirname(d); d = path.dirname(d)) {
+      dirs.add(d);
+    }
+  }
+  for (const known of [...files.keys()]) {
+    if (!seen.has(known)) {
+      deleted.push(known);
+      files.delete(known);
+    }
+  }
+  return { changed, created, deleted };
 }
 
 /**

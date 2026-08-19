@@ -348,6 +348,7 @@ rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
 rlc --native-check src                  # 진단만
 rlc --native-sidecar src -o .rl-types   # 진단 + 사이드카
 rlc --native-check src --project ./tsconfig.app.json
+rlc --native-check src -w               # 감시 (컴파일러를 살려 둔다)
 ```
 
 - **설정이 필요 없습니다.** `src/token.rl`은 프로그램 안에서 `src/token.rl.ts`가
@@ -364,6 +365,13 @@ rlc --native-check src --project ./tsconfig.app.json
   보고합니다.
 - `--native-sidecar`는 쓰기 모드라 타입 에러가 있어도 사이드카를 갱신하고
   0으로 끝납니다. 검사 결과로 종료 코드를 받으려면 `--native-check`를 씁니다.
+- **`-w`는 컴파일러를 살려 둡니다.** 프로젝트는 한 번만 열고, 이후에는 바뀐
+  파일만 알려 재검사합니다. 매 패스마다 걸린 시간을 stderr에 적습니다.
+
+  ```
+  rlc: 1 file(s), 0 reported in 183 ms — watching   ← 첫 패스(컴파일러 기동 + 프로젝트 열기)
+  rlc: 1 file(s), 1 reported in 8 ms — watching     ← 편집 후 재검사
+  ```
 
 ### 컴파일러 해석
 

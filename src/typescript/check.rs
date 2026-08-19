@@ -24,6 +24,7 @@ pub(crate) fn run(
     node: Option<&Path>,
     out_dir: Option<&Path>,
     emit: bool,
+    watch: bool,
 ) -> ExitCode {
     let files = match collect(inputs) {
         Ok(files) if files.is_empty() => {
@@ -66,20 +67,6 @@ pub(crate) fn run(
             return ExitCode::FAILURE;
         }
     };
-    let lowered = match project::lower(&files) {
-        Ok(lowered) => lowered,
-        Err((file, error)) => {
-            eprintln!(
-                "{}:{}:{}: rl: {}",
-                file.display(),
-                error.line,
-                error.col,
-                error.message
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-
     let backend = match NativeBackend::new(node.map(PathBuf::from), &root) {
         Ok(backend) => backend,
         Err(e) => {
@@ -88,194 +75,292 @@ pub(crate) fn run(
         }
     };
 
-    let (mut query, probes) = project::query(&lowered, &root);
-    query.emit_declarations = emit;
-    let answers = match backend.ask(tsconfig.as_deref(), &root, &query) {
-        Ok(answers) => answers,
-        Err(e) => {
-            eprintln!("rlc: {e}");
-            return ExitCode::FAILURE;
-        }
+    let pass = Pass {
+        backend: &backend,
+        requested: &requested,
+        inputs,
+        tsconfig: tsconfig.as_deref(),
+        root: &root,
+        out_dir,
+        emit,
     };
 
-    // The declarations the compiler emitted for the lowered modules, laid
-    // out under `-o` the way the sources are laid out under the project.
-    if emit
-        && let Err(e) =
-            write_declarations(&answers.declarations, &lowered, &requested, inputs, out_dir)
-    {
-        eprintln!("rlc: {e}");
-        return ExitCode::FAILURE;
+    if watch {
+        return watch_loop(&pass, &root, out_dir);
     }
 
-    let mut reported = 0usize;
+    match pass.once(&files) {
+        // Writing is what a sidecar run is for: the declarations are emitted
+        // even when the code has type errors (they are reported, and a stale
+        // sidecar would be worse than one built from erroring code), so the
+        // exit code reflects whether the files were written. A run that only
+        // checks fails on anything it reported.
+        Ok(reported) if emit || reported == 0 => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("rlc: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
-    // TypeScript's own diagnostics, at the position in the `.rl` file the
-    // offending code was written at.
-    for diagnostic in &answers.diagnostics {
-        reported += 1;
-        let Some(file) = lowered.iter().find(|f| f.module_path == diagnostic.file) else {
-            // A hand-written file: TypeScript's own coordinates already name
-            // a file the user can open, so they are used as they are.
-            println!(
-                "{}: ts({}): {}",
-                diagnostic.file.display(),
-                diagnostic.code,
-                diagnostic.message,
-            );
-            continue;
-        };
-        match project::diagnostic_source_offset(file, diagnostic.start) {
-            Some((offset, exact)) => {
-                let (line, col) = rlc::line_col(&file.source, offset);
+/// Everything one pass needs, so a watch can run many of them against one
+/// running compiler.
+struct Pass<'a> {
+    backend: &'a NativeBackend,
+    /// The inputs' `.rl` files — what gets written.
+    requested: &'a std::collections::HashSet<PathBuf>,
+    inputs: &'a [String],
+    tsconfig: Option<&'a Path>,
+    root: &'a Path,
+    out_dir: Option<&'a Path>,
+    emit: bool,
+}
+
+impl Pass<'_> {
+    /// Lowers `files`, asks the compiler about them and reports what comes
+    /// back. Returns how much was reported; an rl-level error that leaves
+    /// nothing to lower counts as one.
+    fn once(&self, files: &[PathBuf]) -> Result<usize, String> {
+        let lowered = match project::lower(files) {
+            Ok(lowered) => lowered,
+            Err((file, error)) => {
                 println!(
-                    "{}:{}:{}: ts({}): {}{}",
+                    "{}:{}:{}: rl: {}",
+                    file.display(),
+                    error.line,
+                    error.col,
+                    error.message
+                );
+                return Ok(1);
+            }
+        };
+
+        let (mut query, probes) = project::query(&lowered, self.root);
+        query.emit_declarations = self.emit;
+        let answers = self.backend.ask(self.tsconfig, self.root, &query)?;
+
+        // The declarations the compiler emitted for the lowered modules, laid
+        // out under `-o` the way the sources are laid out under the project.
+        if self.emit {
+            write_declarations(
+                &answers.declarations,
+                &lowered,
+                self.requested,
+                self.inputs,
+                self.out_dir,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        let mut reported = 0usize;
+
+        // TypeScript's own diagnostics, at the position in the `.rl` file the
+        // offending code was written at.
+        for diagnostic in &answers.diagnostics {
+            reported += 1;
+            let Some(file) = lowered.iter().find(|f| f.module_path == diagnostic.file) else {
+                // A hand-written file: TypeScript's own coordinates already name
+                // a file the user can open, so they are used as they are.
+                println!(
+                    "{}: ts({}): {}",
+                    diagnostic.file.display(),
+                    diagnostic.code,
+                    diagnostic.message,
+                );
+                continue;
+            };
+            match project::diagnostic_source_offset(file, diagnostic.start) {
+                Some((offset, exact)) => {
+                    let (line, col) = rlc::line_col(&file.source, offset);
+                    println!(
+                        "{}:{}:{}: ts({}): {}{}",
+                        file.source_path.display(),
+                        line,
+                        col,
+                        diagnostic.code,
+                        diagnostic.message,
+                        // Glue is not the user's code: by the error-layer
+                        // contract rlc's output must not draw type errors, so
+                        // say where it came from rather than pinning it on the
+                        // line the position landed near.
+                        if exact {
+                            ""
+                        } else {
+                            " (in code rlc generated for this construct)"
+                        },
+                    );
+                }
+                None => println!(
+                    "{}: ts({}): {}",
+                    file.source_path.display(),
+                    diagnostic.code,
+                    diagnostic.message,
+                ),
+            }
+        }
+
+        // Literal-match exhaustiveness, decided by the type TypeScript computes
+        // at the scrutinee — narrowing included.
+        for missing in &answers.literal_missing {
+            let Some(anchor) = probes.literals.get(missing.index) else {
+                continue;
+            };
+            let Some(file) = lowered.iter().find(|f| f.source_path == anchor.source_path) else {
+                continue;
+            };
+            let (line, col) = rlc::line_col(&file.source, anchor.offset);
+            reported += 1;
+            println!(
+                "{}:{}:{}: rl: match is not exhaustive: missing {} \
+                 (add the missing arms or a final `_` arm)",
+                file.source_path.display(),
+                line,
+                col,
+                missing
+                    .missing
+                    .iter()
+                    .map(display_literal)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+
+        // Tag exhaustiveness, from the same narrowed type.
+        for missing in &answers.tag_missing {
+            let Some(anchor) = probes.tags.get(missing.index) else {
+                continue;
+            };
+            let Some(file) = lowered.iter().find(|f| f.source_path == anchor.source_path) else {
+                continue;
+            };
+            let (line, col) = rlc::line_col(&file.source, anchor.offset);
+            reported += 1;
+            println!(
+                "{}:{}:{}: rl: match is not exhaustive: missing {} \
+                 (add the missing arms or a final `_` arm)",
+                file.source_path.display(),
+                line,
+                col,
+                missing
+                    .missing
+                    .iter()
+                    .map(|t| format!("{t:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+
+        // `val`: two resolutions decide, and rlc guesses neither of them.
+        //
+        // 1. Which binding a path is rooted at — the root identifier and the
+        //    binding's declaration are the same binding when they are the same
+        //    symbol. Shadowing, redeclaration and destructuring come out right
+        //    because this is TypeScript's own resolution, not a model of it.
+        // 2. For a method call, whether the method is a built-in — declared in
+        //    TypeScript's own lib files. A user-defined method that shares the
+        //    name is not, and anything unresolved is left alone.
+        let symbols: std::collections::HashMap<usize, &Resolution> =
+            answers.resolutions.iter().map(|r| (r.index, r)).collect();
+        let val_symbols: std::collections::HashSet<i64> = probes
+            .val_bindings
+            .iter()
+            .filter_map(|i| symbols.get(i).map(|r| r.id))
+            .collect();
+
+        for mutation in &probes.mutations {
+            let Some(root) = symbols.get(&mutation.root) else {
+                continue; // unresolved — never a verdict
+            };
+            if !val_symbols.contains(&root.id) {
+                continue; // not this binding, whatever it is called
+            }
+            if let Some(method) = mutation.method {
+                match symbols.get(&method) {
+                    Some(resolution) if resolution.builtin => {}
+                    // A user-defined method, or one the checker could not
+                    // resolve: rl says nothing.
+                    _ => continue,
+                }
+            }
+            let Some(file) = lowered
+                .iter()
+                .find(|f| f.source_path == mutation.anchor.source_path)
+            else {
+                continue;
+            };
+            let (line, col) = rlc::line_col(&file.source, mutation.anchor.offset);
+            reported += 1;
+            match &mutation.method_name {
+                Some(method) => println!(
+                    "{}:{}:{}: rl: `{}` is a val binding: `{}` mutates it",
                     file.source_path.display(),
                     line,
                     col,
-                    diagnostic.code,
-                    diagnostic.message,
-                    // Glue is not the user's code: by the error-layer
-                    // contract rlc's output must not draw type errors, so
-                    // say where it came from rather than pinning it on the
-                    // line the position landed near.
-                    if exact {
-                        ""
-                    } else {
-                        " (in code rlc generated for this construct)"
-                    },
-                );
-            }
-            None => println!(
-                "{}: ts({}): {}",
-                file.source_path.display(),
-                diagnostic.code,
-                diagnostic.message,
-            ),
-        }
-    }
-
-    // Literal-match exhaustiveness, decided by the type TypeScript computes
-    // at the scrutinee — narrowing included.
-    for missing in &answers.literal_missing {
-        let Some(anchor) = probes.literals.get(missing.index) else {
-            continue;
-        };
-        let Some(file) = lowered.iter().find(|f| f.source_path == anchor.source_path) else {
-            continue;
-        };
-        let (line, col) = rlc::line_col(&file.source, anchor.offset);
-        reported += 1;
-        println!(
-            "{}:{}:{}: rl: match is not exhaustive: missing {} \
-             (add the missing arms or a final `_` arm)",
-            file.source_path.display(),
-            line,
-            col,
-            missing
-                .missing
-                .iter()
-                .map(display_literal)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-    }
-
-    // Tag exhaustiveness, from the same narrowed type.
-    for missing in &answers.tag_missing {
-        let Some(anchor) = probes.tags.get(missing.index) else {
-            continue;
-        };
-        let Some(file) = lowered.iter().find(|f| f.source_path == anchor.source_path) else {
-            continue;
-        };
-        let (line, col) = rlc::line_col(&file.source, anchor.offset);
-        reported += 1;
-        println!(
-            "{}:{}:{}: rl: match is not exhaustive: missing {} \
-             (add the missing arms or a final `_` arm)",
-            file.source_path.display(),
-            line,
-            col,
-            missing
-                .missing
-                .iter()
-                .map(|t| format!("{t:?}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-    }
-
-    // `val`: two resolutions decide, and rlc guesses neither of them.
-    //
-    // 1. Which binding a path is rooted at — the root identifier and the
-    //    binding's declaration are the same binding when they are the same
-    //    symbol. Shadowing, redeclaration and destructuring come out right
-    //    because this is TypeScript's own resolution, not a model of it.
-    // 2. For a method call, whether the method is a built-in — declared in
-    //    TypeScript's own lib files. A user-defined method that shares the
-    //    name is not, and anything unresolved is left alone.
-    let symbols: std::collections::HashMap<usize, &Resolution> =
-        answers.resolutions.iter().map(|r| (r.index, r)).collect();
-    let val_symbols: std::collections::HashSet<i64> = probes
-        .val_bindings
-        .iter()
-        .filter_map(|i| symbols.get(i).map(|r| r.id))
-        .collect();
-
-    for mutation in &probes.mutations {
-        let Some(root) = symbols.get(&mutation.root) else {
-            continue; // unresolved — never a verdict
-        };
-        if !val_symbols.contains(&root.id) {
-            continue; // not this binding, whatever it is called
-        }
-        if let Some(method) = mutation.method {
-            match symbols.get(&method) {
-                Some(resolution) if resolution.builtin => {}
-                // A user-defined method, or one the checker could not
-                // resolve: rl says nothing.
-                _ => continue,
+                    mutation.name,
+                    method,
+                ),
+                None => println!(
+                    "{}:{}:{}: rl: cannot mutate through val binding `{}` \
+                     (the binding is declared with `val`, so every access path \
+                     from it is read-only)",
+                    file.source_path.display(),
+                    line,
+                    col,
+                    mutation.name,
+                ),
             }
         }
-        let Some(file) = lowered
+
+        Ok(reported)
+    }
+}
+
+/// Re-checks on every change, against the compiler started for the first
+/// pass. The project is opened once and updated after that, which is what
+/// makes the wait a re-check rather than a cold start.
+fn watch_loop(pass: &Pass<'_>, root: &Path, out_dir: Option<&Path>) -> ExitCode {
+    let mut stamps: std::collections::HashMap<PathBuf, std::time::SystemTime> =
+        std::collections::HashMap::new();
+    let mut first = true;
+    loop {
+        let files = match project_sources(root, out_dir) {
+            Ok(files) => files,
+            // A file can disappear mid-edit; keep watching rather than
+            // tearing the session down.
+            Err(_) => {
+                std::thread::sleep(crate::WATCH_INTERVAL);
+                continue;
+            }
+        };
+        let current: std::collections::HashMap<PathBuf, std::time::SystemTime> = files
             .iter()
-            .find(|f| f.source_path == mutation.anchor.source_path)
-        else {
-            continue;
-        };
-        let (line, col) = rlc::line_col(&file.source, mutation.anchor.offset);
-        reported += 1;
-        match &mutation.method_name {
-            Some(method) => println!(
-                "{}:{}:{}: rl: `{}` is a val binding: `{}` mutates it",
-                file.source_path.display(),
-                line,
-                col,
-                mutation.name,
-                method,
-            ),
-            None => println!(
-                "{}:{}:{}: rl: cannot mutate through val binding `{}` \
-                 (the binding is declared with `val`, so every access path \
-                 from it is read-only)",
-                file.source_path.display(),
-                line,
-                col,
-                mutation.name,
-            ),
-        }
-    }
+            .map(|file| {
+                let stamp = std::fs::metadata(file)
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                (file.clone(), stamp)
+            })
+            .collect();
 
-    // Writing is what a sidecar run is for: the declarations are emitted
-    // even when the code has type errors (they are reported, and a stale
-    // sidecar would be worse than one built from erroring code), so the exit
-    // code reflects whether the files were written. A run that only checks
-    // fails on anything it reported.
-    if emit || reported == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+        if first || current != stamps {
+            let started = std::time::Instant::now();
+            match pass.once(&files) {
+                Ok(reported) => eprintln!(
+                    "rlc: {} file(s), {} reported in {} ms — watching",
+                    files.len(),
+                    reported,
+                    started.elapsed().as_millis()
+                ),
+                Err(e) => eprintln!("rlc: {e}"),
+            }
+        }
+        if first {
+            eprintln!("rlc: watching {} file(s) — Ctrl-C to stop", files.len());
+            first = false;
+        }
+        stamps = current;
+        std::thread::sleep(crate::WATCH_INTERVAL);
     }
 }
 

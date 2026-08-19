@@ -12,9 +12,10 @@
 //! Everything unstable about TypeScript 7 lives behind this module and
 //! [`super::backend::TypeScriptBackend`].
 
-use std::io::Write;
+use std::cell::RefCell;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use super::backend::*;
 
@@ -79,7 +80,11 @@ impl Toolchain {
         match installed(from) {
             Some(toolchain) => toolchain.check(),
             None => Err(format!(
-                "no TypeScript compiler found — install one                  (`npm i -D typescript@7`), or build a typescript-go checkout                  (`go build -o {BIN_IN_TREE} ./cmd/tsgo` plus `npm ci && npx tsc                  -b _packages/native-preview`) and point rlc at it with                  RLC_TSGO_ROOT"
+                "no TypeScript compiler found — install one \
+                 (`npm i -D typescript@7`), or build a typescript-go checkout \
+                 (`go build -o {BIN_IN_TREE} ./cmd/tsgo` plus `npm ci && npx \
+                 tsc -b _packages/native-preview`) and point rlc at it with \
+                 RLC_TSGO_ROOT"
             )),
         }
     }
@@ -155,29 +160,46 @@ fn env_path(var: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// A [`TypeScriptBackend`] backed by a built typescript-go tree.
-#[derive(Debug, Clone)]
+/// A [`TypeScriptBackend`] over a running compiler.
+///
+/// The first question starts the host and opens the project; every question
+/// after it reuses both. That is the difference between a watch that
+/// re-checks in milliseconds and one that pays for a whole project open per
+/// keystroke.
+#[derive(Debug)]
 pub(crate) struct NativeBackend {
     toolchain: Toolchain,
     /// The `node` binary that runs the host (`--node`, else `node` on PATH).
     node: PathBuf,
+    session: RefCell<Option<Session>>,
+}
+
+/// The running host: a process, and the two pipes a request travels over.
+#[derive(Debug)]
+struct Session {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    /// What the project was opened as. A question about a different project
+    /// needs a different session.
+    opened: (Option<PathBuf>, PathBuf),
+    /// The host script, kept until the session ends.
+    script: PathBuf,
 }
 
 impl NativeBackend {
-    /// Resolves the toolchain and prepares a backend over it.
+    /// Resolves the toolchain and prepares a backend over it. Nothing is
+    /// started until the first question.
     pub(crate) fn new(node: Option<PathBuf>, from: &Path) -> Result<NativeBackend, String> {
         Ok(NativeBackend {
             toolchain: Toolchain::resolve(from)?,
             node: node.unwrap_or_else(|| PathBuf::from("node")),
+            session: RefCell::new(None),
         })
     }
-}
 
-impl TypeScriptBackend for NativeBackend {
-    fn ask(&self, tsconfig: Option<&Path>, root: &Path, query: &Query) -> Result<Answers, String> {
-        let cwd = root.to_path_buf();
-        let job = job_json(&self.toolchain, tsconfig, &cwd, query);
-
+    /// Starts the host and opens the project.
+    fn start(&self, tsconfig: Option<&Path>, root: &Path) -> Result<Session, String> {
         // The host is written beside the run rather than piped in: node reads
         // a module from a path, and the path is what import specifiers in the
         // job resolve against.
@@ -188,63 +210,117 @@ impl TypeScriptBackend for NativeBackend {
 
         let mut child = Command::new(&self.node)
             .arg(&script)
-            .current_dir(&cwd)
+            .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot run {}: {e}", self.node.display()))?;
-        child
-            .stdin
-            .take()
-            .expect("stdin piped")
-            .write_all(job.to_string().as_bytes())
-            .map_err(|e| format!("cannot send the job to the host: {e}"))?;
-        let out = child
-            .wait_with_output()
-            .map_err(|e| format!("the host failed: {e}"))?;
-        let _ = std::fs::remove_file(&script);
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
 
-        if out.status.code() == Some(5) {
-            return Err(format!(
-                "the TypeScript resolved at {} can check but cannot emit \
-                 declarations — that API is newer than the released package. \
-                 Drop -o, or point rlc at a built typescript-go checkout with \
-                 RLC_TSGO_ROOT",
-                self.toolchain.api.display(),
-            ));
+        let open = serde_json::json!({
+            "tsgoBin": self.toolchain.bin,  // null: the client runs the one beside it
+            "apiModule": self.toolchain.api,
+            "cwd": root,
+            "tsconfig": tsconfig,
+        });
+        writeln!(stdin, "{open}").map_err(|e| format!("cannot start the host: {e}"))?;
+
+        let mut ack = String::new();
+        if stdout.read_line(&mut ack).map_err(|e| e.to_string())? == 0 {
+            return Err(host_died(&mut child));
         }
-        if !out.status.success() {
-            // The whole of stderr: a host crash prints a stack, and the line
-            // that names the cause is rarely the last one.
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let stderr = stderr.trim();
-            return Err(format!(
-                "the TypeScript backend failed:\n{}",
-                if stderr.is_empty() {
-                    "(no output)"
-                } else {
-                    stderr
-                }
-            ));
-        }
-        parse_answers(&String::from_utf8_lossy(&out.stdout))
+        Ok(Session {
+            child,
+            stdin,
+            stdout,
+            opened: (tsconfig.map(Path::to_path_buf), root.to_path_buf()),
+            script,
+        })
     }
 }
 
-/// The job the host reads on stdin — see `host.mjs` for the protocol.
-fn job_json(
-    toolchain: &Toolchain,
-    tsconfig: Option<&Path>,
-    cwd: &Path,
-    query: &Query,
-) -> serde_json::Value {
+/// What the host said on its way out. A crash before the first answer is
+/// usually a missing API or an unreadable client, and its message is on
+/// stderr.
+fn host_died(child: &mut Child) -> String {
+    let status = child.wait().ok();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        use std::io::Read;
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    if status.and_then(|s| s.code()) == Some(5) {
+        return "the resolved TypeScript can check but cannot emit declarations \
+                — that API is newer than the released package. Drop -o, or point \
+                rlc at a built typescript-go checkout with RLC_TSGO_ROOT"
+            .to_string();
+    }
+    let stderr = stderr.trim();
+    format!(
+        "the TypeScript backend failed:\n{}",
+        if stderr.is_empty() {
+            "(no output)"
+        } else {
+            stderr
+        }
+    )
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Closing stdin ends the host's loop; the wait keeps it from
+        // outliving the run.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.script);
+    }
+}
+
+impl TypeScriptBackend for NativeBackend {
+    fn ask(&self, tsconfig: Option<&Path>, root: &Path, query: &Query) -> Result<Answers, String> {
+        let wanted = (tsconfig.map(Path::to_path_buf), root.to_path_buf());
+        let mut slot = self.session.borrow_mut();
+        // A question about a different project needs its own session: the
+        // project is opened once and never reopened.
+        if slot.as_ref().is_some_and(|s| s.opened != wanted) {
+            *slot = None;
+        }
+        if slot.is_none() {
+            *slot = Some(self.start(tsconfig, root)?);
+        }
+        let session = slot.as_mut().expect("started");
+
+        let job = job_json(query);
+        let answer = exchange(session, &job.to_string());
+        match answer {
+            Ok(line) => parse_answers(&line),
+            Err(_) => {
+                // The host is gone; take its last words, and let the next
+                // question start a fresh one.
+                let mut session = slot.take().expect("started");
+                Err(host_died(&mut session.child))
+            }
+        }
+    }
+}
+
+/// One request, one answer. An I/O error means the host is no longer there.
+fn exchange(session: &mut Session, request: &str) -> std::io::Result<String> {
+    writeln!(session.stdin, "{request}")?;
+    session.stdin.flush()?;
+    let mut line = String::new();
+    if session.stdout.read_line(&mut line)? == 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+    }
+    Ok(line)
+}
+
+/// One `ask` — see `host.mjs` for the protocol.
+fn job_json(query: &Query) -> serde_json::Value {
     use serde_json::json;
     json!({
-        "tsgoBin": toolchain.bin,  // null: the client runs the one beside it
-        "apiModule": toolchain.api,
-        "cwd": cwd,
-        "tsconfig": tsconfig,
         "modules": query.modules.iter()
             .map(|m| json!({ "path": m.path, "text": m.text }))
             .collect::<Vec<_>>(),
@@ -288,6 +364,9 @@ fn literal_json(literal: &rlc::Literal) -> serde_json::Value {
 fn parse_answers(stdout: &str) -> Result<Answers, String> {
     let value: serde_json::Value = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("the TypeScript backend answered with malformed JSON: {e}"))?;
+    if let Some(error) = value["error"].as_str() {
+        return Err(format!("the TypeScript backend failed:\n{error}"));
+    }
 
     let mut answers = Answers::default();
     for d in array(&value, "diagnostics") {
