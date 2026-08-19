@@ -14,10 +14,7 @@ node_modules/**
 !server/node_modules/vscode-languageserver-types/**
 !server/node_modules/vscode-jsonrpc/**
 !server/node_modules/vscode-uri/**
-# `**/*.ts` above matches declaration files too, which takes out TypeScript's
-# own lib*.d.ts while leaving typescript.js in place — a language server that
-# runs but type-checks against no globals at all, so it reports TS2488 on a
-# plain tuple destructuring. `node_modules/**` does not reach these (it only
-# matches the root node_modules), so this one line is the whole fix.
-!server/node_modules/typescript/lib/lib*.d.ts
+# TypeScript itself is not packaged. The type answers come from the
+# compiler's own language server (`tsgo`), which carries its lib*.d.ts
+# inside its executable — nothing here has to ship them.
 .gitignore

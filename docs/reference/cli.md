@@ -35,9 +35,11 @@ GitHub Release 업로드까지 수행합니다.
 | `-o, --out-dir <dir>` | 출력을 `<dir>` 아래에 씁니다 (중간 디렉터리 자동 생성) |
 | `-w, --watch` | 계속 지켜보며 바뀐 파일을 다시 처리합니다 ([감시 모드](#감시-모드--w)) |
 | `-j, --jobs <n>` | 한 번에 컴파일할 파일 수 (기본: 코어 수, `1`이면 순차) ([병렬 컴파일](#병렬-컴파일---jobs)) |
-| `--check` | 컴파일만 하고 아무것도 쓰지 않습니다 |
-| `--types` | 빌드 대신 **타입 사이드카**를 만듭니다 ([타입 생성](#타입-생성---types)) |
-| `--node <path>` | `--types`가 쓸 node 바이너리 (기본: PATH의 `node`) |
+| `--check` | 컴파일만 하고 아무것도 쓰지 않습니다 (rl 수준 검사, TypeScript 불필요) |
+| `--check-types` | 여기에 **타입 검사**까지 ([타입 검사](#타입-검사---check-types---types)) |
+| `--types` | `--check-types`에 더해 **타입 사이드카**를 씁니다 (같은 절) |
+| `--project <tsconfig>` | 위 두 모드가 검사할 `tsconfig.json` (기본: 입력 위쪽에서 탐색) |
+| `--node <path>` | TypeScript 컴파일러의 클라이언트를 돌릴 node 바이너리 (기본: PATH의 `node`) |
 | `-h, --help` / `-v, --version` | 출력하고 종료 (코드 0) |
 
 도구용 — 번들러 플러그인·에디터가 호출합니다.
@@ -154,68 +156,87 @@ rlc: src/deep/nested.rl → build/deep/nested.ts   # "../rl.js"
 `--rewrite-imports`를 따릅니다(`off`면 `@rl/std` 그대로 — 번들러 플러그인이
 직접 해석할 때).
 
-## 타입 생성 (`--types`)
+## 타입 검사 (`--check-types` / `--types`)
 
-`.ts` 파일이 `"./x.rl"`이나 `"@rl/std"`를 import하면 tsserver/tsc는 그 지정자를
-몰라 `TS2307`을 냅니다. `--types`가 그 간극을 메우는 선언을 만듭니다 — 단독
-파이프라인이든 번들러든 타입은 이 명령 하나로 나옵니다.
+`.ts` 파일이 `"./x.rl"`이나 `"@rl/std"`를 import하면 tsc는 그 지정자를 몰라
+`TS2307`을 냅니다. 그리고 `.rl` 안의 타입 에러는 `--check`가 보지 않습니다 —
+그것은 TypeScript의 몫이니까요. 이 두 모드가 **진짜 TypeScript 컴파일러**를
+데려옵니다.
+
+```sh
+rlc --check-types src                   # 검사만
+rlc --types src                         # 검사 + 사이드카 (기본 -o .rl-types)
+rlc --check-types src --project ./tsconfig.app.json
+rlc --check-types src -w                # 감시 (컴파일러를 살려 둔다)
+```
+
+`.rl`을 ordinary TypeScript로 낮춘 뒤 **사용자의 실제 TypeScript 프로젝트**에
+넣어 TypeScript 7 네이티브 컴파일러(typescript-go)에게 묻습니다. `.ts`와
+`.rl`이 하나의 프로그램 안에 있으므로 서로를 봅니다. 낮춘 모듈은
+**메모리에만** 있습니다 — 어떤 소스도 복사되지 않고 중간 트리도 만들지
+않습니다.
+
+- **설정이 필요 없습니다.** `src/token.rl`은 프로그램 안에서 `src/token.rl.ts`가
+  되므로, 사람이 쓴 `.ts`의 `import "./token.rl"`이 평범한 TypeScript 해석으로
+  그 모듈을 찾습니다. `paths`도 `allowImportingTsExtensions`도 필요 없습니다.
+  `@rl/std`는 가상 `node_modules/@rl/std`로 해석되므로 지정자가 바 상태로
+  남습니다.
+- **그래프는 프로젝트 전체**입니다 — 인자로 준 파일이 프로젝트의 다른 `.rl`을
+  import해도 해석됩니다. 인자는 *무엇을 쓸지*만 정합니다. `tsconfig.json`이
+  있으면 그 `include`가 손으로 쓴 `.ts`의 범위를 정하고, 없으면 프로젝트의
+  `.ts`도 함께 열어 검사합니다.
+- **소진성과 `val`을 체커가 답합니다.** match 위치에서 실제로 좁혀진 타입을
+  쓰므로, 앞선 가드가 제거한 케이스는 요구하지 않습니다. `val`은 심볼 동일성으로
+  바인딩을 짝짓고, 내장 메서드 판정도 컴파일러가 합니다.
+- `-j, --jobs`는 이 모드에 영향이 없습니다 — 프로그램은 하나고, 시간은 대부분
+  체커가 씁니다.
+
+### 진단
+
+rl 수준 에러는 `--check`와 **똑같이** 읽히고, 타입 에러만 `ts(코드):`로
+구분됩니다. 둘 다 원본 `.rl`의 위치를 가리키고, 둘 다 stderr입니다.
+
+```
+rlc: src/eval.rl:12:31: ts(2339): Property 'length' does not exist on type 'number'.
+rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
+     (add the missing arms or a final `_` arm)
+rlc: src/main.rl:2:1: cannot call mutating method `set` through val binding `map`
+     (the binding is declared with `val`, so every access path from it is read-only)
+```
+
+- 손으로 쓴 `.ts`의 에러는 원래 위치 그대로 나옵니다.
+- 글루(switch IIFE, `$rl_ap` 헬퍼 등)에 걸린 진단은 원본 대응이 없으므로 그
+  구문의 위치로 보고하고 `(in code rlc generated for this construct)`를 덧붙입니다.
+  애초에 방출물 때문에 tsc 에러가 나면 그건 rlc의 버그입니다
+  ([`errors.md`](./errors.md) 에러 계층).
+- **소진성 메시지가 `--check`와 다릅니다.** `--check`는 자기 선언 표에서
+  답하므로 enum 이름을 댈 수 있고(`match on enum Shape is not exhaustive`),
+  이 모드는 *타입*에서 답하므로 이름 없이 `match is not exhaustive`라고
+  합니다. 대신 좁혀진 타입을 쓰므로 더 정확합니다. 리터럴 유니언은 어느
+  선언 표에도 없으므로 이 모드만 검사합니다
+  ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)).
+- **`val` 경로의 built-in 변경 메서드도 여기서만 검사합니다.** 타입 체커에게 그
+  메서드의 선언을 물어, TypeScript 자신이 선언한 메서드일 때만 보고합니다.
+  같은 이름의 사용자 정의 메서드는 걸리지 않고, 수신자를 확정할 수 없으면
+  검사하지 않습니다
+  ([`language.md` §10.4](./language.md#104-built-in-변경-메서드---types)).
+
+### 종료 코드
+
+| 코드 | 의미 |
+|------|------|
+| 0 | 아무것도 보고되지 않음 |
+| 1 | 무언가 보고됨. `--types`라면 **사이드카는 갱신된 상태** — 낡은 사이드카보다 타입 에러가 있는 코드의 사이드카가 낫습니다 |
+| 2 | 검사를 시작할 수 없었음 (rl 수준 에러로 낮출 것이 없음) — **아무것도 쓰지 않았으므로** 이전 결과를 들고 있는 쪽은 그대로 두면 됩니다 |
+
+### 사이드카 (`--types`)
+
+`-o`가 없으면 `.rl-types/`에 씁니다.
 
 ```sh
 rlc --types src/          # → .rl-types/<이름>.rl.d.ts (+ .map, rl.d.ts)
 rlc --types -w src/       # 감시하며 갱신
 ```
-
-선언은 **메모리에서** 방출됩니다 — 각 `.rl`을 컴파일해 내장 호스트
-스크립트(node)에 넘기고, 손으로 쓴 `.ts`는 디스크에서 제자리에서 읽습니다.
-**어떤 소스도 복사되지 않고 중간 트리도 만들지 않습니다.** 그 `.ts` 파일들도
-프로그램에 참여하므로 그쪽 타입 에러도 함께 보고됩니다.
-
-- TypeScript는 프로젝트의 `node_modules`에서 해석합니다 (없으면 PATH의
-  `tsc`가 속한 패키지). 없으면
-  `rlc: typescript not found — install it (npm i -D typescript)`.
-- **TypeScript 5·6이 필요합니다.** TypeScript 7은 네이티브(Go) 컴파일러라
-  npm 패키지에 JS 컴파일러 API가 없어 `--types`가 구동할 수 없습니다 —
-  7만 해석되는 환경에서는 API가 있는 버전을 찾을 때까지 건너뛰고, 끝내
-  없으면 `rlc: the resolved typescript has no JS compiler API ...
-  (npm i -D typescript@6)`로 안내합니다.
-- 타입 에러가 있어도 선언은 방출되므로 사이드카는 갱신되고 종료 코드만 1입니다.
-- **타입 에러는 `.rl` 원본 위치로 보고됩니다.** tsc가 보는 것은 각 `.rl`이
-  컴파일된 TypeScript지만, 그 파일은 디스크에 없습니다 — 방출 매핑을 거꾸로
-  타 원본의 행·열로 옮겨 냅니다. 손으로 쓴 `.ts`의 에러는 원래 위치 그대로.
-
-  ```
-  rlc: src/eval.rl:12:31: Property 'length' does not exist on type 'number'.
-  ```
-
-  글루(switch IIFE, `$rl_ap` 헬퍼 등)에 걸린 진단은 원본 대응이 없으므로
-  바로 뒤따르는 원본 조각의 위치로 보고됩니다. 애초에 방출물 때문에 tsc
-  에러가 나면 그건 rlc의 버그입니다 (`docs/reference/errors.md` 에러 계층).
-- **리터럴 match의 소진성도 여기서 검사합니다.** 같은 프로그램의 타입
-  체커에게 `_` 없는 리터럴 match의 스크루티니 타입을 물어, 그 타입이 유한한
-  리터럴 유니언으로 확정될 때만 빠진 리터럴을 보고합니다. 기본 컴파일
-  경로는 이 검사를 하지 않습니다 (런타임 가드만).
-
-  ```
-  rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
-       (add the missing arms or a final `_` arm)
-  ```
-
-  위치는 원본 `.rl`의 `match` 키워드입니다. 규칙과 검사/비검사 타입 목록은
-  [`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types).
-- **`val` 경로의 built-in 변경 메서드도 여기서 검사합니다.** 타입 체커에게 그
-  메서드의 선언을 물어, TypeScript 자신이 `Array`/`Map`/`Set`/`WeakMap`/
-  `WeakSet`/TypedArray에 선언한 변경 메서드일 때만 보고합니다. 같은 이름의
-  사용자 정의 메서드는 걸리지 않고, 수신자를 확정할 수 없으면 검사하지
-  않습니다. 기본 컴파일 경로는 메서드 호출을 판정하지 않습니다.
-
-  ```
-  rlc: src/main.rl:2:1: cannot call mutating method `set` of built-in `Map` through
-       val binding `map` (the binding is declared with `val`, so every access path
-       from it is read-only)
-  ```
-
-  규칙과 built-in 목록은
-  [`language.md` §10.4](./language.md#104-built-in-변경-메서드---types).
 
 소비 측 `tsconfig.json`은 두 가지만 선언하면 됩니다.
 
@@ -232,16 +253,47 @@ rlc --types -w src/       # 감시하며 갱신
 |------|------|
 | `<이름>.rl.d.ts` | tsserver/tsc가 `"./<이름>.rl"`을 해결하는 근거 |
 | `<이름>.rl.d.ts.map` | `sources`가 원본 `.rl` — **정의 이동이 원본으로** 갑니다 |
+| `rl.d.ts` | 표준 라이브러리(`@rl/std`)의 선언 |
 
 `.rl-types/`는 생성물이므로 gitignore에 넣으세요.
+
+### 감시 (`-w`)
+
+**컴파일러를 살려 둡니다.** 프로젝트는 한 번만 열고, 이후에는 바뀐 파일만
+알려 재검사합니다. 매 패스마다 걸린 시간을 stderr에 적습니다.
+
+```
+rlc: 1 file(s), 0 reported in 183 ms — watching   ← 첫 패스(컴파일러 기동 + 프로젝트 열기)
+rlc: 1 file(s), 1 reported in 8 ms — watching     ← 편집 후 재검사
+```
+
+### 컴파일러 해석
+
+먼저 나오는 것을 씁니다.
+
+| 순서 | 무엇 |
+|------|------|
+| 1 | `RLC_TSGO_API` (+ 선택적 `RLC_TSGO_BIN`) |
+| 2 | `RLC_TSGO_ROOT` — 빌드된 typescript-go 체크아웃 |
+| 3 | `../typescript-go` — 마찬가지로 빌드된 것 |
+| 4 | 프로젝트 위쪽의 `node_modules/typescript` 또는 `@typescript/native-preview` |
+
+4번(설치된 패키지)은 API 클라이언트와 네이티브 실행 파일을 함께 배포하므로
+`npm i -D typescript@7`만으로 동작합니다. 다만 **선언 emit은 아직 릴리스에
+없어** `--types`의 사이드카 쓰기에는 빌드된 체크아웃이 필요합니다 — 그 경우
+rlc가 그렇게 말합니다. 아무것도 해석되지 않으면
+`rlc: no TypeScript compiler found — install one (npm i -D typescript@7)`.
+
 
 ## 감시 모드 (`-w`)
 
 ```sh
 rlc -w -o build src/          # 바뀔 때마다 다시 컴파일
 rlc -w --check src/           # 검사만 (tsc --noEmit --watch에 해당)
-rlc -w --types src/           # 사이드카를 계속 갱신
 ```
+
+`--check-types`/`--types`의 감시는 컴파일러를 살려 두는 별도 구조입니다 —
+[타입 검사 §감시](#감시--w).
 
 - 입력을 매 회차 다시 수집하므로 **새로 생긴 `.rl`도** 잡힙니다.
 - **바뀐 파일의 importer도 함께** 다시 컴파일합니다 — 다른 파일의 enum에
@@ -339,7 +391,8 @@ rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
 
 - 쓴 파일마다 stderr에 진행 로그(`rlc: src/a.rl → src/a.ts`). `-p`/`--check`는
   로그 없음.
-- 에러는 stderr에 `rlc: 파일:행:열: 메시지` ([`errors.md`](./errors.md)).
+- 에러는 stderr에 `rlc: 파일:행:열: 메시지` ([`errors.md`](./errors.md)) —
+  타입 검사 모드의 진단도 같습니다.
 - stdout은 `-p`·`--emit-std`·`--symbols`·`--emit-map`·`help`·`-h`·`-v` 전용이라 파이프로 안전합니다.
 - 기본적으로 출력 첫 줄에 `// @generated from <파일> by rlc — do not edit
   directly.`가 붙습니다 (`--no-banner`로 생략).
@@ -348,6 +401,7 @@ rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
 |------|------|
 | 0 | 전부 성공 |
 | 1 | 인자 에러, 없는 입력 경로, 또는 하나 이상 실패 |
+| 2 | 타입 검사 모드에서만: 검사를 시작할 수 없었음 ([위](#종료-코드)) |
 
 한 파일이 실패해도 나머지는 계속 처리하고 마지막에 1로 종료합니다. 인자 에러와
 없는 경로는 시작 전에 즉시 1입니다.
@@ -359,7 +413,7 @@ rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
 { "scripts": {
     "build": "rlc -o build src && tsc",
     "types": "rlc --types src",
-    "check": "rlc --check src && tsc --noEmit" } }
+    "check": "rlc --check-types src" } }
 ```
 
 ```jsonc

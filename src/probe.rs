@@ -49,6 +49,49 @@ pub enum Literal {
     Boolean(bool),
 }
 
+/// A wildcard-free tag `match` — one typed exhaustiveness question about an
+/// enum. Produced by [`crate::tag_matches`].
+///
+/// rlc can answer this one from its own declaration table, and does when no
+/// checker is available. A checker answers it *better*: the scrutinee's type
+/// at the `match` is the narrowed one, so a case an earlier guard already
+/// removed is not demanded back, and an enum declared in another module
+/// needs no declaration collecting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagMatch {
+    /// Byte offset of the `match` keyword — where a missing-case diagnostic
+    /// is reported (see [`crate::line_col`]).
+    pub offset: usize,
+    /// Byte offset of the scrutinee's first non-whitespace byte.
+    pub scrutinee: usize,
+    /// Byte offset just past the scrutinee's last non-whitespace byte.
+    pub scrutinee_end: usize,
+    /// The case tags the match's unguarded arms cover. A guarded arm may
+    /// fall through, so it covers nothing.
+    pub covered: Vec<String>,
+}
+
+/// Collects every wildcard-free tag `match` of a source file, nested ones
+/// included, in source order.
+///
+/// ```
+/// let probes = rlc::tag_matches("const v = match (s) { Circle(r) => r, Point => 0 };\n");
+/// assert_eq!(probes.len(), 1);
+/// assert_eq!(probes[0].covered, ["Circle", "Point"]);
+/// ```
+///
+/// A match with a `_` arm is already exhaustive and is not collected:
+///
+/// ```
+/// assert!(rlc::tag_matches("const v = match (s) { Circle(r) => r, _ => 0 };\n").is_empty());
+/// ```
+pub fn tag_matches(source: &str) -> Vec<TagMatch> {
+    let program = crate::parser::parse(source);
+    let mut out = Probes::default();
+    walk(&program, source, &mut out);
+    out.tags
+}
+
 /// Collects every wildcard-free literal `match` of a source file, nested
 /// ones included, in source order.
 ///
@@ -68,12 +111,28 @@ pub enum Literal {
 /// ```
 pub fn literal_matches(source: &str) -> Vec<LiteralMatch> {
     let program = crate::parser::parse(source);
-    let mut out = Vec::new();
+    let mut out = Probes::default();
     walk(&program, source, &mut out);
-    out
+    out.literals
 }
 
-fn walk(program: &Program, src: &str, out: &mut Vec<LiteralMatch>) {
+/// Both kinds of typed exhaustiveness question, gathered in one walk.
+#[derive(Default)]
+struct Probes {
+    literals: Vec<LiteralMatch>,
+    tags: Vec<TagMatch>,
+}
+
+/// What one match's arms turned out to be.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// No arm carried a pattern worth a question.
+    None,
+    Literal,
+    Tag,
+}
+
+fn walk(program: &Program, src: &str, out: &mut Probes) {
     for segment in &program.segments {
         match segment {
             Segment::Verbatim(_)
@@ -135,7 +194,7 @@ fn walk(program: &Program, src: &str, out: &mut Vec<LiteralMatch>) {
     }
 }
 
-fn walk_if_let(stmt: &IfLetStmt, src: &str, out: &mut Vec<LiteralMatch>) {
+fn walk_if_let(stmt: &IfLetStmt, src: &str, out: &mut Probes) {
     walk(&stmt.expr, src, out);
     walk(&stmt.body, src, out);
     match &stmt.else_part {
@@ -146,7 +205,7 @@ fn walk_if_let(stmt: &IfLetStmt, src: &str, out: &mut Vec<LiteralMatch>) {
 }
 
 /// Records one match if it is a wildcard-free literal match.
-fn collect(expr: &MatchExpr, src: &str, out: &mut Vec<LiteralMatch>) {
+fn collect(expr: &MatchExpr, src: &str, out: &mut Probes) {
     if expr
         .arms
         .iter()
@@ -154,39 +213,67 @@ fn collect(expr: &MatchExpr, src: &str, out: &mut Vec<LiteralMatch>) {
     {
         return;
     }
-    let mut covered = Vec::new();
-    let mut literal = false;
-    for arm in &expr.arms {
-        let Pattern::Literals(alts) = &arm.pattern else {
-            continue;
-        };
-        literal = true;
-        if arm.guard.is_some() {
-            continue;
-        }
-        covered.extend(alts.iter().map(|alt| match &alt.value {
-            LiteralValue::Str(s) => Literal::String(s.clone()),
-            LiteralValue::Num(n) => Literal::Number(*n),
-            LiteralValue::BigInt(d) => Literal::BigInt(d.clone()),
-            LiteralValue::Bool(b) => Literal::Boolean(*b),
-        }));
-    }
-    if !literal {
+    let Some((scrutinee, scrutinee_end)) = trimmed_scrutinee(expr, src) else {
         return;
+    };
+
+    // Literal and tag patterns never mix in one match, so at most one of
+    // these fires.
+    let mut literals = Vec::new();
+    let mut tags = Vec::new();
+    let mut kind = Kind::None;
+    for arm in &expr.arms {
+        // A guarded arm may fall through, so it covers nothing — but it
+        // still tells us which kind of match this is.
+        match &arm.pattern {
+            Pattern::Literals(alts) => {
+                if arm.guard.is_none() {
+                    literals.extend(alts.iter().map(|alt| match &alt.value {
+                        LiteralValue::Str(s) => Literal::String(s.clone()),
+                        LiteralValue::Num(n) => Literal::Number(*n),
+                        LiteralValue::BigInt(d) => Literal::BigInt(d.clone()),
+                        LiteralValue::Bool(b) => Literal::Boolean(*b),
+                    }));
+                }
+                kind = Kind::Literal;
+            }
+            Pattern::Tags(alts) => {
+                if arm.guard.is_none() {
+                    tags.extend(alts.iter().map(|alt| alt.tag.clone()));
+                }
+                kind = Kind::Tag;
+            }
+            Pattern::Wildcard => {}
+        }
     }
+    match kind {
+        Kind::Literal => out.literals.push(LiteralMatch {
+            offset: expr.keyword_off,
+            scrutinee,
+            scrutinee_end,
+            covered: literals,
+        }),
+        Kind::Tag => out.tags.push(TagMatch {
+            offset: expr.keyword_off,
+            scrutinee,
+            scrutinee_end,
+            covered: tags,
+        }),
+        Kind::None => {}
+    }
+}
+
+/// The scrutinee span with surrounding whitespace trimmed, or `None` when it
+/// is empty.
+fn trimmed_scrutinee(expr: &MatchExpr, src: &str) -> Option<(usize, usize)> {
     let bytes = src.as_bytes();
-    let mut scrutinee = expr.scrutinee_span.start;
-    while scrutinee < expr.scrutinee_span.end && bytes[scrutinee].is_ascii_whitespace() {
-        scrutinee += 1;
+    let mut start = expr.scrutinee_span.start;
+    while start < expr.scrutinee_span.end && bytes[start].is_ascii_whitespace() {
+        start += 1;
     }
-    let mut scrutinee_end = expr.scrutinee_span.end;
-    while scrutinee_end > scrutinee && bytes[scrutinee_end - 1].is_ascii_whitespace() {
-        scrutinee_end -= 1;
+    let mut end = expr.scrutinee_span.end;
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
     }
-    out.push(LiteralMatch {
-        offset: expr.keyword_off,
-        scrutinee,
-        scrutinee_end,
-        covered,
-    });
+    (start < end).then_some((start, end))
 }

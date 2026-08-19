@@ -29,12 +29,21 @@ jobs:
         with:
           node-version: "22"
 
-      # Pinned to major 6: TypeScript 7 is the native compiler whose npm
-      # package has no JS compiler API, which `rlc --types` drives directly
-      # (types_host.mjs). The gate must exercise the supported majors — the
-      # TS 7 situation is covered by a clear rlc diagnostic + test skips.
+      # `tsc` for the integration tests, which type-check and run rlc's
+      # emitted TypeScript. Pinned to major 6 because major 7 *is* the
+      # native compiler and takes a different command line; what rlc drives
+      # for `--types` is installed separately below.
       - name: Install TypeScript
         run: npm install -g typescript@6
+
+      # What `--check-types`/`--types` drive: TypeScript 7's own compiler,
+      # through its API client. Without one the `tests/native.rs` suite
+      # skips silently, so the gate installs it and points rlc at it.
+      - name: Install TypeScript 7 for the type checking modes
+        run: |
+          mkdir -p "$HOME/ts7" && cd "$HOME/ts7"
+          npm install --no-save typescript@7
+          echo "RLC_TSGO_API=$HOME/ts7/node_modules/typescript/dist/api/sync/api.js" >> "$GITHUB_ENV"
 
       - name: Check formatting
         run: cargo fmt --check
@@ -49,6 +58,12 @@ jobs:
         run: |
           tsc --version
           node --version
+          # The native suite needs a TypeScript 7 API client to check
+          # against; declaration emit needs more than a release has, and is
+          # covered by the `native` job below.
+          test -f "$RLC_TSGO_API"
+          cargo test --test native 2>&1 | tee /tmp/native.log
+          grep -q "19 passed" /tmp/native.log
 
   extension:
     name: vscode extension
@@ -76,6 +91,15 @@ jobs:
         working-directory: editors/vscode
         run: npm ci
 
+      # Every TypeScript answer the server gives comes from the compiler's
+      # own language server, so the tests that ask for one skip without a
+      # `tsgo` on hand. It goes in the repository root rather than beside
+      # the extension: the extension's resolution walks `node_modules` up
+      # from the workspace, and `editors/vscode/node_modules/typescript` is
+      # the TypeScript 5 that *builds* the extension.
+      - name: Install TypeScript 7 for the language server
+        run: npm install --no-save --no-package-lock typescript@7
+
       - name: Build
         working-directory: editors/vscode
         run: npx tsc -b
@@ -84,18 +108,86 @@ jobs:
         working-directory: editors/vscode
         run: |
           export PATH="$GITHUB_WORKSPACE/target/debug:$PATH"
-          node --test "server/out/test/*.test.js"
+          node --test "server/out/test/*.test.js" 2>&1 | tee /tmp/extension.log
 
-      # TASK-059: the vsix must carry TypeScript's own lib*.d.ts. Without
-      # them the language server still starts and type-checks against no
-      # globals at all, reporting invented errors on correct code — a
-      # failure no unit test sees, because it lives in the packaging.
-      - name: Guard — packaged vsix carries TypeScript's libraries
+      # A skip here is not a pass: these tests skip silently when a tool is
+      # missing, which is exactly what this job installs. The one skip a
+      # released TypeScript 7 cannot avoid is declaration emit, which the
+      # package does not expose — the `native` job builds a compiler that
+      # does and runs the whole suite with nothing skipped.
+      - name: Guard — nothing skipped for a tool this job installed
+        run: |
+          ! grep -q "SKIP rlc not on PATH" /tmp/extension.log
+          ! grep -q "SKIP no tsgo executable" /tmp/extension.log
+
+  native:
+    name: type checking (typescript-go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Pinned: the API client and the `tsgo` executable speak a protocol
+      # with no version negotiation, so both have to come from one build —
+      # and a floating `main` would break this gate on someone else's
+      # commit. Bumping it is a task, not a side effect.
+      - name: Check out typescript-go
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/typescript-go
+          ref: c6b013f5706d58582f566df778cc0df2683b58f5
+          path: typescript-go
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: typescript-go/go.mod
+          cache-dependency-path: typescript-go/go.sum
+
+      - name: Build the compiler and its API client
+        working-directory: typescript-go
+        run: |
+          go build -o built/local/tsgo ./cmd/tsgo
+          npm ci
+          npx tsc -b _packages/native-preview
+
+      - name: Build rlc
+        run: cargo build
+
+      - name: Test — the type checking modes end to end
+        env:
+          RLC_TSGO_ROOT: ${{ github.workspace }}/typescript-go
+        run: |
+          cargo test --test native 2>&1 | tee /tmp/native.log
+          grep -q "19 passed" /tmp/native.log
+
+      - name: Build the extension
         working-directory: editors/vscode
         run: |
-          count=$(npx @vscode/vsce@3 ls --no-dependencies | grep -c "typescript/lib/lib" || true)
-          echo "lib*.d.ts in the package: $count"
-          test "$count" -ge 90
+          npm ci
+          npx tsc -b
+
+      - name: Test — the extension against a compiler that can emit
+        working-directory: editors/vscode
+        env:
+          RLC_TSGO_ROOT: ${{ github.workspace }}/typescript-go
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/debug:$PATH"
+          node --test "server/out/test/*.test.js" 2>&1 | tee /tmp/extension-native.log
+          # Every guard in the suite is satisfiable here — the compiler is
+          # on PATH, it can serve a language server, and it can emit
+          # declarations — so a skip means the wiring broke.
+          grep -q "^# skipped 0$" /tmp/extension-native.log
 
   msrv:
     name: build on MSRV

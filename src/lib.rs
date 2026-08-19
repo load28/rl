@@ -64,10 +64,10 @@ mod val;
 mod verify;
 
 pub use error::CompileError;
-pub use probe::{Literal, LiteralMatch, literal_matches};
+pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};
 pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
-pub use val::ValMethodCall;
+pub use val::{Mutation, ValBinding, ValMethodCall, ValPass, ValProbes};
 
 use error::RlError;
 
@@ -347,6 +347,33 @@ pub struct EmitMapping {
     pub len: usize,
 }
 
+/// Where a `match` put its scrutinee.
+///
+/// Every `match` evaluates its scrutinee once, into a temporary the emitted
+/// switch discriminates on. That temporary is the only place a type checker
+/// can be *asked* about the scrutinee's type: asking at the scrutinee's own
+/// text answers about the text — for `match (getShape())` that is the type
+/// of `getShape`, a function, not the `Shape` the match is over. So the
+/// emitter records where it wrote the name, and typed exhaustiveness
+/// ([`tag_matches`], [`literal_matches`]) asks there.
+///
+/// ```
+/// let source = "const v = match (f()) { Circle(r) => r };\n";
+/// let emit = rlc::emit_mapped(source);
+/// let temp = emit.scrutinee_temps[0];
+/// assert_eq!(&source[temp.src..temp.src + 5], "match");
+/// assert!(emit.code[temp.out..].starts_with("$rl_m = (f())"));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrutineeTemp {
+    /// Byte offset of the `match` keyword in the source — the same offset
+    /// [`probe::TagMatch::offset`] and [`probe::LiteralMatch::offset`] carry,
+    /// so a probe and its temporary are joined by it.
+    pub src: usize,
+    /// Byte offset of the temporary's name in the emitted output.
+    pub out: usize,
+}
+
 /// The result of [`emit_mapped`]: the emitted TypeScript and the
 /// source↔output mappings of every verbatim-copied chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +382,8 @@ pub struct MappedEmit {
     pub code: String,
     /// Source↔output mappings, ordered by output offset.
     pub mappings: Vec<EmitMapping>,
+    /// Where each `match` bound its scrutinee, ordered by output offset.
+    pub scrutinee_temps: Vec<ScrutineeTemp>,
 }
 
 /// Emits `source` for language tooling: structural parse + code emission
@@ -377,8 +406,13 @@ pub struct MappedEmit {
 /// ```
 pub fn emit_mapped(source: &str) -> MappedEmit {
     let program = parser::parse(source);
-    let (code, mappings) = codegen::emit_with_map(&program, source, ImportRewrite::Off, None);
-    MappedEmit { code, mappings }
+    let (code, mappings, scrutinee_temps) =
+        codegen::emit_with_map(&program, source, ImportRewrite::Off, None);
+    MappedEmit {
+        code,
+        mappings,
+        scrutinee_temps,
+    }
 }
 
 /// Every method call made through a `val` binding's access path, in source
@@ -410,6 +444,30 @@ pub fn emit_mapped(source: &str) -> MappedEmit {
 pub fn val_method_calls(source: &str) -> Vec<ValMethodCall> {
     let tokens = lexer::lex(source, 0, source.len());
     val::method_calls(source, &tokens)
+}
+
+/// Collects a file's `val` bindings and its mutations, **unpaired** — the
+/// delegated form of `val`'s analysis.
+///
+/// [`compile`] pairs the two itself, with a lexical scope model of its own.
+/// A caller that has a TypeScript checker does better: the binding a
+/// mutation belongs to is the one whose declaration shares its *symbol*, and
+/// symbol identity is not an approximation of scope — it is scope, as
+/// TypeScript resolved it. `rlc --check-types` pairs them that way; see
+/// `docs/reference/language.md` §10 for what `val` means either way.
+///
+/// ```
+/// let probes = rlc::val_probes("val const xs = [];\nxs.push(1);\nys.push(2);\n");
+/// assert_eq!(probes.bindings.len(), 1);
+/// assert_eq!(probes.bindings[0].name, "xs");
+/// // Both calls are collected: which one is rooted at the `val` binding is
+/// // not decided here.
+/// assert_eq!(probes.mutations.len(), 2);
+/// assert_eq!(probes.mutations[1].name, "ys");
+/// ```
+pub fn val_probes(source: &str) -> ValProbes {
+    let tokens = lexer::lex(source, 0, source.len());
+    val::probes(source, &tokens)
 }
 
 /// Converts a byte offset into `source` to a 1-based `(line, column)` —
@@ -448,6 +506,25 @@ pub struct Options<'a> {
     /// built-ins of the same name). The `rlc` CLI fills this from the
     /// file's direct relative `.rl` imports.
     pub extern_enums: &'a [ExternEnum],
+    /// Leave the two judgments a TypeScript checker makes better to a
+    /// TypeScript checker: match exhaustiveness, and which binding a
+    /// mutation path is rooted at (`val`).
+    ///
+    /// rlc answers both on its own, from its enum declarations and a lexical
+    /// scope model of its own, and those answers are what [`compile`]
+    /// reports by default. Both are approximations of TypeScript's:
+    /// exhaustiveness is the *declared* type's answer, so a case an earlier
+    /// guard already removed is still demanded and an enum from another
+    /// module has to be collected ([`Options::extern_enums`]); `val`'s
+    /// pairing is a scope model, so shadowing and redeclaration are rlc's
+    /// reading rather than TypeScript's. A caller with a checker asks it
+    /// instead — the narrowed type at each `match`, and symbol identity for
+    /// each binding — and reports what it says. `rlc --check-types` does
+    /// exactly that ([`tag_matches`], [`literal_matches`], [`val_probes`]).
+    ///
+    /// Every other rl-level check runs either way: duplicate cases,
+    /// misplaced wildcards, bad field types, `val`'s call-capability rule.
+    pub defer_to_checker: bool,
     /// What `"@rl/std"` ([`STD_SPECIFIER`]) is rewritten to on the way out
     /// — the path of the standard library module this output will sit
     /// next to (`"./rl.js"`, `"../rl.ts"`, ...). `None` leaves the bare
@@ -463,6 +540,7 @@ impl Default for Options<'_> {
             verify: true,
             rewrite_imports: ImportRewrite::default(),
             extern_enums: &[],
+            defer_to_checker: false,
             std_import: None,
         }
     }
@@ -541,9 +619,17 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
     // tsc; `val`'s binding analysis reads the token stream the parse
     // already produced) → code emission (infallible).
     let (program, tokens) = parser::lex_and_parse(source);
-    sema::check(&program, options.verify, options.extern_enums).map_err(to_compile_error)?;
-    val::check(source, &tokens).map_err(to_compile_error)?;
-    let (code, mappings) = codegen::emit_with_map(
+    sema::check(
+        &program,
+        options.verify,
+        options.extern_enums,
+        options.defer_to_checker,
+    )
+    .map_err(to_compile_error)?;
+    if !options.defer_to_checker {
+        val::check(source, &tokens).map_err(to_compile_error)?;
+    }
+    let (code, mappings, scrutinee_temps) = codegen::emit_with_map(
         &program,
         source,
         options.rewrite_imports,
@@ -560,5 +646,9 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
             col: 0,
         });
     }
-    Ok(MappedEmit { code, mappings })
+    Ok(MappedEmit {
+        code,
+        mappings,
+        scrutinee_temps,
+    })
 }

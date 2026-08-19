@@ -49,7 +49,7 @@ match (flag) { true => "yes", false => "no" }
 - Literals: string (`"a"`/`'a'`), number (`404`, `-1`, `0xff`, `1_000`, `1.5e2`, `10n`), `true`/`false`. No bindings. or-pattern alternatives must all be the SAME kind (`"a" | 1` = error). Guards allowed, same rules as tags.
 - Duplicates compared BY VALUE: `200` and `0xc8` are the same arm → duplicate-arm error. `1n` ≠ `1`.
 - NOT allowed inside tuple patterns (v1) — tuple elements are tag patterns or `_`.
-- Exhaustiveness: the DEFAULT compile path does NOT check it (rlc has no TS types) — `_`-less literal match just gets a runtime `throw` guard. `rlc --types` DOES check it via the TypeScript checker, but only when the scrutinee type is a finite literal union (`"a" | "b"`, `1 | 2`, `boolean`, `typeof arr[number]`); `string`/`number`/`unknown`/`any`/`T`/`"a" | string` are never diagnosed. Reported at the `.rl` `match` keyword.
+- Exhaustiveness: the DEFAULT compile path does NOT check it (rlc has no TS types) — `_`-less literal match just gets a runtime `throw` guard. `rlc --check-types`/`--types` DO check it via the TypeScript checker, but only when the scrutinee type is a finite literal union (`"a" | "b"`, `1 | 2`, `boolean`, `typeof arr[number]`); `string`/`number`/`unknown`/`any`/`T`/`"a" | string` are never diagnosed. Reported at the `.rl` `match` keyword.
 
 Tuple match (product exhaustiveness — missing COMBINATIONS are errors):
 ```rl
@@ -149,7 +149,7 @@ const f = (val u: U) => u.name;     // arrows, methods, catch (val e), for (val 
 ```
 - No modifier = plain TS = mutable. There is no `mut`.
 - ERRORS on a val-rooted path, at ANY depth (`s.a.b.name = v`): `x.a = v` (all compound forms), `x[i] = v`, `x.a++`/`++x.a`, `delete x.a`.
-- Method calls are NOT judged by name: `query.set("k")` on a user-defined `set` is fine. `rlc --types` (only) reports a call it resolves to a built-in mutator — Array push/pop/shift/unshift/splice/sort/reverse/fill/copyWithin, Map set/delete/clear, Set add/delete/clear, WeakMap set/delete, WeakSet add/delete, TypedArray set/sort/reverse/fill/copyWithin — so `val const items: number[] = []; items.push(1)` fails under `--types` and passes plain `rlc`. Unresolvable receiver (`any`, type param) = not reported.
+- Method calls are NOT judged by name: `query.set("k")` on a user-defined `set` is fine. `rlc --check-types`/`--types` (only) report a call they resolve to a built-in mutator — Array push/pop/shift/unshift/splice/sort/reverse/fill/copyWithin, Map set/delete/clear, Set add/delete/clear, WeakMap set/delete, WeakSet add/delete, TypedArray set/sort/reverse/fill/copyWithin — so `val const items: number[] = []; items.push(1)` fails under `--check-types` and passes plain `rlc`. Unresolvable receiver (`any`, type param) = not reported.
 - NOT an error: `x = v` (that is const/let's axis), reads, comparisons, spread `{...x}`.
 - Call check: a val binding may only be passed to a `val` parameter of a same-file named function (`function f`, `const f = (...) =>`, `const f = function`). Plain path args only.
 - val is per-BINDING, not per-object: `val const view = original;` still lets `original.x = 1`. Inner declarations shadow an outer val.
@@ -164,17 +164,17 @@ const f = (val u: U) => u.name;     // arrows, methods, catch (val e), for (val 
 
 ## Install
 
-- `npm i -D rl-lang typescript` → prebuilt `rlc` binary (linux-x64/arm64, darwin-x64/arm64, win32-x64), run via `npx rlc`. typescript 5 or 6 required for `--types` (TS7 has no JS compiler API — `npm i -D typescript@6` if only 7 resolves).
+- `npm i -D rl-lang typescript@7` → prebuilt `rlc` binary (linux-x64/arm64, darwin-x64/arm64, win32-x64), run via `npx rlc`. `--check-types`/`--types` drive TypeScript 7's own compiler; writing sidecars (`--types`) additionally needs declaration emit, which the released package does not expose yet — point `RLC_TSGO_ROOT` at a built typescript-go for that.
 - Other platforms / no npm: `cargo install --git https://github.com/load28/rl`; to keep using the npm launcher, set env `RLC_BINARY=/path/to/rlc`.
 - Update: `npm i -D rl-lang@latest` (binary follows package version); verify `npx rlc -v`; then re-run `npx rlc --types src` and rebuild.
-- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, rl + type diagnostics, completion incl. std combinators, signature help, go-to-def).
+- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, rl + type diagnostics, completion incl. std combinators, signature help, go-to-def). Everything TypeScript answers comes from the compiler's own language server (`tsgo --lsp`); the extension bundles no TypeScript, so install `typescript@7` in the project (or point `RLC_TSGO_ROOT` at a built typescript-go) or those features go quiet.
 
 ## Setup
 
 New project: `npm init -y && npm i -D rl-lang typescript`; sources in `src/**/*.rl` (hand-written `.ts` alongside is fine); gitignore `.rl-types/` and the out dir.
 ```jsonc
 // package.json
-"scripts": { "build": "rlc -o build src && tsc", "types": "rlc --types src", "check": "rlc --check src && tsc --noEmit" }
+"scripts": { "build": "rlc -o build src && tsc", "types": "rlc --types src", "check": "rlc --check-types src" }
 // tsconfig.json — resolve "./x.rl" and "@rl/std":
 "compilerOptions": { "rootDirs": ["./src", "./.rl-types"], "paths": { "@rl/std": ["./.rl-types/rl.d.ts"] } }
 ```
@@ -182,7 +182,7 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 
 ## Workflow
 
-- Edit loop: change `.rl` → `npx rlc --check src` (fast rl-level: syntax, exhaustiveness) → `npx tsc --noEmit` (types). Keep `npx rlc --types -w src` running so editor/tsc resolve `./x.rl` + `@rl/std`; if not watching, re-run `--types` after enum changes.
+- Edit loop: change `.rl` → `npx rlc --check src` (fast rl-level, no TypeScript) → `npx rlc --check-types src` (types, exhaustiveness by narrowed type, `val`). Keep `npx rlc --types -w src` running so editor/tsc resolve `./x.rl` + `@rl/std`; if not watching, re-run `--types` after enum changes.
 - Build: `npm run build` (rlc emits TS tree then tsc) or bundler build. CI: `rlc --check src && tsc --noEmit` + tests.
 - `rlc <dir>`: `.rl`→`.ts`, hand-written `.ts` passthrough; `-o <dir>` separate tree (in-place overwrite refused); `@rl/std` auto-materialized when imported. `rlc -w` watches and also recompiles importers of changed files (cross-file exhaustiveness). Files compile in parallel (one per core) with identical output/diagnostics either way; `-j <n>` sets the count, `-j 1` = sequential.
 - Emitted `.ts` starts with `// @generated` — NEVER edit output or `.rl-types/`; edit the `.rl` source.
@@ -191,12 +191,12 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 ## Errors
 
 - `rlc: file:line:col: msg` — e.g. `match on enum X is not exhaustive: missing "Y"` (add arms or `_`), `duplicate arm`, `or-pattern alternatives must bind the same fields`, `cannot mix tag patterns and literal patterns`, else-block-must-diverge, try-position-restriction (extract helper), `cannot mutate through val binding `x``, `cannot pass val binding `x` to mutable parameter `p` of `f``.
-- `rlc --types` also prints `match on literal union is not exhaustive: missing "..."` for `_`-less literal matches over finite literal unions, and ``cannot call mutating method `set` of built-in `Map` through val binding `m` `` for val paths it proves land on a built-in mutator.
-- Type errors come from tsc, reported at the **`.rl` source** position — `rlc --types` prints `rlc: src/x.rl:12:31: <tsc message>` (exit 1, sidecars still written), and the VSCode extension shows them inline (`source: ts`, `rl.typeDiagnostics` to disable). Applies inside `match` arms and `|>` pipelines too.
+- `rlc --check-types` also prints `match on literal union is not exhaustive: missing "..."` for `_`-less literal matches over finite literal unions, and ``cannot call mutating method `set` through val binding `m` `` for val paths it proves land on a built-in mutator. Its enum exhaustiveness message has no enum name (`match is not exhaustive`) — the answer comes from the narrowed type, not from a declaration table, which is also why it is the more accurate of the two.
+- Type errors come from TypeScript, reported at the **`.rl` source** position — `rlc --check-types` prints `rlc: src/x.rl:12:31: ts(2339): <message>` (exit 1; `--types` still writes its sidecars), and the VSCode extension shows them inline (`source: ts`, `rl.typeDiagnostics` to disable). Applies inside `match` arms and `|>` pipelines too.
 - A `|>` step's combinator inferring `unknown` (e.g. `Result.mapP((n) => n)` with `n: unknown`) means the pipeline **head** has no usable type — it is not a `Result`, or the head is an unannotated parameter. Fix the head, not the step.
 - tsc errors on output containing literal `match`/`try` → silent passthrough; recheck semicolons/parens/reserved words.
 - `generated TypeScript failed to parse` → pass-through source was invalid TS, or rlc bug.
 
 ## Checklist
 
-`val` only in front of `const|let|var` or a parameter, same line; match parens + `_` last + object arms `({...})`; bind by field name not position; literal patterns are values (never mixed with tags, none in tuple elements); `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check src` + `tsc --noEmit`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.
+`val` only in front of `const|let|var` or a parameter, same line; match parens + `_` last + object arms `({...})`; bind by field name not position; literal patterns are values (never mixed with tags, none in tuple elements); `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check-types src`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.

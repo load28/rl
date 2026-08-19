@@ -15,13 +15,17 @@
 
 use std::borrow::Cow;
 
-use crate::EmitMapping;
+use crate::{EmitMapping, ScrutineeTemp};
 
 enum Piece<'a> {
     /// Compiler-written glue (IIFE scaffolding, destructurings, labels).
     Lit(Cow<'a, str>),
     /// Text copied from the source, starting at source byte offset `src`.
     Src { text: &'a str, src: usize },
+    /// A zero-length note about the *next* byte the rope emits: the name
+    /// codegen is about to write stands for the construct at source offset
+    /// `src`. Carries no text, so it changes nothing about the output.
+    Mark { src: usize },
 }
 
 impl<'a> Piece<'a> {
@@ -29,6 +33,7 @@ impl<'a> Piece<'a> {
         match self {
             Piece::Lit(t) => t,
             Piece::Src { text, .. } => text,
+            Piece::Mark { .. } => "",
         }
     }
 
@@ -41,6 +46,7 @@ impl<'a> Piece<'a> {
                 *text = &text[cut..];
                 *src += cut;
             }
+            Piece::Mark { .. } => {}
         }
     }
 
@@ -50,6 +56,7 @@ impl<'a> Piece<'a> {
             Piece::Lit(Cow::Borrowed(t)) => *t = &t[..keep],
             Piece::Lit(Cow::Owned(t)) => t.truncate(keep),
             Piece::Src { text, .. } => *text = &text[..keep],
+            Piece::Mark { .. } => {}
         }
     }
 }
@@ -72,6 +79,12 @@ impl<'a> Rope<'a> {
             self.len += text.len();
             self.pieces.push(Piece::Lit(text));
         }
+    }
+
+    /// Notes that the next thing pushed is the name codegen writes for the
+    /// construct at source offset `src`. See [`crate::ScrutineeTemp`].
+    pub(crate) fn push_mark(&mut self, src: usize) {
+        self.pieces.push(Piece::Mark { src });
     }
 
     pub(crate) fn push_src(&mut self, text: &'a str, src: usize) {
@@ -118,14 +131,23 @@ impl<'a> Rope<'a> {
     /// flattened text (Unicode whitespace included). Trimming the front of
     /// a source piece advances its source offset by the removed bytes, so
     /// mappings stay exact.
+    ///
+    /// Marks carry no text, so they are stepped over rather than trimmed
+    /// away — a mark at the edge of a trimmed rope still points at the byte
+    /// that ends up there.
     pub(crate) fn trim(mut self) -> Rope<'a> {
         // front
-        while let Some(first) = self.pieces.first_mut() {
+        let mut front = 0;
+        while let Some(first) = self.pieces.get_mut(front) {
+            if matches!(first, Piece::Mark { .. }) {
+                front += 1;
+                continue;
+            }
             let text = first.text();
             let trimmed = text.trim_start();
             if trimmed.is_empty() {
                 self.len -= text.len();
-                self.pieces.remove(0);
+                self.pieces.remove(front);
                 continue;
             }
             let cut = text.len() - trimmed.len();
@@ -136,12 +158,19 @@ impl<'a> Rope<'a> {
             break;
         }
         // back
-        while let Some(last) = self.pieces.last_mut() {
+        let mut back = self.pieces.len();
+        while back > 0 {
+            let last = &mut self.pieces[back - 1];
+            if matches!(last, Piece::Mark { .. }) {
+                back -= 1;
+                continue;
+            }
             let text = last.text();
             let trimmed = text.trim_end();
             if trimmed.is_empty() {
                 self.len -= text.len();
-                self.pieces.pop();
+                self.pieces.remove(back - 1);
+                back -= 1;
                 continue;
             }
             self.len -= text.len() - trimmed.len();
@@ -152,14 +181,19 @@ impl<'a> Rope<'a> {
         self
     }
 
-    /// Flattens into the output string and the source↔output mappings.
-    /// Adjacent pieces that continue each other in both coordinate spaces
-    /// merge into one mapping.
-    pub(crate) fn flatten(self) -> (String, Vec<EmitMapping>) {
+    /// Flattens into the output string, the source↔output mappings, and the
+    /// marks codegen left. Adjacent pieces that continue each other in both
+    /// coordinate spaces merge into one mapping.
+    pub(crate) fn flatten(self) -> (String, Vec<EmitMapping>, Vec<ScrutineeTemp>) {
         let mut out = String::with_capacity(self.len);
         let mut mappings: Vec<EmitMapping> = Vec::new();
+        let mut marks: Vec<ScrutineeTemp> = Vec::new();
         for piece in &self.pieces {
             match piece {
+                Piece::Mark { src } => marks.push(ScrutineeTemp {
+                    src: *src,
+                    out: out.len(),
+                }),
                 Piece::Lit(text) => out.push_str(text),
                 Piece::Src { text, src } => {
                     let at = out.len();
@@ -179,6 +213,7 @@ impl<'a> Rope<'a> {
                 }
             }
         }
-        (out, mappings)
+        marks.sort_by_key(|mark| mark.out);
+        (out, mappings, marks)
     }
 }

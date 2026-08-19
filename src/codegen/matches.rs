@@ -81,7 +81,11 @@ pub(super) fn emit_match<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
     } else {
         body.push_lit("((");
     }
-    body.push_lit(format!("{f}\n  const $rl_m = ("));
+    body.push_lit(format!("{f}\n  const "));
+    // The temporary's name is where the scrutinee's *type* can be asked
+    // about — see [`rlc::ScrutineeTemp`].
+    body.push_mark(expr.keyword_off);
+    body.push_lit("$rl_m = (");
     body.append(scrutinee);
     body.push_lit(");\n");
     body.append(inner);

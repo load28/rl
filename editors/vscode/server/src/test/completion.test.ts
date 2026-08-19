@@ -13,28 +13,22 @@
  */
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { runEmitMap, stdModulePath } from "../rlc";
+import { ensureStdModule, runEmitMap } from "../rlc";
 import { buildProbe } from "../probe";
-import { TsProject } from "../tsproject";
 import { MappedDoc } from "../virtual";
+import { openProject } from "./tracked";
+import { COMPILER, compilerAvailable, findTsgo } from "./toolchain";
 
-const COMPILER = "rlc";
-
-function compilerAvailable(): boolean {
-  try {
-    execFileSync(COMPILER, ["-v"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const skip = compilerAvailable() ? false : "rlc not on PATH";
+const TSGO = findTsgo();
+const skip = !compilerAvailable()
+  ? "rlc not on PATH"
+  : TSGO === null
+    ? "no tsgo executable"
+    : false;
 
 /** A buffer served to the language service the way the server serves it:
  * the emitted TypeScript when the source compiles into one, otherwise the
@@ -51,11 +45,9 @@ async function project(source: string) {
   const text = mapped.code;
 
   let served = { text, version: "1" };
-  const ts = new TsProject(
-    (fileName) => (fileName === file ? served : null),
-    () => [file],
-    dir,
-    () => stdModulePath(COMPILER),
+  ensureStdModule(COMPILER, dir);
+  const ts = openProject(TSGO as string, dir, (fileName) =>
+    fileName === file ? served : null,
   );
   return {
     file,
@@ -86,7 +78,7 @@ test(
     const dot = STD_SOURCE.indexOf("Result.map(r") + "Result.".length;
     const offset = at(dot);
     assert.notEqual(offset, null);
-    const answer = ts.completionsAt(file, offset!);
+    const answer = await ts.completionsAt(file, offset!);
     assert.equal(answer.member, true, "expected a member completion");
     const names = answer.entries.map((e) => e.name);
     // The constructors the server contributes itself, and the combinators
@@ -110,10 +102,17 @@ test(
 test("a completion entry resolves to its type", { skip }, async () => {
   const { file, ts, at } = await project(STD_SOURCE);
   const dot = STD_SOURCE.indexOf("Result.map(r") + "Result.".length;
-  const detail = ts.completionDetail(file, at(dot)!, "andThen");
+  const detail = await ts.completionDetail(file, at(dot)!, "andThen");
   assert.ok(detail, "expected details for andThen");
+  // The server resolves the entry against the position it was asked at, so
+  // the signature comes back instantiated (`Result<number, string>`) rather
+  // than in the type parameters the declaration is written in.
   assert.ok(
-    detail!.signature.includes("Result<U, ErrorOf<R> | F>"),
+    detail!.signature.includes("andThen:"),
+    `signature was: ${detail!.signature}`,
+  );
+  assert.ok(
+    detail!.signature.includes("Result<number, string>"),
     `signature was: ${detail!.signature}`,
   );
   assert.ok(
@@ -126,7 +125,7 @@ test("signature help types a combinator's arguments", { skip }, async () => {
   const { file, ts, at } = await project(STD_SOURCE);
   // Inside `Result.map(r, ...)`, on the second argument.
   const inCall = STD_SOURCE.indexOf("(n) => n * 2");
-  const help = ts.signatureHelpAt(file, at(inCall)!);
+  const help = await ts.signatureHelpAt(file, at(inCall)!);
   assert.ok(help, "expected signature help");
   assert.equal(help!.activeParameter, 1);
   const sig = help!.signatures[help!.activeSignature];
@@ -149,18 +148,18 @@ test("signature help types a combinator's arguments", { skip }, async () => {
  * so a test can assert the plain one really was empty. */
 async function probed(source: string, offset: number) {
   const { file, ts, at, serve } = await project(source);
-  const plain = ts
-    .completionsAt(file, at(offset) ?? offset)
-    .entries.map((e) => e.name);
+  const plain = (await ts.completionsAt(file, at(offset) ?? offset)).entries.map(
+    (e) => e.name,
+  );
 
   const built = await buildProbe(source, offset, (probeSource) =>
     runEmitMap(COMPILER, probeSource, `${file}.probe`),
   );
   assert.ok(built, "probe did not compile");
   serve(built!.code, "probe-1");
-  const withProbe = ts
-    .completionsAt(file, built!.offset)
-    .entries.map((e) => e.name);
+  const withProbe = (await ts.completionsAt(file, built!.offset)).entries.map(
+    (e) => e.name,
+  );
   return { plain, withProbe };
 }
 

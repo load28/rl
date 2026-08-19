@@ -197,7 +197,7 @@ fn help_only_triggers_as_the_first_argument() {
 }
 
 /* ------------------------------------------------------------------ */
-/* --types: typed exhaustiveness for literal matches                   */
+/* --check-types: what only the real checker can answer                */
 /* ------------------------------------------------------------------ */
 
 fn have(cmd: &str) -> bool {
@@ -208,14 +208,31 @@ fn have(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Runs `rlc --types` over a one-file project and returns rlc's stderr.
+/// Whether rlc can resolve a TypeScript to drive. Asked by running the mode
+/// itself over a trivial project: the answer is rlc's own resolution, not a
+/// guess about the machine.
+fn have_typescript() -> bool {
+    let dir = tmpdir();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/probe.rl"), "export const n: number = 1;\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .args(["--check-types", "src"])
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run rlc");
+    out.status.success()
+}
+
+/// Runs `rlc --check-types` over a one-file project and returns rlc's
+/// stderr. Nothing is written, so a released TypeScript 7 — which cannot
+/// emit declarations — answers these just as well as a built one.
 fn types_stderr(source: &str) -> String {
     let dir = tmpdir();
     let src = dir.join("src");
     fs::create_dir_all(&src).unwrap();
     fs::write(src.join("main.rl"), source).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
-        .args(["--types", "src", "-o", ".rl-types"])
+        .args(["--check-types", "src"])
         .current_dir(&dir)
         .output()
         .expect("failed to run rlc");
@@ -224,8 +241,8 @@ fn types_stderr(source: &str) -> String {
 
 macro_rules! require_types_toolchain {
     () => {
-        if !have("node") || !have("tsc") {
-            eprintln!("skipping: node/tsc not available");
+        if !have("node") || !have_typescript() {
+            eprintln!("skipping: no node, or no TypeScript for rlc to drive");
             return;
         }
     };
@@ -345,9 +362,7 @@ fn types_reports_a_mutating_method_of_a_built_in() {
          map.set(\"a\", 1);\n",
     );
     assert!(
-        err.contains(
-            "cannot call mutating method `set` of built-in `Map` through val binding `map`"
-        ),
+        err.contains("cannot call mutating method `set` through val binding `map`"),
         "{err}"
     );
     // reported at the path's root in the .rl source
@@ -366,16 +381,16 @@ fn types_reports_set_add_and_array_push() {
          state.tags.push(\"rl\");\n",
     );
     assert!(
-        err.contains("`add` of built-in `Set` through val binding `set`"),
+        err.contains("mutating method `add` through val binding `set`"),
         "{err}"
     );
     assert!(
-        err.contains("`push` of built-in `Array` through val binding `items`"),
+        err.contains("mutating method `push` through val binding `items`"),
         "{err}"
     );
     // ... and at any depth of the access path
     assert!(
-        err.contains("`push` of built-in `Array` through val binding `state`"),
+        err.contains("mutating method `push` through val binding `state`"),
         "{err}"
     );
 }
