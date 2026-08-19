@@ -1060,23 +1060,65 @@ state = { ...state, count: state.count + 1 };  // OK — let이므로 교체는 
 | 대입 | `x.a = v`, `x.a += v`, `x.a **= v`, `x.a ??= v`, `x.a >>= v`, `x[i] = v` |
 | 증감 | `x.a++`, `x.a--`, `++x.a`, `--x.a`, `x[i]++` |
 | `delete` | `delete x.a`, `delete x[i]` |
-| 변경 메서드 호출 | `x.push(v)`, `x.a.b.tags.push(v)`, `m.set(k, v)`, `s.add(v)` |
 
 ```rl
-val const state = { user: { profile: { tags: [] as string[] } } };
-state.user.profile.tags.push("rl");  // 에러 — 경로의 루트가 val
+val const state = { user: { profile: { name: "Kim" } } };
+state.user.profile.name = "Lee";  // 에러 — 경로의 루트가 val
 ```
 
-변경 메서드는 **이름 기준**입니다 (rlc에는 타입 정보가 없습니다): `push` `pop`
-`shift` `unshift` `splice` `sort` `reverse` `fill` `copyWithin` `set` `delete`
-`clear` `add`. 같은 이름의 사용자 메서드도 변경으로 간주됩니다 — 그 경로로
-호출해야 하면 `val`을 빼거나 변경 가능한 바인딩을 거칩니다.
+**메서드 호출은 기본 경로에서 검사하지 않습니다.** `x.set(k, v)`가 값을 바꾸는지는
+`x`가 무엇인가에 달렸고, 그건 TypeScript 타입에 대한 사실입니다. rlc는 이름으로
+추측하지 않습니다 — `set`/`add`/`push`라는 이름의 사용자 정의 메서드는 아무것도
+바꾸지 않을 수 있기 때문입니다. built-in에 대한 변경 메서드 호출은 타입 정보가
+있는 `rlc --types`에서 검사합니다 ([§10.4](#104-built-in-변경-메서드---types)).
 
 바인딩 자체를 다른 값으로 바꾸는 `x = v`는 `val`의 검사 대상이 **아닙니다**
 (`const`면 tsc가, `let`이면 아무도 막지 않습니다 — [§10.2](#102-의미)의 표).
 읽기·비교·전개(`x.a === 1`, `{ ...x }`)도 당연히 허용됩니다.
 
-### 10.4 함수 경계
+### 10.4 built-in 변경 메서드 (`--types`)
+
+`rlc --types`는 컴파일된 가상 모듈로 TypeScript 프로그램을 만들므로, `val` 경로로
+호출된 메서드의 **심볼**을 조회할 수 있습니다. 그 심볼이 TypeScript 자신의
+lib에 선언돼 있고, 선언을 감싼 인터페이스가 아래 표의 built-in이며, 메서드가 그
+built-in의 변경 메서드일 때만 에러입니다.
+
+```
+rlc: src/main.rl:2:1: cannot call mutating method `set` of built-in `Map` through
+     val binding `map` (the binding is declared with `val`, so every access path
+     from it is read-only)
+```
+
+| built-in | 변경 메서드 |
+|----------|-------------|
+| `Array` | `push` `pop` `shift` `unshift` `splice` `sort` `reverse` `fill` `copyWithin` |
+| `Map` | `set` `delete` `clear` |
+| `Set` | `add` `delete` `clear` |
+| `WeakMap` | `set` `delete` |
+| `WeakSet` | `add` `delete` |
+| TypedArray (`Int8Array` … `BigUint64Array`) | `set` `sort` `reverse` `fill` `copyWithin` |
+
+판정 근거는 **수신자의 선언**이지 이름도 반환 타입도 아닙니다 (`Map#set`은 자기
+자신을 반환합니다). 그래서 다음은 통과합니다.
+
+```rl
+class Query {
+  set(key: string): Query { return new Query(); }
+}
+
+val const query = new Query();
+query.set("name");   // OK — Query#set은 built-in 변경 메서드가 아님
+
+val const map = new Map<string, number>();
+map.set("a", 1);     // 에러 — Map#set
+```
+
+리터럴 소진성([§3.9](#39-리터럴-유니언-소진성---types))과 같은 원칙으로
+보수적입니다: 수신자를 확정할 수 없으면(`any`, 타입 파라미터, 해석되지 않는
+import, 방출 매핑이 끊긴 자리) **검사하지 않습니다**. 유니언 수신자는 모든 후보가
+built-in 변경 메서드일 때만 에러입니다(`Map | Set`의 `delete`).
+
+### 10.5 함수 경계
 
 `val` 바인딩은 **`val`이 아닌 매개변수로 넘길 수 없습니다.** 함수가 그 인자를
 변경할 수 있기 때문입니다.
@@ -1104,7 +1146,7 @@ function process(val user: User) {
 검사하지 않습니다. 같은 이름이 서로 다른 시그니처로 두 번 선언되면 그 이름은
 검사에서 제외됩니다.
 
-### 10.5 스코프와 섀도잉
+### 10.6 스코프와 섀도잉
 
 `val` 여부는 **바인딩**의 성질이므로 렉시컬 스코프를 따릅니다. 안쪽 스코프의
 같은 이름 선언은 바깥 `val`을 가립니다.
@@ -1121,7 +1163,7 @@ x.a = 4;     // 에러 — 바깥 x는 여전히 val
 매개변수는 함수 본문 스코프에, `for` 머리의 선언은 반복문 스코프에, `catch`
 바인딩은 catch 블록에 속합니다.
 
-### 10.6 컴파일 결과
+### 10.7 컴파일 결과
 
 `val`은 **컴파일 시점 전용**입니다. 방출된 TypeScript에는 키워드도, 런타임
 헬퍼도, `readonly` 같은 타입 변환도 남지 않습니다 — 키워드와 그 뒤의 공백만
@@ -1137,13 +1179,15 @@ const user = getUser();
 function read(user: User) { return user.name; }
 ```
 
-### 10.7 검사 범위
+### 10.8 검사 범위
 
 rlc가 추적할 수 있는 것만 검사합니다. 아래는 **의도적으로** 검사하지 않습니다.
 
 | 항목 | 이유 |
 |------|------|
-| 임의의 외부 함수가 내부에서 하는 변경 | 이펙트 시스템·전역 이펙트 추론을 만들지 않습니다. 시그니처를 알 수 있는 같은 파일 함수만 [§10.4](#104-함수-경계)로 검사합니다 |
+| 임의의 외부 함수가 내부에서 하는 변경 | 이펙트 시스템·전역 이펙트 추론을 만들지 않습니다. 시그니처를 알 수 있는 같은 파일 함수만 [§10.5](#105-함수-경계)로 검사합니다 |
+| 기본 경로(`rlc`/`--check`)의 메서드 호출 | 수신자의 타입 없이는 변경 여부를 알 수 없습니다. 이름으로 추측하지 않고 `--types`에서만 판정합니다 ([§10.4](#104-built-in-변경-메서드---types)) |
+| built-in이 아닌 타입의 메서드 | 메서드 본문을 분석하지 않습니다. 사용자 정의 API가 내부에서 무엇을 바꾸는지는 검사 대상이 아닙니다 |
 | 메서드 호출로 넘기는 인자(`obj.m(x)`) | 메서드의 매개변수 선언을 이름으로 해석하지 않습니다 |
 | 별칭을 통한 우회 (`const alias = valBinding; alias.a = 1`) | 소유권·borrow checker를 만들지 않습니다. `val`은 바인딩 하나의 권한 제한입니다 |
 | 괄호·단언을 거친 경로 (`(x as any).a = 1`) | 경로의 루트가 식별자일 때만 판정합니다 |
@@ -1172,7 +1216,7 @@ rlc가 추적할 수 있는 것만 검사합니다. 아래는 **의도적으로*
 | `flow` | 첫 스텝이 입력 타입을 정합니다 — 제네릭 함수·커링 콤비네이터를 첫 스텝으로 쓰면 타입 인자를 명시해야 합니다. 첫 스텝은 메서드 스텝 불가. 입력 타입 주석 문법(`flow<T>`)은 없습니다 ([§7.5](#75-함수-합성-flow)) |
 | `result` 블록 | 바인딩이 하나 이상 필요하고 마지막은 세미콜론 없는 값 식이어야 합니다. 바인딩은 `Result` 전용(`Option`·`Promise` do-표기법 없음), `<-`는 블록 안 선언에서만. `<-` 뒤 식의 최상위 `>`는 제네릭 타입 인자와 구분되지 않아 괄호가 필요합니다. 블록 안의 `return`은 블록에서 빠져나가며 `try`·let-else는 쓸 수 없습니다 ([§8.4](#84-구조-규칙)) |
 | async 감지 | 토큰 단위 — 중첩 함수 안의 `await`도 async 방출을 유발하므로, 그런 match를 async가 아닌 곳에 두면 생성물이 문법 에러가 됩니다 |
-| `val` | 같은 줄 규칙(`val const`·`val <바인딩>`)과 접근 경로 루트가 식별자인 경우만. 외부 함수·메서드의 변경, 별칭 우회는 검사하지 않고 match 패턴 바인딩에는 쓸 수 없습니다 ([§10.7](#107-검사-범위)) |
+| `val` | 같은 줄 규칙(`val const`·`val <바인딩>`)과 접근 경로 루트가 식별자인 경우만. 메서드 호출은 기본 경로에서 판정하지 않습니다 — built-in 변경 메서드는 `--types`에서만 ([§10.4](#104-built-in-변경-메서드---types)). 외부 함수의 변경, 별칭 우회는 검사하지 않고 match 패턴 바인딩에는 쓸 수 없습니다 ([§10.8](#108-검사-범위)) |
 | `.tsx` | 미지원 (제네릭 화살표 함수 출력이 JSX와 충돌) |
 | 식별자 | rl 구문 안에서는 ASCII만 |
 | `--no-verify` | 필드 타입 오류가 컴파일 시점에 잡히지 않고 tsc 단계에서 드러납니다 |

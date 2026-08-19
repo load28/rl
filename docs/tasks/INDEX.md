@@ -78,7 +78,9 @@
 | TASK-068 | AGENTS.md와 리터럴 패턴 설계 문서 편입 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-068](./TASK-068-agents-guide-and-literal-pattern-design.md) |
 | TASK-069 | match 리터럴 패턴 — 문자열/숫자/불리언 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-069](./TASK-069-match-literal-patterns.md) |
 | TASK-070 | `val` — 변경 금지 바인딩 수식자 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-070](./TASK-070-val-binding-modifier.md) |
+| TASK-071 | `val` 변경 메서드 판정을 타입 기반으로 — 이름 기준 오탐 제거 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-071](./TASK-071-val-typed-mutation.md) |
+| TASK-072 | 에디터에 타입 기반 `val` 진단 노출 | 대기 | — | — | [TASK-072](./TASK-072-val-typed-diagnostics-in-editor.md) |
 
 ## 다음 태스크 번호
 
-**TASK-071**
+**TASK-073**

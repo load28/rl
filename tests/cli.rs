@@ -332,3 +332,113 @@ fn types_maps_a_bad_case_literal_back_to_the_rl_source() {
     assert!(err.contains("src/main.rl:1:61:"), "{err}");
     assert!(err.contains("is not comparable to type"), "{err}");
 }
+
+/* ------------------------------------------------------------------ */
+/* --types: typed mutation for `val` (TASK-071)                        */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn types_reports_a_mutating_method_of_a_built_in() {
+    require_types_toolchain!();
+    let err = types_stderr(
+        "val const map = new Map<string, number>();\n\
+         map.set(\"a\", 1);\n",
+    );
+    assert!(
+        err.contains(
+            "cannot call mutating method `set` of built-in `Map` through val binding `map`"
+        ),
+        "{err}"
+    );
+    // reported at the path's root in the .rl source
+    assert!(err.contains("src/main.rl:2:1:"), "{err}");
+}
+
+#[test]
+fn types_reports_set_add_and_array_push() {
+    require_types_toolchain!();
+    let err = types_stderr(
+        "val const set = new Set<number>();\n\
+         set.add(1);\n\
+         val const items: number[] = [];\n\
+         items.push(1);\n\
+         val const state = { tags: [] as string[] };\n\
+         state.tags.push(\"rl\");\n",
+    );
+    assert!(
+        err.contains("`add` of built-in `Set` through val binding `set`"),
+        "{err}"
+    );
+    assert!(
+        err.contains("`push` of built-in `Array` through val binding `items`"),
+        "{err}"
+    );
+    // ... and at any depth of the access path
+    assert!(
+        err.contains("`push` of built-in `Array` through val binding `state`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn types_leaves_a_user_defined_method_of_the_same_name_alone() {
+    require_types_toolchain!();
+    // The whole point: `set`/`add`/`push` on a user-defined type are not
+    // mutations, and rlc must not guess otherwise from the name.
+    let err = types_stderr(
+        "class Query {\n\
+         \x20 set(key: string): Query {\n\
+         \x20   return new Query();\n\
+         \x20 }\n\
+         }\n\
+         class Collection {\n\
+         \x20 add(value: number): Collection {\n\
+         \x20   return new Collection();\n\
+         \x20 }\n\
+         \x20 push(value: number): Collection {\n\
+         \x20   return new Collection();\n\
+         \x20 }\n\
+         }\n\
+         val const query = new Query();\n\
+         query.set(\"name\");\n\
+         val const collection = new Collection();\n\
+         collection.add(1);\n\
+         collection.push(2);\n",
+    );
+    assert!(!err.contains("mutating method"), "{err}");
+}
+
+#[test]
+fn types_does_not_guess_when_the_receiver_is_unknown() {
+    require_types_toolchain!();
+    // No resolvable receiver — `any`, a type parameter, an unresolved
+    // import — is left alone: a false positive costs more than a miss.
+    let err = types_stderr(
+        "declare function getSomething(): any;\n\
+         val const value = getSomething();\n\
+         value.set(\"x\");\n\
+         export function shift<T extends { push(v: number): void }>(val box: T) {\n\
+         \x20 box.push(1);\n\
+         }\n",
+    );
+    assert!(!err.contains("mutating method"), "{err}");
+}
+
+#[test]
+fn types_keeps_reporting_syntactic_mutation_without_the_checker() {
+    require_types_toolchain!();
+    // The syntactic half is rlc's own and fires before the host runs.
+    let err = types_stderr(
+        "val const user = {\n\
+         \x20 profile: {\n\
+         \x20   name: \"A\",\n\
+         \x20 },\n\
+         };\n\
+         user.profile.name = \"B\";\n",
+    );
+    assert!(
+        err.contains("cannot mutate through val binding `user`"),
+        "{err}"
+    );
+    assert!(err.contains("src/main.rl:6:1:"), "{err}");
+}

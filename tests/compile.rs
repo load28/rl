@@ -2412,9 +2412,9 @@ fn val_const_forbids_property_assignment() {
 fn val_const_forbids_mutation_at_any_depth() {
     let e = err("val const x = { nested: { a: 1 } };\nx.nested.a = 2;\n");
     assert_eq!((e.line, e.col), (2, 1));
-    let e =
-        err("val const s = { u: { p: { tags: [] as string[] } } };\ns.u.p.tags.push(\"rl\");\n");
-    assert!(e.message.contains("cannot call mutating method `push`"));
+    let e = err("val const s = { u: { p: { n: 0 } } };\ns.u.p.n += 1;\n");
+    assert_eq!((e.line, e.col), (2, 1));
+    assert!(e.message.contains("val binding `s`"));
 }
 
 #[test]
@@ -2577,20 +2577,63 @@ fn an_inner_declaration_shadows_an_outer_val() {
 }
 
 #[test]
-fn val_reaches_mutating_built_in_methods() {
-    let e = err("val const items: number[] = [];\nitems.push(1);\n");
-    assert!(
-        e.message
-            .contains("cannot call mutating method `push` through val binding `items`"),
-        "{}",
-        e.message,
-    );
-    let e = err("val const m = new Map<string, number>();\nm.set(\"a\", 1);\n");
-    assert!(e.message.contains("mutating method `set`"));
-    // reading methods are untouched
-    let src =
-        "val const items: number[] = [];\nconst n = items.map((v) => v).filter(Boolean).length;\n";
-    assert_eq!(ok(src), src.replacen("val ", "", 1));
+fn val_never_calls_a_method_a_mutation_from_its_name() {
+    // Whether `q.set(k)` mutates depends on what `q` is, and `compile` has
+    // no types: a user-defined `set`/`add`/`push` must not be rejected on
+    // its name alone (TASK-071). The typed path decides — see
+    // `val_method_calls_are_collected_for_the_typed_pass` below and the
+    // `--types` tests in tests/cli.rs.
+    for src in [
+        "class Query {\n  set(key: string): Query {\n    return new Query();\n  }\n}\nval const query = new Query();\nquery.set(\"name\");\n",
+        "class Collection {\n  add(v: number): Collection {\n    return new Collection();\n  }\n}\nval const collection = new Collection();\ncollection.add(1);\n",
+        // ... and neither are the built-in shapes, without types to prove it
+        "val const items: number[] = [];\nitems.push(1);\n",
+        "val const m = new Map<string, number>();\nm.set(\"a\", 1);\n",
+        "val const s = { u: { p: { tags: [] as string[] } } };\ns.u.p.tags.push(\"rl\");\n",
+        // reading methods were never in question
+        "val const items: number[] = [];\nconst n = items.map((v) => v).filter(Boolean).length;\n",
+    ] {
+        assert_eq!(ok(src), src.replacen("val ", "", 1), "{src}");
+    }
+}
+
+#[test]
+fn val_method_calls_are_collected_for_the_typed_pass() {
+    // The name list survives only as a *question* filter: the calls a type
+    // checker could judge are collected, and nothing is decided here.
+    const SRC: &str = "\
+class Query { set(k: string): Query { return new Query(); } }
+val const query = new Query();
+query.set(\"name\");
+val const m = new Map<string, number>();
+m.set(\"a\", 1);
+m.get(\"a\");
+";
+    let calls = rlc::val_method_calls(SRC);
+    let seen: Vec<(&str, &str)> = calls
+        .iter()
+        .map(|c| (c.binding.as_str(), c.method.as_str()))
+        .collect();
+    // `get` mutates no built-in, so it is not even a question
+    assert_eq!(seen, [("query", "set"), ("m", "set")]);
+    // the diagnostic position is the path's root; the query is the method
+    assert_eq!(rlc::line_col(SRC, calls[1].offset), (5, 1));
+    assert_eq!(&SRC[calls[1].name..calls[1].name_end], "set");
+}
+
+#[test]
+fn a_type_argument_list_does_not_declare_a_val_binding() {
+    // `<...>` is not a bracket the scanner matches, so the comma in
+    // `Map<string, number>` used to look like a declarator separator and
+    // made `number` a val binding — after which the `number[]` of a later
+    // annotation read as a mutation (TASK-071).
+    let src = "val const m = new Map<string, number>();\nval const items: number[] = [];\n";
+    assert_eq!(ok(src), src.replace("val ", ""));
+    // multi-declarator forms still bind every name
+    let e = err("val let a, b, c;\nb.x = 1;\n");
+    assert!(e.message.contains("val binding `b`"), "{}", e.message);
+    let e = err("val const p = 1, q = { n: 0 };\nq.n = 2;\n");
+    assert!(e.message.contains("val binding `q`"), "{}", e.message);
 }
 
 #[test]

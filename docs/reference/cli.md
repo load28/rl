@@ -202,6 +202,20 @@ rlc --types -w src/       # 감시하며 갱신
 
   위치는 원본 `.rl`의 `match` 키워드입니다. 규칙과 검사/비검사 타입 목록은
   [`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types).
+- **`val` 경로의 built-in 변경 메서드도 여기서 검사합니다.** 타입 체커에게 그
+  메서드의 선언을 물어, TypeScript 자신이 `Array`/`Map`/`Set`/`WeakMap`/
+  `WeakSet`/TypedArray에 선언한 변경 메서드일 때만 보고합니다. 같은 이름의
+  사용자 정의 메서드는 걸리지 않고, 수신자를 확정할 수 없으면 검사하지
+  않습니다. 기본 컴파일 경로는 메서드 호출을 판정하지 않습니다.
+
+  ```
+  rlc: src/main.rl:2:1: cannot call mutating method `set` of built-in `Map` through
+       val binding `map` (the binding is declared with `val`, so every access path
+       from it is read-only)
+  ```
+
+  규칙과 built-in 목록은
+  [`language.md` §10.4](./language.md#104-built-in-변경-메서드---types).
 
 소비 측 `tsconfig.json`은 두 가지만 선언하면 됩니다.
 
