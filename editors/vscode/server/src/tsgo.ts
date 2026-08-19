@@ -31,6 +31,7 @@ import type {
   TsDiagnostic,
   TsQuickInfo,
   TsReference,
+  TsSignatureHelp,
 } from "./tsproject";
 
 /** The document name a file takes in the server's world. An `.rl` file is
@@ -188,6 +189,93 @@ export class TsgoProject {
     };
   }
 
+  /**
+   * Rename: every place the name is written, or `null` when the rename
+   * cannot be done.
+   *
+   * The answer is a `WorkspaceEdit` in the coordinates of the *lowered*
+   * text. The caller maps each span back to the `.rl` source, and **an edit
+   * that does not map back must fail the whole rename**: it would land in
+   * code rlc generated, which the user cannot edit, and applying the rest
+   * would leave the program renamed by halves. That check belongs to the
+   * caller, which owns the mapping; what is guaranteed here is that every
+   * location is reported, so the caller can see the one it cannot map.
+   */
+  async renameAt(fileName: string, offset: number): Promise<TsReference[] | null> {
+    const text = await this.serve(fileName);
+    if (text === null) return null;
+    const position = positionAt(text, offset);
+    const uri = documentUri(fileName);
+
+    // `prepareRename` is the server's own "can this be renamed?" — a
+    // keyword or a literal answers null, and forcing it would rename
+    // nothing while looking like it worked.
+    const prepared = await this.client.ask("textDocument/prepareRename", {
+      textDocument: { uri },
+      position,
+    });
+    if (prepared === null) return null;
+
+    const edit = (await this.client.ask("textDocument/rename", {
+      textDocument: { uri },
+      position,
+      newName: "rlRenamePlaceholder",
+    })) as { changes?: Record<string, { range: LspRange }[]> } | null;
+    if (!edit?.changes) return null;
+
+    const out: TsReference[] = [];
+    for (const [editedUri, edits] of Object.entries(edit.changes)) {
+      const target = fileNameOf(editedUri);
+      const targetText = await this.textOf(target);
+      // A file whose text cannot be read cannot be renamed in safely.
+      if (targetText === null) return null;
+      for (const one of edits) {
+        out.push({
+          fileName: target,
+          fileText: targetText,
+          isDefinition: false,
+          ...spanOf(targetText, one.range),
+        });
+      }
+    }
+    return out.length > 0 ? out : null;
+  }
+
+  /** Signature help at a call site. */
+  async signatureHelpAt(fileName: string, offset: number): Promise<TsSignatureHelp | null> {
+    const text = await this.serve(fileName);
+    if (text === null) return null;
+    const help = (await this.client.ask("textDocument/signatureHelp", {
+      textDocument: { uri: documentUri(fileName) },
+      position: positionAt(text, offset),
+    })) as {
+      signatures?: {
+        label: string;
+        documentation?: string | { value?: string };
+        parameters?: { label: string | [number, number]; documentation?: string }[];
+      }[];
+      activeSignature?: number;
+      activeParameter?: number;
+    } | null;
+    if (!help?.signatures?.length) return null;
+    return {
+      signatures: help.signatures.map((signature) => ({
+        label: signature.label,
+        documentation: textOfDocs(signature.documentation),
+        parameters: (signature.parameters ?? []).map((parameter) => ({
+          // The LSP allows a label to be either the substring or the span
+          // inside the signature; rl's presentation needs the span.
+          label: Array.isArray(parameter.label)
+            ? parameter.label
+            : spanOfLabel(signature.label, parameter.label),
+          documentation: textOfDocs(parameter.documentation),
+        })),
+      })),
+      activeSignature: help.activeSignature ?? 0,
+      activeParameter: help.activeParameter ?? 0,
+    };
+  }
+
   /** Type errors, in the coordinates of the text the server was given. */
   async diagnosticsFor(fileName: string): Promise<TsDiagnostic[]> {
     const text = await this.serve(fileName);
@@ -239,6 +327,18 @@ function splitHover(contents: string): { signature: string; documentation: strin
   }
   const [first, ...rest] = contents.trim().split("\n\n");
   return { signature: first.trim(), documentation: rest.join("\n\n").trim() };
+}
+
+/** Documentation as plain text, whichever shape the server used. */
+function textOfDocs(documentation: string | { value?: string } | undefined): string {
+  if (!documentation) return "";
+  return (typeof documentation === "string" ? documentation : (documentation.value ?? "")).trim();
+}
+
+/** Where a parameter's label sits inside its signature. */
+function spanOfLabel(signature: string, label: string): [number, number] {
+  const start = signature.indexOf(label);
+  return start < 0 ? [0, 0] : [start, start + label.length];
 }
 
 /** Whether the position follows a `.`, which is what makes an answer a

@@ -61,6 +61,7 @@ function workspace(): { dir: string; rl: string; lowered: string } {
   const rl = path.join(dir, "src/render.rl");
   fs.writeFileSync(rl, "// the source; what the server sees is the lowering below\n");
   const lowered = [
+    "// nothing here is a rename target",
     'import { describe } from "./user";',
     "export function render(state: \"idle\" | \"loading\"): string {",
     "  const label = describe(state);",
@@ -165,6 +166,55 @@ test("references find the uses in the served text", { skip }, async () => {
         "label",
       );
     }
+  } finally {
+    ts.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rename names every place the name is written", { skip }, async () => {
+  const { dir, rl, lowered } = workspace();
+  const ts = project(dir, new Map([[rl, lowered]]));
+  try {
+    const locations = await ts.renameAt(rl, lowered.indexOf("label = describe"));
+    assert.ok(locations, "the binding can be renamed");
+    // Three uses of `label` in the lowered text; every span has to name the
+    // identifier, because the caller maps each one back to the .rl source
+    // and refuses the rename if any of them cannot be mapped.
+    assert.equal(locations.length, 3, JSON.stringify(locations));
+    for (const location of locations) {
+      assert.equal(
+        location.fileText.slice(location.start, location.start + location.length),
+        "label",
+      );
+    }
+  } finally {
+    ts.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("what cannot be renamed answers null rather than nothing", { skip }, async () => {
+  const { dir, rl, lowered } = workspace();
+  const ts = project(dir, new Map([[rl, lowered]]));
+  try {
+    // A comment is not a rename target; the server says so, and answering
+    // "no locations" instead would look like a rename that changed nothing.
+    assert.equal(await ts.renameAt(rl, lowered.indexOf("rename target")), null);
+  } finally {
+    ts.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("signature help describes the call being written", { skip }, async () => {
+  const { dir, rl, lowered } = workspace();
+  const ts = project(dir, new Map([[rl, lowered]]));
+  try {
+    const help = await ts.signatureHelpAt(rl, lowered.indexOf("describe(state)") + "describe(".length);
+    assert.ok(help, "the call site has help");
+    assert.match(help.signatures[0].label, /describe/);
+    assert.equal(help.signatures[0].parameters.length, 1);
   } finally {
     ts.dispose();
     fs.rmSync(dir, { recursive: true, force: true });
