@@ -159,19 +159,23 @@ pub(crate) fn modifier_end(src: &str, keyword_end: usize) -> usize {
     end
 }
 
-/// Method names that *may* name a built-in mutator — the filter deciding
-/// which calls are worth asking a type checker about.
+/// Whether `name` is a method rl treats as **mutating when it is a
+/// built-in's** — half of the typed verdict on a method call through a
+/// `val` path.
 ///
-/// It is a question filter, never a verdict: whether `q.set(k)` mutates
-/// depends on what `q` is, and rlc has no types. The verdict is made in
-/// `rlc --check-types`, where the checker resolves the method's symbol and
-/// only the one case it can prove is reported — a method TypeScript itself
-/// declares on `Array`/`Map`/`Set`/`WeakMap`/`WeakSet`/a TypedArray. A
-/// user-defined `set` never reaches that verdict.
+/// TypeScript has no effect system, so which of its own methods mutate is
+/// rl's policy, and this list is that policy (`Array#push`, `Map#set`, ...
+/// — `docs/reference/language.md` §10.4). The other half is the checker's:
+/// whether the method's symbol is declared entirely in TypeScript's own
+/// lib files. `rlc --check-types` reports a call only when **both** hold,
+/// so a user-defined `set` is never a mutation and a built-in `get` never
+/// becomes one.
 ///
-/// Keep this a **superset** of every name that host judges; a name missing
-/// here is a mutation the typed path can no longer see.
-fn is_builtin_mutator_name(name: &str) -> bool {
+/// The policy is applied at the verdict, not at collection: [`probes`]
+/// collects every method call through an access path, so a name missing
+/// here can only be a (documented) miss, never a wrong report. Only the
+/// legacy candidate collector ([`method_calls`]) still uses it as a filter.
+pub fn is_builtin_mutator_name(name: &str) -> bool {
     matches!(
         name,
         "push"
@@ -337,7 +341,7 @@ struct Frame<'a> {
 }
 
 /// One parameter of a collected function signature.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct ParamSig {
     /// `None` for a destructuring pattern, which has no single name.
     name: Option<String>,
@@ -394,10 +398,39 @@ pub struct Mutation {
     /// The root identifier's text, for the message.
     pub name: String,
     /// For a method call, the method and the byte offset of its name; the
-    /// call mutates only if that name resolves to a built-in's method.
+    /// call mutates only if the name resolves to a built-in's method **and**
+    /// is one rl's policy treats as mutating ([`is_builtin_mutator_name`]).
     /// `None` for an assignment, an increment or a `delete`, which mutate on
     /// syntax alone.
     pub method: Option<(String, usize)>,
+}
+
+/// One named function declaration of the file, as rl's syntax reads it:
+/// the declared name's identifier and the parameter list. The callee half
+/// of the delegated call-capability check — which call names which
+/// declaration is symbol identity, so a caller with a checker pairs a
+/// call's callee ([`ValPass::callee_at`]) with one of these by the symbol
+/// at [`ValFn::ident`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValFn {
+    /// The declared name, for the message.
+    pub name: String,
+    /// Byte offset of the declared name's identifier. The identifier is
+    /// copied verbatim into the output, so this maps through
+    /// [`crate::EmitMapping`]s to the node the checker is asked about.
+    pub ident: usize,
+    /// The declaration's parameters, in order.
+    pub params: Vec<ValParam>,
+}
+
+/// One parameter of a [`ValFn`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValParam {
+    /// `None` for a destructuring pattern, which has no single name.
+    pub name: Option<String>,
+    /// Whether the parameter is declared `val` — the capability that makes
+    /// handing it a `val` binding fine.
+    pub is_val: bool,
 }
 
 /// Every `val` binding of a file and every mutation in it, with the two
@@ -415,14 +448,19 @@ pub struct ValProbes {
     pub bindings: Vec<ValBinding>,
     /// Every mutation in the file, rooted at any identifier.
     pub mutations: Vec<Mutation>,
-    /// Every argument that reaches a parameter the callee did not declare
-    /// `val`, rooted at any identifier.
+    /// Every named function declaration of the file — the declarations a
+    /// pass's callee may resolve to.
+    pub functions: Vec<ValFn>,
+    /// Every plain-path argument of a call to a name the file declares,
+    /// rooted at any identifier.
     pub passes: Vec<ValPass>,
 }
 
-/// One argument handed to a parameter that is not declared `val` — a
+/// One plain-path argument of a call to a name the file declares — a
 /// violation exactly when the argument's root turns out to be a `val`
-/// binding, which is symbol identity and so the checker's answer.
+/// binding **and** the callee's symbol names a declaration whose parameter
+/// at [`ValPass::arg_index`] is not `val`. Both are symbol identity, and
+/// so the checker's answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValPass {
     /// Byte offset of the argument's root identifier: what the checker
@@ -430,10 +468,13 @@ pub struct ValPass {
     pub offset: usize,
     /// The root identifier's text, for the message.
     pub name: String,
-    /// The parameter as the message names it — `` `user` `` or `#2`.
-    pub param: String,
-    /// The called function's name.
+    /// The called name, for the message.
     pub callee: String,
+    /// Byte offset of the callee identifier at the call site — the node
+    /// whose symbol names the declaration actually called ([`ValFn`]).
+    pub callee_at: usize,
+    /// Which argument this is, zero-based — the parameter it lands on.
+    pub arg_index: usize,
 }
 
 /// Where a slice of `src` starts, in bytes. `part` must be a subslice of
@@ -489,8 +530,31 @@ fn run(src: &str, tokens: &[Token], sink: Sink) -> Result<(), RlError> {
     if !uses_val(src, tokens) {
         return Ok(());
     }
+    let mut declarations = Vec::new();
+    collect_declarations(src, tokens, &mut declarations);
     let mut signatures: HashMap<&str, Option<Vec<ParamSig>>> = HashMap::new();
-    collect_signatures(src, tokens, &mut signatures);
+    collect_signatures(&declarations, &mut signatures);
+    // The delegated form hands every declaration over as a node: which
+    // call names which declaration is then the symbol's answer, so a name
+    // that is ambiguous here need not be ambiguous there.
+    if let Sink::Probes(sink) = sink {
+        sink.borrow_mut()
+            .functions
+            .extend(declarations.iter().map(|declaration| {
+                ValFn {
+                    name: declaration.name.to_string(),
+                    ident: declaration.ident,
+                    params: declaration
+                        .params
+                        .iter()
+                        .map(|param| ValParam {
+                            name: param.name.clone(),
+                            is_val: param.is_val,
+                        })
+                        .collect(),
+                }
+            }));
+    }
     let checker = Checker {
         src,
         signatures: &signatures,
@@ -532,13 +596,19 @@ fn uses_val(src: &str, tokens: &[Token]) -> bool {
 /// — which is what makes the call-site capability check possible. A name
 /// declared twice with different signatures maps to `None` and is not
 /// checked.
-fn collect_signatures<'a>(
-    src: &'a str,
-    tokens: &'a [Token],
-    out: &mut HashMap<&'a str, Option<Vec<ParamSig>>>,
-) {
+/// One collected declaration, before any pairing: the declared name, the
+/// byte offset of its identifier, and the parameter list.
+struct FnDecl<'a> {
+    name: &'a str,
+    ident: usize,
+    params: Vec<ParamSig>,
+}
+
+fn collect_declarations<'a>(src: &'a str, tokens: &'a [Token], out: &mut Vec<FnDecl<'a>>) {
     let ident_at = |idx: usize| match tokens.get(idx) {
-        Some(t) if matches!(t.kind, TokenKind::Ident) => Some(&src[t.span.start..t.span.end]),
+        Some(t) if matches!(t.kind, TokenKind::Ident) => {
+            Some((&src[t.span.start..t.span.end], t.span.start))
+        }
         _ => None,
     };
     for (i, tok) in tokens.iter().enumerate() {
@@ -546,7 +616,7 @@ fn collect_signatures<'a>(
             TokenKind::Template(parts) => {
                 for part in parts.iter() {
                     if let TplPart::Interp { tokens: inner, .. } = part {
-                        collect_signatures(src, inner, out);
+                        collect_declarations(src, inner, out);
                     }
                 }
             }
@@ -567,19 +637,37 @@ fn collect_signatures<'a>(
                     }
                     _ => None,
                 };
-                if let Some((name, params)) = found {
-                    match out.get(name) {
-                        Some(Some(prev)) if *prev == params => {}
-                        Some(_) => {
-                            out.insert(name, None); // ambiguous — stop checking it
-                        }
-                        None => {
-                            out.insert(name, Some(params));
-                        }
-                    }
+                if let Some(((name, ident), params)) = found {
+                    out.push(FnDecl {
+                        name,
+                        ident,
+                        params,
+                    });
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// The name-keyed view of the file's declarations — what the untyped path
+/// pairs a call with. A name declared twice with different signatures maps
+/// to `None` and is not checked; the delegated path does better, pairing
+/// each call with the declaration its callee *symbol* names
+/// ([`crate::val_probes`]).
+fn collect_signatures<'a>(
+    declarations: &[FnDecl<'a>],
+    out: &mut HashMap<&'a str, Option<Vec<ParamSig>>>,
+) {
+    for declaration in declarations {
+        match out.get(declaration.name) {
+            Some(Some(prev)) if *prev == declaration.params => {}
+            Some(_) => {
+                out.insert(declaration.name, None); // ambiguous — stop checking it
+            }
+            None => {
+                out.insert(declaration.name, Some(declaration.params.clone()));
+            }
         }
     }
 }
@@ -1051,10 +1139,23 @@ impl<'a> Checker<'a> {
         }
 
         self.check_mutation(tokens, i, frames, false)?;
-        if punct_at(tokens, i + 1, b'(')
-            && let Some(Some(params)) = self.signatures.get(word)
-        {
-            self.check_call(tokens, i + 1, word, params, frames)?;
+        if punct_at(tokens, i + 1, b'(') {
+            match self.sink {
+                // Which declaration a call names is the checker's question:
+                // every call to a name the file declares is collected, and
+                // the pairing is by symbol identity, so a name the untyped
+                // path has to call ambiguous is settled per call site. The
+                // name gate only skips calls no same-file declaration
+                // could possibly match.
+                Sink::Probes(_) if self.signatures.contains_key(word) => {
+                    self.probe_call(tokens, i, word);
+                }
+                _ => {
+                    if let Some(Some(params)) = self.signatures.get(word) {
+                        self.check_call(tokens, i + 1, word, params, frames)?;
+                    }
+                }
+            }
         }
         Ok(i + 1)
     }
@@ -1235,17 +1336,23 @@ impl<'a> Checker<'a> {
         // type. rlc never answers it from the name — it records the call
         // for `rlc --types`, where the real checker decides.
         if let (Some(method), Some(tok)) = (path.last_prop, path.last_prop_tok)
-            && is_builtin_mutator_name(method)
             && punct_at(tokens, path.end, b'(')
         {
             match self.sink {
-                Sink::Calls(sink) => sink.borrow_mut().push(ValMethodCall {
-                    offset,
-                    binding: name.to_string(),
-                    method: method.to_string(),
-                    name: tokens[tok].span.start,
-                    name_end: tokens[tok].span.end,
-                }),
+                // The candidate list is this legacy collector's own filter.
+                Sink::Calls(sink) if is_builtin_mutator_name(method) => {
+                    sink.borrow_mut().push(ValMethodCall {
+                        offset,
+                        binding: name.to_string(),
+                        method: method.to_string(),
+                        name: tokens[tok].span.start,
+                        name_end: tokens[tok].span.end,
+                    })
+                }
+                Sink::Calls(_) => {}
+                // Every call is collected; which ones count is the verdict's
+                // business ([`is_builtin_mutator_name`]), so a name outside
+                // the policy can never hide a question from the checker.
                 Sink::Probes(sink) => sink.borrow_mut().mutations.push(Mutation {
                     root: offset,
                     name: name.to_string(),
@@ -1269,17 +1376,15 @@ impl<'a> Checker<'a> {
         params: &[ParamSig],
         frames: &[Frame<'a>],
     ) -> Result<(), RlError> {
-        if matches!(self.sink, Sink::Calls(_)) {
-            return Ok(()); // the typed-method half asks nothing about calls
+        if !matches!(self.sink, Sink::Report) {
+            return Ok(()); // probes go through `probe_call`; Calls asks nothing
         }
         for (idx, (start, end)) in list_entries(tokens, open).into_iter().enumerate() {
             if !matches!(tokens[start].kind, TokenKind::Ident) || dotted_at(tokens, 0, start) {
                 continue;
             }
             let name = self.text(&tokens[start]);
-            // Probe mode leaves "is this a `val` binding?" to the checker;
-            // the report path answers it from this file's own scope model.
-            if matches!(self.sink, Sink::Report) && self.lookup(frames, name).is_none() {
+            if self.lookup(frames, name).is_none() {
                 continue;
             }
             // only `x` / `x.y.z` — a computed argument is not a path
@@ -1297,15 +1402,6 @@ impl<'a> Checker<'a> {
                 Some(n) => format!("`{n}`"),
                 None => format!("#{}", idx + 1),
             };
-            if let Sink::Probes(sink) = self.sink {
-                sink.borrow_mut().passes.push(ValPass {
-                    offset: tokens[start].span.start,
-                    name: name.to_string(),
-                    param: described,
-                    callee: callee.to_string(),
-                });
-                continue;
-            }
             return Err(RlError::at(
                 tokens[start].span.start,
                 format!(
@@ -1316,5 +1412,34 @@ impl<'a> Checker<'a> {
             ));
         }
         Ok(())
+    }
+
+    /// Collects the plain-path arguments of a call to a name the file
+    /// declares, with the callee identifier's position — the capability
+    /// question a checker settles by pairing that callee's symbol with a
+    /// declaration's ([`ValPass`]). Nothing is decided here: which
+    /// declaration is called, whether the argument is a `val` binding, and
+    /// which parameter it lands on are all the verdict's half.
+    fn probe_call(&self, tokens: &[Token], callee: usize, word: &str) {
+        let Sink::Probes(sink) = self.sink else {
+            return;
+        };
+        for (idx, (start, end)) in list_entries(tokens, callee + 1).into_iter().enumerate() {
+            if !matches!(tokens[start].kind, TokenKind::Ident) || dotted_at(tokens, 0, start) {
+                continue;
+            }
+            // only `x` / `x.y.z` — a computed argument is not a path
+            let path = parse_path(self.src, tokens, start);
+            if path.end != end || (path.steps > 0 && path.last_prop.is_none()) {
+                continue;
+            }
+            sink.borrow_mut().passes.push(ValPass {
+                offset: tokens[start].span.start,
+                name: self.text(&tokens[start]).to_string(),
+                callee: word.to_string(),
+                callee_at: tokens[callee].span.start,
+                arg_index: idx,
+            });
+        }
     }
 }

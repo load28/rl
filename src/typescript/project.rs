@@ -196,6 +196,17 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
             probes.val_bindings.push(query.symbols.len() - 1);
         }
         for mutation in val.mutations {
+            // A method call outside rl's mutator policy can never be
+            // reported — the verdict needs the checker's `builtin` *and*
+            // the policy name — so nothing is asked about it. The policy
+            // itself lives at the verdict ([`rlc::is_builtin_mutator_name`],
+            // applied in `check.rs`); skipping here is only the observation
+            // that a question whose answer is settled is not worth asking.
+            if let Some((name, _)) = &mutation.method
+                && !rlc::is_builtin_mutator_name(name)
+            {
+                continue;
+            }
             let Some(root) = anchor(&file.emit, mutation.root) else {
                 continue;
             };
@@ -229,13 +240,37 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
                 method_name: mutation.method.map(|(name, _)| name),
             });
         }
-        for pass in val.passes {
-            let Some(position) = anchor(&file.emit, pass.offset) else {
+        // The callee half: every declaration a call might name, as a node.
+        // Which call names which declaration is symbol identity, so the
+        // declaration identifiers are asked about alongside the calls.
+        for function in val.functions {
+            let Some(position) = anchor(&file.emit, function.ident) else {
                 continue;
             };
             query.symbols.push(SymbolQuery {
                 module: file.module_path.clone(),
                 position,
+            });
+            probes.functions.push(FnAnchor {
+                root: query.symbols.len() - 1,
+                params: function.params,
+            });
+        }
+        for pass in val.passes {
+            let Some(position) = anchor(&file.emit, pass.offset) else {
+                continue;
+            };
+            let Some(callee_position) = anchor(&file.emit, pass.callee_at) else {
+                continue;
+            };
+            query.symbols.push(SymbolQuery {
+                module: file.module_path.clone(),
+                position,
+            });
+            let root = query.symbols.len() - 1;
+            query.symbols.push(SymbolQuery {
+                module: file.module_path.clone(),
+                position: callee_position,
             });
             probes.passes.push(PassAnchor {
                 anchor: SourceAnchor {
@@ -243,9 +278,10 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
                     offset: pass.offset,
                 },
                 name: pass.name,
-                param: pass.param,
                 callee: pass.callee,
-                root: query.symbols.len() - 1,
+                root,
+                callee_symbol: query.symbols.len() - 1,
+                arg_index: pass.arg_index,
             });
         }
     }
@@ -277,20 +313,32 @@ pub(crate) struct MutationAnchor {
     pub method_name: Option<String>,
 }
 
-/// One argument handed to a parameter its callee did not declare `val`,
-/// with the symbol question that decides whether that is a violation.
+/// One function declaration's symbol question, with the parameter list rl
+/// read off it — the callee table's raw material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FnAnchor {
+    /// Index into [`Query::symbols`] for the declared name's identifier.
+    pub root: usize,
+    pub params: Vec<rlc::ValParam>,
+}
+
+/// One plain-path argument of a call to a name its file declares, with the
+/// two symbol questions that decide whether it is a violation: the
+/// argument's root (a `val` binding?) and the callee (which declaration?).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PassAnchor {
     /// Where the diagnostic is reported: the argument.
     pub anchor: SourceAnchor,
     /// The argument's root identifier, for the message.
     pub name: String,
-    /// The parameter as the message names it.
-    pub param: String,
     /// The called function's name.
     pub callee: String,
     /// Index into [`Query::symbols`] for the root identifier.
     pub root: usize,
+    /// Index into [`Query::symbols`] for the callee identifier.
+    pub callee_symbol: usize,
+    /// Which argument this is, zero-based.
+    pub arg_index: usize,
 }
 
 /// The `.rl`-side halves of a [`Query`], parallel to its own vectors.
@@ -301,6 +349,8 @@ pub(crate) struct Probes {
     /// Indices into [`Query::symbols`] for every `val` binding's identifier.
     pub val_bindings: Vec<usize>,
     pub mutations: Vec<MutationAnchor>,
+    /// The declarations a pass's callee may resolve to, project-wide.
+    pub functions: Vec<FnAnchor>,
     pub passes: Vec<PassAnchor>,
 }
 

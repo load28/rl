@@ -348,9 +348,14 @@ impl Pass<'_> {
             }
             if let Some(method) = mutation.method {
                 match symbols.get(&method) {
-                    Some(resolution) if resolution.builtin => {}
-                    // A user-defined method, or one the checker could not
-                    // resolve: rl says nothing.
+                    // Two halves make the verdict: the checker's — the
+                    // method is one of TypeScript's own — and rl's policy —
+                    // that method is one of the mutating ones. A built-in
+                    // `get` fails the second; a user-defined `set`, or a
+                    // method the checker could not resolve, fails the first.
+                    Some(resolution)
+                        if resolution.builtin && rlc::is_builtin_mutator_name(&resolution.name) => {
+                    }
                     _ => continue,
                 }
             }
@@ -388,9 +393,36 @@ impl Pass<'_> {
             }
         }
 
+        // The callee table: a declaration's symbol names its parameter
+        // list. One symbol carrying declarations with *different* lists
+        // (TypeScript overloads, `var` merging) makes that callee
+        // ambiguous, and an ambiguous callee is not judged — the same
+        // caution the name-keyed table of the untyped path takes, here at
+        // symbol granularity, so two functions merely sharing a name stay
+        // two callees.
+        let mut callees: std::collections::HashMap<i64, Option<&[rlc::ValParam]>> =
+            std::collections::HashMap::new();
+        for function in &probes.functions {
+            let Some(resolution) = symbols.get(&function.root) else {
+                continue;
+            };
+            match callees.get(&resolution.id) {
+                Some(Some(prev)) if *prev == function.params.as_slice() => {}
+                Some(_) => {
+                    callees.insert(resolution.id, None);
+                }
+                None => {
+                    callees.insert(resolution.id, Some(&function.params));
+                }
+            }
+        }
+
         // The function boundary: a `val` binding may only be handed to a
-        // parameter that is itself `val`. Which binding the argument names
-        // is the same symbol question the mutations above ask.
+        // parameter that is itself `val`. Which binding the argument names,
+        // and which declaration the call names, are the same symbol
+        // question the mutations above ask — an unresolved callee, or one
+        // no collected declaration matches (an import, a method), is never
+        // a verdict.
         for pass in &probes.passes {
             let Some(root) = symbols.get(&pass.root) else {
                 continue;
@@ -398,6 +430,22 @@ impl Pass<'_> {
             if !val_symbols.contains(&root.id) {
                 continue;
             }
+            let Some(callee) = symbols.get(&pass.callee_symbol) else {
+                continue;
+            };
+            let Some(Some(params)) = callees.get(&callee.id) else {
+                continue;
+            };
+            let Some(param) = params.get(pass.arg_index) else {
+                continue;
+            };
+            if param.is_val {
+                continue;
+            }
+            let described = match &param.name {
+                Some(name) => format!("`{name}`"),
+                None => format!("#{}", pass.arg_index + 1),
+            };
             let Some(file) = lowered
                 .iter()
                 .find(|f| f.source_path == pass.anchor.source_path)
@@ -414,7 +462,7 @@ impl Pass<'_> {
                 line,
                 col,
                 pass.name,
-                pass.param,
+                described,
                 pass.callee,
             );
         }
