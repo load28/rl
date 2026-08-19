@@ -56,6 +56,7 @@ GitHub Release 업로드까지 수행합니다.
 | `--sidecar <dir>` | 선언을 받아 사이드카만 씁니다 ([아래](#에디터-사이드카---sidecar-저수준)) |
 | `--symbols` | rl enum 선언과 `.rl` import를 JSON으로 ([아래](#심볼-출력---symbols)) |
 | `--emit-map` | 방출 TypeScript와 원본↔출력 바이트 매핑을 JSON으로 ([아래](#방출-매핑---emit-map)) |
+| `--server` | 엔진을 살려 두고 stdin/stdout의 JSON 라인으로 `check`/`emitMap`/`typedCheck` 요청에 답합니다 ([아래](#엔진-서버---server)) |
 
 옵션과 입력은 순서 무관하게 섞을 수 있습니다. `-`로 시작하는 알 수 없는 인자는
 에러이고, `--`(옵션 종료)와 짧은 옵션 병합(`-po`)은 지원하지 않습니다.
@@ -405,6 +406,39 @@ import 수집은 소진성 검사와 같은 1-홉입니다. 컴파일 모드와 
 
 컴파일 모드와 조합되지 않으며, 입력을 읽지 못하면 종료 코드 1입니다.
 
+## 엔진 서버 (`--server`)
+
+한 프로세스를 살려 두고 stdin의 JSON 라인 요청에 stdout의 JSON 라인으로
+답합니다. 에디터처럼 같은 질문을 계속 묻는 도구용입니다 — 답은 one-shot
+모드와 **동일**하고, 다른 것은 상태 재사용뿐입니다: 프로젝트당 엔진 세션
+하나(그 뒤의 TypeScript 컴파일러 포함)가 요청 사이에 유지되므로, 첫
+`typedCheck`가 프로젝트를 연 뒤에는 재검사가 밀리초로 답합니다.
+
+```
+→ { "id": 1, "method": "check",      "params": { "text", "filename"?, "verify"? } }
+← { "id": 1, "result": { "diagnostics": [{ "line", "col", "message" }] } }
+
+→ { "id": 2, "method": "emitMap",    "params": { "text" } }
+← { "id": 2, "result": { "code", "mappings": [{ "src", "out", "len" }] } }
+
+→ { "id": 3, "method": "typedCheck", "params": { "path", "text" } }
+← { "id": 3, "result": { "blocked", "diagnostics": [{ "path", "line", "col", "message" }] } }
+
+← { "id": N, "error": "문장" }        // 요청 실패 — 세션은 살아 있음
+```
+
+- `check`는 `--check`처럼 텍스트만으로 판정합니다(상대 import는 해석되지
+  않음 — one-shot이 임시 파일에서 도는 것과 같음). `emitMap`은
+  `--emit-map`의 항목 하나와 같습니다. `typedCheck`는
+  `--check-types --rl-only --overlay <path>`와 같고, `blocked`가
+  종료 코드 2에 해당합니다.
+- 진단의 문안·위치는 one-shot과 동일합니다. `typedCheck`의 `path`는
+  절대 경로로 돌아오고, 위치가 없는 진단은 `line`/`col`이 0입니다.
+- 요청 하나의 실패는 그 요청의 `error`로 답하고 세션은 유지됩니다.
+  stdin이 닫히면 종료 코드 0으로 끝납니다.
+- 다른 입력·모드와 조합되지 않습니다. VSCode 확장이 이 모드를 쓰며,
+  서버가 없는 구형 rlc에는 one-shot 명령으로 폴백합니다.
+
 ## 에디터 사이드카 (`--sidecar`, 저수준)
 
 `--types`의 마지막 단계만 따로 실행합니다. 선언 방출을 자체적으로 수행하는
@@ -428,7 +462,7 @@ rlc --sidecar types -o .rl-types src/notice.rl   # .rl-types/notice.rl.d.ts
   로그 없음.
 - 에러는 stderr에 `rlc: 파일:행:열: 메시지` ([`errors.md`](./errors.md)) —
   타입 검사 모드의 진단도 같습니다.
-- stdout은 `-p`·`--emit-std`·`--symbols`·`--emit-map`·`help`·`-h`·`-v` 전용이라 파이프로 안전합니다.
+- stdout은 `-p`·`--emit-std`·`--symbols`·`--emit-map`·`--server`·`help`·`-h`·`-v` 전용이라 파이프로 안전합니다.
 - 기본적으로 출력 첫 줄에 `// @generated from <파일> by rlc — do not edit
   directly.`가 붙습니다 (`--no-banner`로 생략).
 

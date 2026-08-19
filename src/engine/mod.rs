@@ -101,23 +101,7 @@ impl Engine {
             Ok(files) => files,
             Err(e) => return Err(e.to_string()),
         };
-        let tsconfig = options
-            .tsconfig
-            .clone()
-            .or_else(|| project::find_tsconfig(&collected))
-            .map(|path| path.canonicalize().unwrap_or(path));
-        let root = match &tsconfig {
-            Some(path) => path
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .to_path_buf(),
-            // No configuration: the sources' own directories are the project.
-            None => collected
-                .first()
-                .and_then(|f| f.parent())
-                .unwrap_or(std::path::Path::new("."))
-                .to_path_buf(),
-        };
+        let (tsconfig, root) = identity_of(&collected, options);
         // The graph is the project's, not the command line's: every `.rl`
         // file under the project root joins the first pass, because a named
         // input may import one that was not named.
@@ -147,4 +131,41 @@ impl Engine {
             backend,
         ))
     }
+
+    /// The identity `inputs` resolve to — the `(tsconfig, root)` pair a
+    /// project is opened as. Two input sets with the same identity describe
+    /// the same project, which is what a server keys its live sessions by.
+    pub fn project_identity(
+        inputs: &[String],
+        options: &ProjectOptions,
+    ) -> Result<(Option<PathBuf>, PathBuf), String> {
+        let collected = match project::collect_rl(inputs) {
+            Ok(files) if files.is_empty() => return Err("no .rl sources found".to_string()),
+            Ok(files) => files,
+            Err(e) => return Err(e.to_string()),
+        };
+        Ok(identity_of(&collected, options))
+    }
+}
+
+/// The `(tsconfig, root)` the collected inputs belong to.
+fn identity_of(collected: &[PathBuf], options: &ProjectOptions) -> (Option<PathBuf>, PathBuf) {
+    let tsconfig = options
+        .tsconfig
+        .clone()
+        .or_else(|| project::find_tsconfig(collected))
+        .map(|path| path.canonicalize().unwrap_or(path));
+    let root = match &tsconfig {
+        Some(path) => path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf(),
+        // No configuration: the sources' own directories are the project.
+        None => collected
+            .first()
+            .and_then(|f| f.parent())
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf(),
+    };
+    (tsconfig, root)
 }

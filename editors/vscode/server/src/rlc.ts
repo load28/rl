@@ -4,14 +4,181 @@
  * the compiler's own (`file:line:col: message` — docs/reference/errors.md).
  * ----------------------------------------------------------------------- */
 import {
+  ChildProcess,
   execFile,
   execFileSync,
   ExecFileSyncOptionsWithStringEncoding,
+  spawn,
 } from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+
+/* --------------------------------------------------------------------------
+ * The engine server (`rlc --server`, docs/reference/cli.md): one persistent
+ * process that answers check/emitMap/typedCheck requests as JSON lines. The
+ * answers are the same the one-shot commands produce — the server exists so
+ * a typed check reuses a running TypeScript session instead of opening the
+ * project from scratch every 1.2 s. Every caller falls back to the one-shot
+ * command when the server is unavailable (an older rlc, a crash), so
+ * behavior never depends on it.
+ * ----------------------------------------------------------------------- */
+
+interface EngineServer {
+  child: ChildProcess;
+  pending: Map<
+    number,
+    { resolve: (v: EngineAnswer) => void; timer: NodeJS.Timeout }
+  >;
+  nextId: number;
+  buffer: string;
+  alive: boolean;
+  /** Whether any request was ever answered — a server that dies before its
+   * first answer is an rlc without `--server`, and retrying is pointless. */
+  answered: boolean;
+}
+
+/** How a request ended: an engine result, an engine error (the session is
+ * fine, the request failed), or null — the server itself is unavailable. */
+type EngineAnswer =
+  | { result: unknown }
+  | { error: string }
+  | null;
+
+let engineServer: EngineServer | null = null;
+let engineServerCompiler: string | null = null;
+/** Consecutive server losses without a single answer; two disable it. */
+let engineServerStrikes = 0;
+
+function engineServerFor(compiler: string): EngineServer | null {
+  if (engineServerStrikes >= 2) return null;
+  if (
+    engineServer &&
+    engineServer.alive &&
+    engineServerCompiler === compiler
+  ) {
+    return engineServer;
+  }
+  shutdownEngineServer();
+  let child: ChildProcess;
+  try {
+    child = spawn(compiler, ["--server"], {
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+  } catch {
+    engineServerStrikes += 1;
+    return null;
+  }
+  const server: EngineServer = {
+    child,
+    pending: new Map(),
+    nextId: 1,
+    buffer: "",
+    alive: true,
+    answered: false,
+  };
+  const fail = () => {
+    if (!server.alive) return;
+    server.alive = false;
+    if (!server.answered) engineServerStrikes += 1;
+    for (const [, entry] of server.pending) {
+      clearTimeout(entry.timer);
+      entry.resolve(null);
+    }
+    server.pending.clear();
+  };
+  child.on("error", fail);
+  child.on("exit", fail);
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => {
+    server.buffer += chunk;
+    let newline: number;
+    while ((newline = server.buffer.indexOf("\n")) !== -1) {
+      const line = server.buffer.slice(0, newline);
+      server.buffer = server.buffer.slice(newline + 1);
+      let message: { id?: number; result?: unknown; error?: string };
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const entry =
+        typeof message.id === "number"
+          ? server.pending.get(message.id)
+          : undefined;
+      if (!entry) continue;
+      server.pending.delete(message.id as number);
+      clearTimeout(entry.timer);
+      server.answered = true;
+      engineServerStrikes = 0;
+      entry.resolve(
+        typeof message.error === "string"
+          ? { error: message.error }
+          : { result: message.result },
+      );
+    }
+  });
+  // The server must never keep the host process alive: it exits on its own
+  // when this process's end of stdin closes.
+  child.unref();
+  (child.stdin as unknown as { unref?: () => void })?.unref?.();
+  (child.stdout as unknown as { unref?: () => void })?.unref?.();
+  engineServer = server;
+  engineServerCompiler = compiler;
+  return server;
+}
+
+function engineRequest(
+  compiler: string,
+  method: string,
+  params: unknown,
+  timeoutMs: number,
+): Promise<EngineAnswer> {
+  const server = engineServerFor(compiler);
+  if (!server || !server.child.stdin?.writable) {
+    return Promise.resolve(null);
+  }
+  const id = server.nextId++;
+  return new Promise((resolve) => {
+    // The timeout stays ref'd on purpose: while a request is in flight it
+    // is the one handle keeping the event loop alive (the child and its
+    // pipes are unref'd so an *idle* server never holds the process open).
+    const timer = setTimeout(() => {
+      server.pending.delete(id);
+      resolve(null);
+    }, timeoutMs);
+    server.pending.set(id, { resolve, timer });
+    server.child.stdin?.write(
+      JSON.stringify({ id, method, params }) + "\n",
+      (err) => {
+        if (err) {
+          const entry = server.pending.get(id);
+          if (entry) {
+            server.pending.delete(id);
+            clearTimeout(entry.timer);
+            resolve(null);
+          }
+        }
+      },
+    );
+  });
+}
+
+/** Ends the engine server, if one is running. Tests call this so the
+ * process can exit; the language server just dies with its client. */
+export function shutdownEngineServer(): void {
+  if (engineServer) {
+    try {
+      engineServer.child.kill();
+    } catch {
+      // already gone
+    }
+    engineServer.alive = false;
+    engineServer = null;
+    engineServerCompiler = null;
+  }
+}
 
 /** A typed check opens a project and starts a compiler; it is slower than
  * `--check` by that much, and a project that will not open must not hold the
@@ -112,7 +279,36 @@ function exists(file: string): boolean {
 }
 
 /** Run `rlc --check` on the buffer contents and parse stderr diagnostics. */
-export function runCheck(
+export async function runCheck(
+  compiler: string,
+  text: string,
+  docName: string,
+  verify: boolean,
+): Promise<RlcResult> {
+  // The engine server answers with the same diagnostics and no process
+  // spawn; the one-shot below is the fallback and the reference.
+  const answer = await engineRequest(
+    compiler,
+    "check",
+    { text, filename: path.basename(docName), verify },
+    15000,
+  );
+  if (answer && "result" in answer) {
+    const result = answer.result as { diagnostics?: RlcDiagnostic[] };
+    return {
+      kind: "ok",
+      diagnostics: (result.diagnostics ?? []).map((d) => ({
+        line: d.line,
+        col: d.col,
+        message: d.message,
+      })),
+    };
+  }
+  return runCheckOnce(compiler, text, docName, verify);
+}
+
+/** The one-shot `rlc --check`, via a temp file. */
+function runCheckOnce(
   compiler: string,
   text: string,
   docName: string,
@@ -256,7 +452,23 @@ export interface EmitMapResult {
  * compiler is missing, predates `--emit-map`, or the output is
  * unparseable — callers degrade to serving the raw text.
  */
-export function runEmitMap(
+export async function runEmitMap(
+  compiler: string,
+  text: string,
+  docName: string,
+): Promise<EmitMapResult | null> {
+  const answer = await engineRequest(compiler, "emitMap", { text }, 15000);
+  if (answer && "result" in answer) {
+    const result = answer.result as EmitMapResult;
+    if (typeof result.code === "string") {
+      return { code: result.code, mappings: result.mappings ?? [] };
+    }
+  }
+  return runEmitMapOnce(compiler, text, docName);
+}
+
+/** The one-shot `rlc --emit-map`, via a temp file. */
+function runEmitMapOnce(
   compiler: string,
   text: string,
   docName: string,
@@ -327,7 +539,7 @@ export type ValCheckResult =
    * Distinct from "ran and found nothing": the caller keeps what it has. */
   | { kind: "unavailable"; detail: string };
 
-export function runTypedCheck(
+export async function runTypedCheck(
   compiler: string,
   text: string,
   fsPath: string,
@@ -335,8 +547,63 @@ export function runTypedCheck(
   // The overlay stands in for a file of the project, so there has to be one:
   // a buffer that was never saved has no place in the project graph yet.
   if (!exists(fsPath)) {
-    return Promise.resolve({ kind: "unavailable", detail: "not on disk yet" });
+    return { kind: "unavailable", detail: "not on disk yet" };
   }
+  // The engine server keeps the project — and the TypeScript compiler
+  // behind it — alive between checks, so this answers in milliseconds
+  // where the one-shot pays a project open every time. Same diagnostics
+  // either way; the outcome mapping below mirrors the one-shot's exactly.
+  const answer = await engineRequest(
+    compiler,
+    "typedCheck",
+    { path: fsPath, text },
+    TYPED_CHECK_TIMEOUT_MS,
+  );
+  if (answer && "error" in answer) {
+    // The session ran and the request failed (no toolchain, a backend
+    // crash) — what the one-shot reports as "could not run".
+    return { kind: "unavailable", detail: answer.error };
+  }
+  if (answer && "result" in answer) {
+    const result = answer.result as {
+      blocked?: boolean;
+      diagnostics?: { path: string; line: number; col: number; message: string }[];
+    };
+    const all = result.diagnostics ?? [];
+    let real = fsPath;
+    try {
+      real = fs.realpathSync(fsPath);
+    } catch {
+      // keep the raw path; the comparison below still has a chance
+    }
+    const mine = all.filter((d) => d.path === real || d.path === fsPath);
+    // The one-shot parses only this file's lines off stderr, so a failing
+    // run whose findings are all in *other* files reads as "could not
+    // run" there — and therefore here.
+    if (mine.length === 0 && (result.blocked || all.length > 0)) {
+      return {
+        kind: "unavailable",
+        detail: "the check reported only outside this file",
+      };
+    }
+    return {
+      kind: "ok",
+      diagnostics: mine.map((d) => ({
+        line: d.line,
+        col: d.col,
+        message: d.message,
+      })),
+    };
+  }
+  return runTypedCheckOnce(compiler, text, fsPath);
+}
+
+/** The one-shot `rlc --check-types --rl-only --overlay`. */
+function runTypedCheckOnce(
+  compiler: string,
+  text: string,
+  fsPath: string,
+): Promise<ValCheckResult> {
   // Run from the file's own directory so the compiler's paths print as the
   // bare file name (it shows paths relative to the working directory), and
   // a file of the same name elsewhere in the project stays distinguishable.

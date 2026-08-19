@@ -34,8 +34,23 @@ Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드�
 
 ```
 src/
-  main.rs        CLI 진입점 — 인자 파싱, 파일 수집, 컴파일 실행/출력
-  lib.rs         공개 API: compile(source, &Options) -> Result<String, CompileError>
+  main.rs        CLI 진입점 — 인자 파싱, 배치 빌드, typed 모드는 engine 소비
+  server.rs      rlc --server — 엔진 세션을 지속시키는 JSON-lines 서버 (에디터용)
+  lib.rs         공개 API: compile(...) + engine (Engine/Project/Snapshot)
+  engine/
+    mod.rs       Engine — 툴체인 발견과 프로젝트 열기 (라이브러리 진입점)
+    project.rs   Project — 문서(overlay)·projection 캐시·백엔드 세션 (가변, 장수명)
+    snapshot.rs  Snapshot — 한 순간의 프로젝트 (불변; semantic 요청의 단위)
+    projection.rs ProjectedDocument — 원문/방출 TS/매핑/probe, 내용 해시로 캐시;
+                 Query 조립 (rl↔TS 좌표 매핑의 유일한 소유자)
+    semantics.rs RL-owned 결과 타입 (Diagnostic/Checked/Declarations)과
+                 checker 답의 진단화 (문안·순서의 단일 원천)
+  typescript/
+    mod.rs       계층 설명 — backend가 seam, native가 도달 방법
+    backend.rs   TypeScriptBackend seam — Query/Answers, rl의 용어로만
+    native.rs    tsgo API server 도달 방법 (불안정성을 여기 가둔다)
+    mapper.rs    .rl 바이트 ↔ 방출 TS 바이트 ↔ UTF-16 좌표
+    host.mjs     tsgo API를 부르는 Node host (layered FS, 증분 snapshot, batch)
   error.rs       CompileError(공개) / RlError(내부, 바이트 오프셋) / line_col
   scanner.rs     바이트 단위 저수준 스캔 (문자열/템플릿/주석/정규식/괄호 매칭)
   lexer.rs       유의 토큰 스트림 생성 (정규식 휴리스틱, 템플릿 중첩 렉싱)
@@ -85,6 +100,15 @@ val::check(같은 토큰 스트림 위의 `val` 바인딩 분석) → codegen::e
 생략 가능).
 새 기능은 해당 단계에만 손댄다: 새 구문 = ast + parser(+codegen), 새 검사 =
 sema, 방출 형태 변경 = codegen.
+
+typed 경로(`--check-types`/`--types`/`--server`)는 **engine**이 소유한다:
+`Engine::open_project` → `Project`(문서·projection 캐시·컴파일러 세션, 가변)
+→ `Project::update`가 불변 `Snapshot`을 만들고 → `Project::check`가 그
+스냅샷에 대해 RL-owned 진단으로 답한다. 내용이 안 바뀐 파일의 projection은
+스냅샷 사이에 재사용된다(증분). CLI·에디터·`--server`는 모두 이 engine의
+소비자이고, TypeScript 도달 방법(tsgo API server)은 `typescript/native.rs`
+뒤에 격리되어 있다 — `backend.rs`의 Query/Answers seam 밖으로 tsgo 개념이
+새면 안 된다. 배치 빌드(untyped)는 tsgo의 배치 tsc처럼 엔진 밖이다.
 
 ## 명령어
 

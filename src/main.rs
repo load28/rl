@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+mod server;
+
 use rlc::engine::collect_sources;
 use rlc::{
     EnumSymbol, ExternEnum, ImportRewrite, ModuleScan, Options, RlImport, RlImportNames, compile,
@@ -81,7 +83,11 @@ Tooling options (bundler plugins, editors):
   --emit-map            print each input's emitted TypeScript plus source<->
                         output byte mappings as JSON; parse + emit only (no
                         rl-level checks, .rl specifiers untouched) — the
-                        editor's virtual-document feed (for language tooling)"
+                        editor's virtual-document feed (for language tooling)
+  --server              keep the engine alive and answer check/emitMap/
+                        typedCheck requests as JSON lines on stdin/stdout,
+                        reusing one project session per project — the same
+                        answers as the one-shot modes, without the startup"
     );
 }
 
@@ -928,6 +934,7 @@ fn main() -> ExitCode {
     let mut symbols = false;
     let mut emit_map = false;
     let mut sidecar_dir: Option<PathBuf> = None;
+    let mut server = false;
     let mut node: Option<PathBuf> = None;
     let mut rewrite_imports = ImportRewrite::default();
     let mut jobs_limit: Option<usize> = None;
@@ -952,6 +959,7 @@ fn main() -> ExitCode {
                 types = true;
             }
             "--rl-only" => rl_only = true,
+            "--server" => server = true,
             "--overlay" => match it.next() {
                 Some(path) => overlay_path = Some(PathBuf::from(path)),
                 None => {
@@ -1022,6 +1030,26 @@ fn main() -> ExitCode {
             }
             other => inputs.push(other.to_string()),
         }
+    }
+
+    // The engine behind a pipe — a session for tools that ask often. It
+    // reads requests from stdin, so it combines with nothing else.
+    if server {
+        if !inputs.is_empty()
+            || emit_std
+            || print
+            || watch
+            || check
+            || check_types
+            || symbols
+            || emit_map
+            || sidecar_dir.is_some()
+            || overlay_path.is_some()
+        {
+            eprintln!("rlc: --server takes no inputs and combines with no other mode");
+            return ExitCode::FAILURE;
+        }
+        return server::run(node);
     }
 
     // The standard library on stdout — how a bundler plugin serves the
