@@ -99,6 +99,7 @@ interface RlSettings {
   compilerPath: string;
   verify: boolean;
   typeDiagnostics: boolean;
+  typedChecks: boolean;
   sidecar: sidecar.SidecarMode;
   sidecarDir: string;
 }
@@ -107,6 +108,7 @@ const DEFAULT_SETTINGS: RlSettings = {
   compilerPath: "",
   verify: true,
   typeDiagnostics: true,
+  typedChecks: true,
   sidecar: "refresh",
   sidecarDir: "",
 };
@@ -121,6 +123,7 @@ async function getSettings(uri: string): Promise<RlSettings> {
     compilerPath: conf?.compilerPath ?? DEFAULT_SETTINGS.compilerPath,
     verify: conf?.verify ?? DEFAULT_SETTINGS.verify,
     typeDiagnostics: conf?.typeDiagnostics ?? DEFAULT_SETTINGS.typeDiagnostics,
+    typedChecks: conf?.typedChecks ?? DEFAULT_SETTINGS.typedChecks,
     sidecar: conf?.sidecar ?? DEFAULT_SETTINGS.sidecar,
     sidecarDir: conf?.sidecarDir ?? DEFAULT_SETTINGS.sidecarDir,
   };
@@ -738,6 +741,109 @@ function toImportedEnumInfos(symbols: rlc.SymbolsFile): analysis.EnumInfo[] {
 const pendingValidation = new Map<string, NodeJS.Timeout>();
 const VALIDATION_DELAY_MS = 300;
 
+/* ------------------------------------------------------------------------
+ * The typed rl layer.
+ *
+ * `rlc --check` answers from the text; what needs a *type* to decide — a
+ * mutation through a `val` binding, exhaustiveness over the type a scrutinee
+ * actually has — is `rlc --check-types`' answer, and getting it means opening
+ * the project and running the TypeScript compiler. That is far too slow to
+ * ride the keystroke debounce, so it runs on its own longer one and publishes
+ * again when it lands.
+ *
+ * Both layers are cached per document *version*. A typed answer computed for
+ * an older version is not shown: its positions describe text that is no
+ * longer there, and a `val` error pointing at the wrong token is worse than
+ * one that arrives a moment later.
+ * --------------------------------------------------------------------- */
+const pendingTypedCheck = new Map<string, NodeJS.Timeout>();
+const TYPED_CHECK_DELAY_MS = 1200;
+
+interface VersionedDiagnostics {
+  version: number;
+  diagnostics: Diagnostic[];
+}
+
+/** What `--check` and the TypeScript layer found, as last published. */
+const baseDiagnostics = new Map<string, VersionedDiagnostics>();
+/** What `--check-types --rl-only` found, for the version it ran on. */
+const typedDiagnostics = new Map<string, VersionedDiagnostics>();
+let warnedTypedCheckUnavailable = false;
+
+/**
+ * Adds the typed diagnostics that say something new.
+ *
+ * The two passes overlap: enum exhaustiveness is decided from the text by
+ * `--check` and from the type by `--check-types`, and both report it at the
+ * same place. One squiggle per position, and the pass that already ran wins
+ * — its message is the one the user has been reading.
+ */
+function mergeTyped(into: Diagnostic[], typed: Diagnostic[]): void {
+  const taken = new Set(
+    into.map((d) => `${d.range.start.line}:${d.range.start.character}`),
+  );
+  for (const d of typed) {
+    const key = `${d.range.start.line}:${d.range.start.character}`;
+    if (taken.has(key)) continue;
+    taken.add(key);
+    into.push(d);
+  }
+}
+
+/** Publishes the base layer plus the typed layer, when the latter was
+ * computed for this very version. */
+function publish(uri: string, version: number, base: Diagnostic[]): void {
+  const diagnostics = [...base];
+  const typed = typedDiagnostics.get(uri);
+  if (typed?.version === version) mergeTyped(diagnostics, typed.diagnostics);
+  void connection.sendDiagnostics({ uri, diagnostics });
+}
+
+function scheduleTypedCheck(doc: TextDocument, compiler: string): void {
+  const existing = pendingTypedCheck.get(doc.uri);
+  if (existing !== undefined) clearTimeout(existing);
+  pendingTypedCheck.set(
+    doc.uri,
+    setTimeout(() => {
+      pendingTypedCheck.delete(doc.uri);
+      void typedCheck(doc, compiler);
+    }, TYPED_CHECK_DELAY_MS),
+  );
+}
+
+async function typedCheck(doc: TextDocument, compiler: string): Promise<void> {
+  const uri = URI.parse(doc.uri);
+  if (uri.scheme !== "file") return;
+  const result = await rlc.runTypedCheck(compiler, doc.getText(), uri.fsPath);
+
+  // The buffer may have moved on while the compiler ran.
+  const fresh = documents.get(doc.uri);
+  if (!fresh || fresh.version !== doc.version) return;
+
+  if (result.kind === "unavailable") {
+    // A project with no TypeScript toolchain is a normal state, not an
+    // error to put in front of the user: the text-level diagnostics keep
+    // working and only the typed layer is missing.
+    if (!warnedTypedCheckUnavailable) {
+      warnedTypedCheckUnavailable = true;
+      connection.console.info(
+        `rl: typed checks unavailable (${result.detail}). ` +
+          "`val` mutations and typed exhaustiveness are reported by " +
+          "`rlc --check-types`, which needs a TypeScript install — set " +
+          "rl.typedChecks to false to stop trying.",
+      );
+    }
+    return;
+  }
+
+  typedDiagnostics.set(doc.uri, {
+    version: doc.version,
+    diagnostics: result.diagnostics.map((d) => toDiagnostic(fresh, d)),
+  });
+  const base = baseDiagnostics.get(doc.uri);
+  if (base?.version === doc.version) publish(doc.uri, doc.version, base.diagnostics);
+}
+
 function scheduleValidation(doc: TextDocument): void {
   const existing = pendingValidation.get(doc.uri);
   if (existing !== undefined) clearTimeout(existing);
@@ -787,11 +893,13 @@ async function validate(doc: TextDocument): Promise<void> {
           "Set `rl.compilerPath` or install rlc (cargo install --path .).",
       );
     }
+    forget(doc.uri);
     void connection.sendDiagnostics({ uri: doc.uri, diagnostics: [] });
     return;
   }
   if (result.kind === "failed") {
     connection.console.error(`rl: ${result.detail}`);
+    forget(doc.uri);
     void connection.sendDiagnostics({ uri: doc.uri, diagnostics: [] });
     return;
   }
@@ -806,7 +914,22 @@ async function validate(doc: TextDocument): Promise<void> {
     diagnostics.push(...(await typeDiagnostics(fresh, docName)));
   }
 
-  void connection.sendDiagnostics({ uri: doc.uri, diagnostics });
+  baseDiagnostics.set(doc.uri, { version: doc.version, diagnostics });
+  publish(doc.uri, doc.version, diagnostics);
+
+  // The typed layer trails on its own debounce; it republishes when it lands.
+  if (settings.typedChecks) scheduleTypedCheck(doc, compiler);
+}
+
+/** Drops every cached diagnostic layer for a document. */
+function forget(uri: string): void {
+  baseDiagnostics.delete(uri);
+  typedDiagnostics.delete(uri);
+  const pending = pendingTypedCheck.get(uri);
+  if (pending !== undefined) {
+    clearTimeout(pending);
+    pendingTypedCheck.delete(uri);
+  }
 }
 
 /**
@@ -929,6 +1052,7 @@ documents.onDidChangeContent((e) => {
 documents.onDidClose((e) => {
   analysisCache.delete(e.document.uri);
   importedCache.delete(e.document.uri);
+  forget(e.document.uri);
   const uri = URI.parse(e.document.uri);
   if (uri.scheme === "file") virtualDocs.delete(uri.fsPath);
   const pending = pendingValidation.get(e.document.uri);

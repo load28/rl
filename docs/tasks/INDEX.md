@@ -79,7 +79,7 @@
 | TASK-069 | match 리터럴 패턴 — 문자열/숫자/불리언 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-069](./TASK-069-match-literal-patterns.md) |
 | TASK-070 | `val` — 변경 금지 바인딩 수식자 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-070](./TASK-070-val-binding-modifier.md) |
 | TASK-071 | `val` 변경 메서드 판정을 타입 기반으로 — 이름 기준 오탐 제거 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-071](./TASK-071-val-typed-mutation.md) |
-| TASK-072 | 에디터에 타입 기반 `val` 진단 노출 | 대기 | — | — | [TASK-072](./TASK-072-val-typed-diagnostics-in-editor.md) |
+| TASK-072 | 에디터에 타입 기반 `val` 진단 노출 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-072](./TASK-072-val-typed-diagnostics-in-editor.md) |
 | TASK-073 | TypeScript 네이티브 백엔드 — 단일 프로젝트 그래프 | 진행 중 | 2026-08-19 | — | [TASK-073](./TASK-073-typescript-native-backend.md) |
 | TASK-074 | 에디터를 네이티브 백엔드로 — 사이드카 규약 통일 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-074](./TASK-074-editor-native-backend.md) |
 | TASK-075 | `types_host.mjs` 제거 — 타입 경로 단일화 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-075](./TASK-075-retire-types-host.md) |

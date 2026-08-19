@@ -709,6 +709,8 @@ fn main() -> ExitCode {
     let mut check = false;
     let mut check_types = false;
     let mut types = false;
+    let mut overlay_path: Option<PathBuf> = None;
+    let mut rl_only = false;
     let mut project: Option<PathBuf> = None;
     let mut banner = true;
     let mut verify = true;
@@ -738,6 +740,14 @@ fn main() -> ExitCode {
                 check_types = true;
                 types = true;
             }
+            "--rl-only" => rl_only = true,
+            "--overlay" => match it.next() {
+                Some(path) => overlay_path = Some(PathBuf::from(path)),
+                None => {
+                    eprintln!("rlc: --overlay requires the path the buffer belongs to");
+                    return ExitCode::FAILURE;
+                }
+            },
             "--project" => match it.next() {
                 Some(path) => project = Some(PathBuf::from(path)),
                 None => {
@@ -824,6 +834,18 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if !check_types && (overlay_path.is_some() || rl_only) {
+        eprintln!("rlc: --overlay and --rl-only require --check-types");
+        return ExitCode::FAILURE;
+    }
+
+    // A watch re-reads the files it is watching; text pinned on stdin would
+    // stay the same forever, so the pair has no coherent meaning.
+    if overlay_path.is_some() && watch {
+        eprintln!("rlc: --overlay does not combine with --watch");
+        return ExitCode::FAILURE;
+    }
+
     if check_types && (print || check || symbols || emit_map || sidecar_dir.is_some()) {
         eprintln!(
             "rlc: --types/--check-types does not combine with -p, --check, --symbols, \
@@ -837,17 +859,51 @@ fn main() -> ExitCode {
     let include_ts = !symbols && !emit_map && sidecar_dir.is_none();
 
     if check_types {
+        // Both only make sense for a caller that is showing diagnostics
+        // rather than producing files: unsaved text must not reach a written
+        // sidecar, and a mode that writes is not one that hides half of what
+        // it found.
+        if types && (overlay_path.is_some() || rl_only) {
+            eprintln!("rlc: --overlay and --rl-only work with --check-types, not --types");
+            return ExitCode::FAILURE;
+        }
+        let mut overlay = std::collections::HashMap::new();
+        if let Some(path) = &overlay_path {
+            // The buffer's text arrives on stdin, keyed by the path the file
+            // occupies in the project — canonical, because that is the form
+            // the project's own file list is in.
+            let text = match std::io::read_to_string(std::io::stdin()) {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("rlc: cannot read the overlay from stdin: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match path.canonicalize() {
+                Ok(path) => {
+                    overlay.insert(path, text);
+                }
+                Err(e) => {
+                    eprintln!("rlc: --overlay {}: {e}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
         // Sidecars keep the directory `--types` has always written them to,
         // so a project's tsconfig `paths` and `.gitignore` keep pointing at
         // the same place. A check that writes nothing needs no directory.
         let sidecar_out = types.then(|| out_dir.unwrap_or_else(|| PathBuf::from(TYPES_DIR)));
         return typescript::check::run(
             &inputs,
-            project.as_deref(),
-            node.as_deref(),
-            sidecar_out.as_deref(),
-            types,
-            watch,
+            &typescript::check::CheckOptions {
+                project: project.as_deref(),
+                node: node.as_deref(),
+                out_dir: sidecar_out.as_deref(),
+                emit: types,
+                watch,
+                overlay: &overlay,
+                rl_only,
+            },
         );
     }
 

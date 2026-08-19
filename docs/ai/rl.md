@@ -149,7 +149,7 @@ const f = (val u: U) => u.name;     // arrows, methods, catch (val e), for (val 
 ```
 - No modifier = plain TS = mutable. There is no `mut`.
 - ERRORS on a val-rooted path, at ANY depth (`s.a.b.name = v`): `x.a = v` (all compound forms), `x[i] = v`, `x.a++`/`++x.a`, `delete x.a`.
-- Method calls are NOT judged by name: `query.set("k")` on a user-defined `set` is fine. `rlc --check-types`/`--types` (only) report a call they resolve to a built-in mutator — Array push/pop/shift/unshift/splice/sort/reverse/fill/copyWithin, Map set/delete/clear, Set add/delete/clear, WeakMap set/delete, WeakSet add/delete, TypedArray set/sort/reverse/fill/copyWithin — so `val const items: number[] = []; items.push(1)` fails under `--check-types` and passes plain `rlc`. Unresolvable receiver (`any`, type param) = not reported.
+- Method calls are NOT judged by name: `query.set("k")` on a user-defined `set` is fine. `rlc --check-types`/`--types` (only) report a call they resolve to a built-in mutator — Array push/pop/shift/unshift/splice/sort/reverse/fill/copyWithin, Map set/delete/clear, Set add/delete/clear, WeakMap set/delete, WeakSet add/delete, TypedArray set/sort/reverse/fill/copyWithin — so `val const items: number[] = []; items.push(1)` fails under `--check-types` and passes plain `rlc`. Unresolvable receiver (`any`, type param) = not reported. The VSCode extension shows these while editing (it runs the same mode over the buffer), so you do not have to save and run the CLI to see them.
 - NOT an error: `x = v` (that is const/let's axis), reads, comparisons, spread `{...x}`.
 - Call check: a val binding may only be passed to a `val` parameter of a same-file named function (`function f`, `const f = (...) =>`, `const f = function`). Plain path args only.
 - val is per-BINDING, not per-object: `val const view = original;` still lets `original.x = 1`. Inner declarations shadow an outer val.
@@ -167,7 +167,7 @@ const f = (val u: U) => u.name;     // arrows, methods, catch (val e), for (val 
 - `npm i -D rl-lang typescript@7` → prebuilt `rlc` binary (linux-x64/arm64, darwin-x64/arm64, win32-x64), run via `npx rlc`. `--check-types`/`--types` drive TypeScript 7's own compiler; writing sidecars (`--types`) additionally needs declaration emit, which the released package does not expose yet — point `RLC_TSGO_ROOT` at a built typescript-go for that.
 - Other platforms / no npm: `cargo install --git https://github.com/load28/rl`; to keep using the npm launcher, set env `RLC_BINARY=/path/to/rlc`.
 - Update: `npm i -D rl-lang@latest` (binary follows package version); verify `npx rlc -v`; then re-run `npx rlc --types src` and rebuild.
-- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, rl + type diagnostics, completion incl. std combinators, signature help, go-to-def). Everything TypeScript answers comes from the compiler's own language server (`tsgo --lsp`); the extension bundles no TypeScript, so install `typescript@7` in the project (or point `RLC_TSGO_ROOT` at a built typescript-go) or those features go quiet.
+- Editor: VSCode extension in the rl repo `editors/vscode` (highlighting, rl + type diagnostics — including the typed-only ones: `val` built-in mutators and typed exhaustiveness — completion incl. std combinators, signature help, go-to-def). Everything TypeScript answers comes from the compiler's own language server (`tsgo --lsp`); the extension bundles no TypeScript, so install `typescript@7` in the project (or point `RLC_TSGO_ROOT` at a built typescript-go) or those features go quiet.
 
 ## Setup
 

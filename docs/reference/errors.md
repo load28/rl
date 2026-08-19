@@ -245,6 +245,12 @@ const bad = evaluate() |> Result.mapP((n) => n.length);
 | `--sidecar requires a directory of tsc-emitted .d.ts files` | `--sidecar` 뒤에 디렉터리가 없음 |
 | `--emit-std takes no inputs (the build materializes @rl/std itself)` | stdout 전용 단독 모드 — 빌드에서는 자동 방출이 대신합니다 |
 | `--types/--check-types does not combine with -p, --check, --symbols, --emit-map, or --sidecar` | 타입 검사 모드는 자체 파이프라인 (`-w`·`--project`·`-o`는 조합 가능) |
+| `--overlay requires the path the buffer belongs to` | `--overlay` 뒤에 경로가 없음 |
+| `--overlay and --rl-only require --check-types` | 편집 중인 버퍼를 묻는 옵션이므로 그 모드에서만 의미가 있습니다 |
+| `--overlay and --rl-only work with --check-types, not --types` | `--types`는 사이드카를 씁니다 — 저장되지 않은 텍스트가 거기 들어가면 안 됩니다 |
+| `--overlay does not combine with --watch` | 감시는 디스크를 다시 읽는데 stdin의 텍스트는 영원히 그대로입니다 |
+| `--overlay <경로>: <이유>` | 오버레이가 대신할 파일이 실재하지 않음 — 아직 저장된 적 없는 버퍼는 프로젝트 그래프에 자리가 없습니다 |
+| `cannot read the overlay from stdin: <이유>` | `--overlay`의 텍스트를 stdin에서 읽지 못함 |
 | `unknown option <옵션>` | 알 수 없는 `-` 시작 인자. `rlc -h` 참조 |
 | `` unknown help topic "<주제>" (run `rlc help` for the list) `` | `rlc help <주제>`의 주제가 목록에 없음. `rlc help`로 주제·별칭 확인 |
 | `` help takes at most one topic (run `rlc help` for the list) `` | `rlc help`에 주제를 둘 이상 넘김 |

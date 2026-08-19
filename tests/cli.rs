@@ -239,6 +239,43 @@ fn types_stderr(source: &str) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// [`types_stderr`], but the file's text arrives as an editor's unsaved
+/// buffer: `saved` is written to disk, `buffer` goes on stdin under
+/// `--overlay`, and the check is what an editor would run.
+fn types_stderr_overlay(saved: &str, buffer: &str, rl_only: bool) -> String {
+    use std::io::Write;
+    let dir = tmpdir();
+    let src = dir.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let file = src.join("main.rl");
+    fs::write(&file, saved).unwrap();
+
+    let mut args = vec!["--check-types".to_string()];
+    if rl_only {
+        args.push("--rl-only".to_string());
+    }
+    args.push("--overlay".to_string());
+    args.push(file.to_str().unwrap().to_string());
+    args.push("src".to_string());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .args(&args)
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run rlc");
+    child
+        .stdin
+        .take()
+        .expect("stdin piped")
+        .write_all(buffer.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("failed to run rlc");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
 macro_rules! require_types_toolchain {
     () => {
         if !have("node") || !have_typescript() {
@@ -456,4 +493,213 @@ fn types_keeps_reporting_syntactic_mutation_without_the_checker() {
         "{err}"
     );
     assert!(err.contains("src/main.rl:6:1:"), "{err}");
+}
+
+/* ------------------------------------------------------------------ */
+/* --overlay / --rl-only: the editor's entry into the typed check      */
+/* ------------------------------------------------------------------ */
+
+/// Both flags only make sense while `--check-types` is reporting. Every
+/// rejection names the mode that does accept them, so the message is a fix
+/// rather than a complaint.
+#[test]
+fn overlay_and_rl_only_require_check_types() {
+    let dir = tmpdir();
+    let file = dir.join("a.rl");
+    fs::write(&file, "export const n = 1;\n").unwrap();
+    let path = file.to_str().unwrap();
+
+    for args in [
+        vec!["--overlay", path, path],
+        vec!["--rl-only", path],
+        vec!["--check", "--rl-only", path],
+    ] {
+        let out = rlc(&args);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "{args:?} should fail:\n{err}");
+        assert!(
+            err.contains("--overlay and --rl-only require --check-types"),
+            "{args:?}:\n{err}"
+        );
+    }
+}
+
+/// `--types` writes sidecars. Unsaved text must not reach one, and a mode
+/// that writes is not one that hides half of what it found.
+#[test]
+fn overlay_and_rl_only_are_rejected_by_the_writing_mode() {
+    let dir = tmpdir();
+    let file = dir.join("a.rl");
+    fs::write(&file, "export const n = 1;\n").unwrap();
+    let path = file.to_str().unwrap();
+
+    for args in [
+        vec!["--types", "--overlay", path, path],
+        vec!["--types", "--rl-only", path],
+    ] {
+        let out = rlc(&args);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "{args:?} should fail:\n{err}");
+        assert!(
+            err.contains("--overlay and --rl-only work with --check-types, not --types"),
+            "{args:?}:\n{err}"
+        );
+    }
+}
+
+/// A watch re-reads what it watches; text pinned on stdin would stay the
+/// same forever, so the pair has no coherent meaning.
+#[test]
+fn overlay_does_not_combine_with_watch() {
+    let dir = tmpdir();
+    let file = dir.join("a.rl");
+    fs::write(&file, "export const n = 1;\n").unwrap();
+    let path = file.to_str().unwrap();
+
+    let out = rlc(&["--check-types", "--overlay", path, "--watch", path]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "{err}");
+    assert!(
+        err.contains("--overlay does not combine with --watch"),
+        "{err}"
+    );
+}
+
+/// The flag needs a value, and the path it names has to exist — it stands
+/// in for a file of the project, so there has to be one.
+#[test]
+fn overlay_reports_a_missing_value_and_a_missing_file() {
+    let out = rlc(&["--check-types", "--overlay"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "{err}");
+    assert!(
+        err.contains("--overlay requires the path the buffer belongs to"),
+        "{err}"
+    );
+
+    let dir = tmpdir();
+    let file = dir.join("a.rl");
+    fs::write(&file, "export const n = 1;\n").unwrap();
+    let gone = dir.join("gone.rl");
+    let out = rlc(&[
+        "--check-types",
+        "--overlay",
+        gone.to_str().unwrap(),
+        file.to_str().unwrap(),
+    ]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("--overlay"), "{err}");
+    assert!(err.contains("gone.rl"), "{err}");
+}
+
+/// The overlay is what gets checked: a mutation that exists only in the
+/// buffer is reported, and one that exists only on disk is not. This is the
+/// whole point — an editor asks about the text it is showing.
+#[test]
+fn overlay_checks_the_buffer_rather_than_the_saved_file() {
+    require_types_toolchain!();
+    let saved = "val const saved = new Map<string, number>();\n\
+                 saved.set(\"gone\", 1);\n\
+                 export const n = saved.size;\n";
+    let buffer = "val const edited = new Map<string, number>();\n\
+                  edited.delete(\"new\");\n\
+                  export const n = edited.size;\n";
+
+    let err = types_stderr_overlay(saved, buffer, true);
+    assert!(
+        err.contains("cannot call mutating method `delete` through val binding `edited`"),
+        "the buffer's mutation should be reported:\n{err}"
+    );
+    assert!(
+        !err.contains("saved"),
+        "the saved file's text should not be checked:\n{err}"
+    );
+    // The position is the buffer's, and the file is named as the user knows
+    // it — not as a temporary.
+    assert!(err.contains("src/main.rl:2:1:"), "{err}");
+}
+
+/// `--rl-only` drops TypeScript's layer and keeps rl's. The editor already
+/// has the type errors from its own language server; it would draw them
+/// twice otherwise.
+#[test]
+fn rl_only_keeps_the_rl_layer_and_drops_the_type_layer() {
+    require_types_toolchain!();
+    let source = "val const scores = new Map<string, number>();\n\
+                  scores.set(\"a\", 1);\n\
+                  const wrong: number = \"not a number\";\n\
+                  export const n = scores.size + wrong;\n";
+
+    let full = types_stderr_overlay(source, source, false);
+    assert!(full.contains("ts(2322)"), "{full}");
+    assert!(full.contains("cannot call mutating method `set`"), "{full}");
+
+    let rl_only = types_stderr_overlay(source, source, true);
+    assert!(
+        !rl_only.contains("ts("),
+        "no type error should survive --rl-only:\n{rl_only}"
+    );
+    assert!(
+        rl_only.contains("cannot call mutating method `set`"),
+        "{rl_only}"
+    );
+}
+
+/// A `val` mutation is judged by what the receiver *is*, and the overlay
+/// keeps the buffer in its own project — so a type that comes from another
+/// module of the project still resolves.
+#[test]
+fn overlay_keeps_the_buffer_in_its_project() {
+    require_types_toolchain!();
+    let dir = tmpdir();
+    let src = dir.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("store.ts"),
+        "export const scores = new Map<string, number>();\n\
+         export class Query { set(k: string): Query { return this; } }\n",
+    )
+    .unwrap();
+    let file = src.join("main.rl");
+    fs::write(&file, "export const nothing = 0;\n").unwrap();
+
+    let buffer = "import { scores, Query } from \"./store\";\n\
+                  val const shared = scores;\n\
+                  shared.set(\"a\", 1);\n\
+                  val const query = new Query();\n\
+                  query.set(\"b\");\n\
+                  export const n = shared.size;\n";
+
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .args([
+            "--check-types",
+            "--rl-only",
+            "--overlay",
+            file.to_str().unwrap(),
+            "src",
+        ])
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run rlc");
+    child
+        .stdin
+        .take()
+        .expect("stdin piped")
+        .write_all(buffer.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("failed to run rlc");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+
+    // `Map#set` through the imported binding is a built-in mutation …
+    assert!(
+        err.contains("cannot call mutating method `set` through val binding `shared`"),
+        "{err}"
+    );
+    // … and `Query#set`, which only shares the name, is not.
+    assert!(!err.contains("`query`"), "{err}");
 }

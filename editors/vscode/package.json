@@ -79,6 +79,12 @@
           "default": true,
           "markdownDescription": "Report TypeScript type errors in `.rl` files. The language server type-checks the TypeScript each buffer compiles to and maps the errors back onto the source, so a type error inside a `match` arm or a `|>` pipeline is reported where you wrote it. rl-level errors always come from `rlc` and are unaffected."
         },
+        "rl.typedChecks": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Report the rl errors that only a type can decide — a mutation through a `val` binding, exhaustiveness over the type a scrutinee actually has. The language server runs `rlc --check-types` over the buffer as part of its project, so the messages are the compiler's own. It opens the project and runs the TypeScript compiler, so it trails the other diagnostics by about a second; turn it off in a project with no TypeScript installed."
+        },
         "rl.sidecar": {
           "scope": "resource",
           "type": "string",

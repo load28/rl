@@ -13,6 +13,11 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
+/** A typed check opens a project and starts a compiler; it is slower than
+ * `--check` by that much, and a project that will not open must not hold the
+ * editor forever. */
+const TYPED_CHECK_TIMEOUT_MS = 30000;
+
 export interface RlcDiagnostic {
   /** 1-based; 0 means "no position" (output-verification errors). */
   line: number;
@@ -292,6 +297,83 @@ export function runEmitMap(
         }
       },
     );
+  });
+}
+
+/**
+ * The typed half of the rl diagnostics, for the buffer as it stands.
+ *
+ * `rlc --check` answers everything rl can decide from the text alone. What
+ * it cannot decide is what a TypeScript *type* says — whether `m.set(...)`
+ * calls a built-in mutator through a `val` binding, whether a scrutinee's
+ * type still allows a case (`language.md` §10.4). Those answers come from
+ * the real compiler, which `rlc --check-types` drives over the project.
+ *
+ * Two flags make that mode usable from an editor:
+ *
+ * - `--overlay <path>` puts the unsaved buffer in the project *at its own
+ *   path*, so its imports and the imports naming it resolve as they do on
+ *   disk while its text is the one being edited. The text goes on stdin.
+ * - `--rl-only` drops the TypeScript layer, which the language server
+ *   already answers over the virtual document — reporting it here too would
+ *   draw every type error twice.
+ *
+ * Every message is the compiler's own, verbatim: the editor decides nothing
+ * about `val`, it relays what rlc said (CLAUDE.md, error layers).
+ */
+export type ValCheckResult =
+  | { kind: "ok"; diagnostics: RlcDiagnostic[] }
+  /** The check could not run (no toolchain, crash, or nothing to check).
+   * Distinct from "ran and found nothing": the caller keeps what it has. */
+  | { kind: "unavailable"; detail: string };
+
+export function runTypedCheck(
+  compiler: string,
+  text: string,
+  fsPath: string,
+): Promise<ValCheckResult> {
+  // The overlay stands in for a file of the project, so there has to be one:
+  // a buffer that was never saved has no place in the project graph yet.
+  if (!exists(fsPath)) {
+    return Promise.resolve({ kind: "unavailable", detail: "not on disk yet" });
+  }
+  // Run from the file's own directory so the compiler's paths print as the
+  // bare file name (it shows paths relative to the working directory), and
+  // a file of the same name elsewhere in the project stays distinguishable.
+  const cwd = path.dirname(fsPath);
+  const shown = path.basename(fsPath);
+  const args = ["--check-types", "--rl-only", "--overlay", fsPath, fsPath];
+
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof execFile>;
+    try {
+      child = execFile(
+        compiler,
+        args,
+        { cwd, timeout: TYPED_CHECK_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+        (err, _stdout, stderr) => {
+          const diagnostics = parseStderr(String(stderr), shown);
+          // Exit code 2 is "could not run, nothing was checked" — an rl-level
+          // error left nothing to lower. Anything else with no parseable
+          // diagnostic is a missing toolchain or a crash. Both keep whatever
+          // the caller already had rather than clearing it.
+          const code = (err as { code?: number | string } | null)?.code;
+          if (diagnostics.length === 0 && err) {
+            resolve({
+              kind: "unavailable",
+              detail: `${compiler} (${String(code)}): ${String(stderr).trim() || err.message}`,
+            });
+            return;
+          }
+          resolve({ kind: "ok", diagnostics });
+        },
+      );
+    } catch (e) {
+      resolve({ kind: "unavailable", detail: String(e) });
+      return;
+    }
+    // The buffer is the overlay; the compiler reads it from stdin.
+    child.stdin?.end(text);
   });
 }
 

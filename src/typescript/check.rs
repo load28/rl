@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use super::backend::{Resolution, TypeScriptBackend};
+use super::backend::{Diagnostic, Resolution, TypeScriptBackend};
 use super::native::NativeBackend;
 use super::project;
 
@@ -23,16 +23,39 @@ use super::project;
 const RL_EXTENSIONS: &[&str] = &["rl"];
 const TS_EXTENSIONS: &[&str] = &["ts", "mts", "cts"];
 
+/// What one run was asked for, beside its inputs.
+pub(crate) struct CheckOptions<'a> {
+    /// `--project`: the `tsconfig.json` to check against, when named.
+    pub project: Option<&'a Path>,
+    /// `--node`: the interpreter to run the host with.
+    pub node: Option<&'a Path>,
+    /// Where the sidecars go, in the mode that writes them.
+    pub out_dir: Option<&'a Path>,
+    /// `--types`: emit declarations and write them. `--check-types` does not.
+    pub emit: bool,
+    pub watch: bool,
+    /// `--overlay`: unsaved text standing in for a file on disk, keyed by
+    /// canonical path — see [`project::lower`].
+    pub overlay: &'a std::collections::HashMap<PathBuf, String>,
+    /// `--rl-only`: report only the rl layer. The type layer is TypeScript's
+    /// answer about the user's own code, and a caller that already has it
+    /// from somewhere else (an editor with a live language server) would
+    /// show it twice.
+    pub rl_only: bool,
+}
+
 /// Runs the check. Returns failure when anything was reported, exactly like
 /// `--check`.
-pub(crate) fn run(
-    inputs: &[String],
-    project_arg: Option<&Path>,
-    node: Option<&Path>,
-    out_dir: Option<&Path>,
-    emit: bool,
-    watch: bool,
-) -> ExitCode {
+pub(crate) fn run(inputs: &[String], options: &CheckOptions<'_>) -> ExitCode {
+    let CheckOptions {
+        project: project_arg,
+        node,
+        out_dir,
+        emit,
+        watch,
+        overlay,
+        rl_only,
+    } = *options;
     let files = match collect(inputs) {
         Ok(files) if files.is_empty() => {
             eprintln!("rlc: no .rl sources found");
@@ -99,6 +122,8 @@ pub(crate) fn run(
         out_dir,
         emit,
         sources: &sources,
+        overlay,
+        rl_only,
     };
 
     if watch {
@@ -138,6 +163,10 @@ struct Pass<'a> {
     /// The project's hand-written TypeScript, listed only when there is no
     /// `tsconfig.json` to decide the program's files — see [`Query::sources`].
     sources: &'a [PathBuf],
+    /// Unsaved text standing in for a file on disk — see [`project::lower`].
+    overlay: &'a std::collections::HashMap<PathBuf, String>,
+    /// See [`CheckOptions::rl_only`].
+    rl_only: bool,
 }
 
 /// What one pass found.
@@ -155,7 +184,7 @@ impl Pass<'_> {
     /// Lowers `files`, asks the compiler about them and reports what comes
     /// back.
     fn once(&self, files: &[PathBuf]) -> Result<Report, String> {
-        let lowered = match project::lower(files) {
+        let lowered = match project::lower(files, self.overlay) {
             Ok(lowered) => lowered,
             Err((file, error)) => {
                 eprintln!(
@@ -194,7 +223,12 @@ impl Pass<'_> {
 
         // TypeScript's own diagnostics, at the position in the `.rl` file the
         // offending code was written at.
-        for diagnostic in &answers.diagnostics {
+        let type_diagnostics: &[Diagnostic] = if self.rl_only {
+            &[]
+        } else {
+            &answers.diagnostics
+        };
+        for diagnostic in type_diagnostics {
             reported += 1;
             let Some(file) = lowered.iter().find(|f| f.module_path == diagnostic.file) else {
                 // A hand-written file: TypeScript's own coordinates already name
