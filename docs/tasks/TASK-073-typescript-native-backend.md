@@ -88,6 +88,33 @@ Codex가 제시한 설계 초안의 전제 중 몇 가지가 사실과 달라, �
 `tsconfig.json`이 디렉터리를 include할 때 손대지 않은 채로 lowering 결과가
 프로그램에 들어온다 — `paths`도, shim 파일도, 합성 tsconfig도 필요 없다.
 
+### 결정 5: rl enum 소진성도 TypeScript에 위임한다
+
+- **상황**: 리터럴 match는 원래 위임하고 있었지만, enum 소진성은 rlc가 자체
+  선언 레지스트리(+ TASK-022의 크로스파일 수집)로 판정했다.
+- **검토한 대안**: (A) 유지 — tsgo 없이도 동작하고 기존 테스트가 그대로.
+  단 narrowing을 반영 못 한다. (B) 위임 — lowering 결과가 discriminated
+  union이므로 scrutinee 타입의 `kind` 유니언 구성원을 물으면 된다.
+- **선택과 근거**: (B). 실측 차이가 결정적이다 —
+  `if (s.kind !== "Point")` 안의 `match (s) { Circle(r) => r }`에 대해
+  `rlc --check`는 `missing "Square", "Point"`, `rlc --native-check`는
+  `missing "Square"`. 전자는 도달할 수 없는 케이스를 요구하는 오탐이다.
+  또 import한 enum은 선언 수집 없이 타입만으로 풀린다.
+  기존 경로는 그대로 두고 `Options::defer_to_checker`로 갈랐다.
+
+### 결정 6: `val`의 binding resolution도 심볼 동일성으로
+
+- **상황**: `val.rs`는 토큰 스트림 위의 자체 스코프 모델로 "이 경로가 어느
+  바인딩에 뿌리내렸는가"를 판정했다. 섀도잉·재선언·구조분해가 어긋나기 쉬운
+  지점이고, 어긋나도 눈에 안 띈다.
+- **검토한 대안**: (A) 구문으로 확정 가능한 것은 rlc가 계속 판정. (B) 무엇이
+  mutation인지는 rl이 정하고(구문), 어느 바인딩인지는 심볼 id로 판정.
+- **선택과 근거**: (B). API 실측에서 `Symbol.id`가 snapshot 전역으로 안정임을
+  확인했다(모듈을 넘어도 같은 바인딩이면 같은 id). `val_probes`가 바인딩과
+  mutation을 **짝짓지 않은 채** 내놓고, 백엔드가 심볼로 짝짓는다. 백엔드
+  질의는 `ValQuery` 대신 범용 `SymbolQuery`로 일반화했다 — 백엔드는
+  프리미티브만 답하고 해석은 rl이 한다.
+
 ## 작업 내역
 
 - 2026-08-19: 실측 (위 표). `typescript@7.0.2` 설치 후 가상 FS 프로젝트를 띄워
@@ -150,33 +177,6 @@ valMutations:
   소진성 / `val` 심볼 판정 / `any` 무판정 / 타입 에러 위치 매핑). tsgo 트리가
   빌드돼 있지 않으면 조용히 skip한다 — 가드는 컴파일러의 해석 규칙을
   그대로 미러링한다.
-
-### 결정 5: rl enum 소진성도 TypeScript에 위임한다
-
-- **상황**: 리터럴 match는 원래 위임하고 있었지만, enum 소진성은 rlc가 자체
-  선언 레지스트리(+ TASK-022의 크로스파일 수집)로 판정했다.
-- **검토한 대안**: (A) 유지 — tsgo 없이도 동작하고 기존 테스트가 그대로.
-  단 narrowing을 반영 못 한다. (B) 위임 — lowering 결과가 discriminated
-  union이므로 scrutinee 타입의 `kind` 유니언 구성원을 물으면 된다.
-- **선택과 근거**: (B). 실측 차이가 결정적이다 —
-  `if (s.kind !== "Point")` 안의 `match (s) { Circle(r) => r }`에 대해
-  `rlc --check`는 `missing "Square", "Point"`, `rlc --native-check`는
-  `missing "Square"`. 전자는 도달할 수 없는 케이스를 요구하는 오탐이다.
-  또 import한 enum은 선언 수집 없이 타입만으로 풀린다.
-  기존 경로는 그대로 두고 `Options::defer_to_checker`로 갈랐다.
-
-### 결정 6: `val`의 binding resolution도 심볼 동일성으로
-
-- **상황**: `val.rs`는 토큰 스트림 위의 자체 스코프 모델로 "이 경로가 어느
-  바인딩에 뿌리내렸는가"를 판정했다. 섀도잉·재선언·구조분해가 어긋나기 쉬운
-  지점이고, 어긋나도 눈에 안 띈다.
-- **검토한 대안**: (A) 구문으로 확정 가능한 것은 rlc가 계속 판정. (B) 무엇이
-  mutation인지는 rl이 정하고(구문), 어느 바인딩인지는 심볼 id로 판정.
-- **선택과 근거**: (B). API 실측에서 `Symbol.id`가 snapshot 전역으로 안정임을
-  확인했다(모듈을 넘어도 같은 바인딩이면 같은 id). `val_probes`가 바인딩과
-  mutation을 **짝짓지 않은 채** 내놓고, 백엔드가 심볼로 짝짓는다. 백엔드
-  질의는 `ValQuery` 대신 범용 `SymbolQuery`로 일반화했다 — 백엔드는
-  프리미티브만 답하고 해석은 rl이 한다.
 
 ## 이슈 및 해결
 
