@@ -253,8 +253,9 @@ fn host_died(child: &mut Child) -> String {
     }
     if status.and_then(|s| s.code()) == Some(5) {
         return "the resolved TypeScript can check but cannot emit declarations \
-                — that API is newer than the released package. Drop -o, or point \
-                rlc at a built typescript-go checkout with RLC_TSGO_ROOT"
+                — that API is newer than the released package. Use --check-types \
+                (which writes nothing), or point rlc at a built typescript-go \
+                checkout with RLC_TSGO_ROOT"
             .to_string();
     }
     let stderr = stderr.trim();

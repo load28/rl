@@ -1026,11 +1026,22 @@ const TOKEN_RL: &str =
 /// Runs the rlc binary itself — declaration collection across files lives
 /// in the CLI, not in `compile`. No tsc/node needed.
 fn run_rlc(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .expect("failed to run rlc");
+    run_rlc_env(dir, args, false)
+}
+
+/// [`run_rlc`], optionally with every TypeScript-toolchain variable cleared
+/// so rlc resolves nothing — the only way to test what it says when there
+/// is no compiler, on a machine that has one.
+fn run_rlc_env(dir: &std::path::Path, args: &[&str], no_typescript: bool) -> (bool, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rlc"));
+    command.current_dir(dir).args(args);
+    if no_typescript {
+        command
+            .env_remove("RLC_TSGO_API")
+            .env_remove("RLC_TSGO_BIN")
+            .env_remove("RLC_TSGO_ROOT");
+    }
+    let out = command.output().expect("failed to run rlc");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -1405,13 +1416,11 @@ fn cli_types_without_typescript_says_so() {
     let dir = tmpdir();
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(dir.join("src/level.rl"), LEVEL_RL).unwrap();
-    // No TypeScript on purpose. A machine with a resolvable one would
-    // (correctly) succeed, so skip there.
-    if usable_typescript_for_types() {
-        eprintln!("skipping: a TypeScript is resolvable here");
-        return;
-    }
-    let (ok, err) = run_rlc(&dir, &["--types", "src"]);
+    // No TypeScript on purpose: the environment variables that would name
+    // one are cleared, and a temporary directory has no `node_modules` and
+    // no sibling typescript-go above it. So this runs everywhere, rather
+    // than skipping on any machine that happens to have a compiler.
+    let (ok, err) = run_rlc_env(&dir, &["--types", "src"], true);
     assert!(!ok, "expected failure:\n{err}");
     assert!(err.contains("no TypeScript compiler found"), "{err}");
 }
