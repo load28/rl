@@ -20,6 +20,7 @@
 //!   and lowered `.rl` modules live in.
 
 pub(crate) mod backend;
+pub(crate) mod check;
 pub(crate) mod mapper;
 pub(crate) mod native;
 pub(crate) mod project;

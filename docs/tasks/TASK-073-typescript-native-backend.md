@@ -125,15 +125,50 @@ valMutations:
 - `val` 판정 근거는 이름이 아니라 **선언 위치**다. 내장은
   `bundled:///libs/...`로 식별된다.
 
+- 2026-08-19: Rust 쪽 백엔드 배선 — `src/typescript/`
+  (`backend.rs` 심 / `native.rs` 툴체인 해석·호스트 구동 / `mapper.rs` 좌표
+  변환 / `project.rs` 프로젝트 조립 / `check.rs` CLI 경로). `--native-check`
+  와 `--project`를 추가하고 `serde_json`을 의존성에 넣었다.
+- 2026-08-19: 실측 — 혼합 프로젝트에서 세 종류의 진단이 모두 `.rl` 위치로:
+
+  ```
+  src/state.rl:5:12: rl: match is not exhaustive: missing "done"
+  src/mutate.rl:5:3:  rl: `map` is a val binding: `set` mutates it
+  src/mutate.rl:11:9: ts(2322): Type 'number' is not assignable to type 'string'.
+  ```
+
+  세 번째 줄은 `const 한글: string = 1;`이다 — UTF-16↔바이트 변환이 맞아야
+  나오는 위치다.
+- 2026-08-19: `tests/native.rs` 5건 추가 (단일 프로젝트 그래프 / narrowed
+  소진성 / `val` 심볼 판정 / `any` 무판정 / 타입 에러 위치 매핑). tsgo 트리가
+  빌드돼 있지 않으면 조용히 skip한다 — 가드는 컴파일러의 해석 규칙을
+  그대로 미러링한다.
+
 ## 이슈 및 해결
 
-*작업 중 기록.*
+### 이슈 1: `DocumentIdentifier`가 `{ fileName }`이 아니다
+
+- **증상**: 스파이크 초기에 `snapshot.getDefaultProjectForFile({ fileName })`이
+  계속 `undefined`를 반환하고 `getProjects()`는 `/dev/null/inferred`만 보였다.
+- **원인**: `proto.d.ts`의 `DocumentIdentifier`는 `string | { uri }`다.
+  `{ fileName }` 객체는 어느 쪽도 아니어서 조용히 빗나갔다.
+- **해결**: 경로 문자열을 그대로 넘기고, 프로젝트는 `openProjects`로 연 뒤
+  `getProject(tsconfig)`로 집는다.
+
+### 이슈 2: `include`가 디렉터리를 훑으면 가상 모듈이 안 보인다
+
+- **증상**: `tsconfig.json`이 `"include": ["src"]`면 lowering 결과가 프로그램에
+  들어오지 않는다.
+- **원인**: 파일 목록이 디렉터리 열거로 만들어지는데, 가상 FS가 `readFile`만
+  덮어쓰면 열거 결과에는 `.rl`밖에 없다.
+- **해결**: `getAccessibleEntries`를 실제 디스크 위에 겹쳐, 각 `.rl` 자리에
+  `.ts`가 보이게 하고 `.rl`은 감춘다 (결정 4).
 
 ## 검증
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test`
+- [x] `cargo fmt --check`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test` (기존 전량 + `tests/native.rs` 5건)
 
 ## 결과
 

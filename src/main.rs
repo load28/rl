@@ -685,6 +685,8 @@ where
         .collect()
 }
 
+mod typescript;
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
@@ -701,6 +703,8 @@ fn main() -> ExitCode {
     let mut watch = false;
     let mut check = false;
     let mut types = false;
+    let mut native_check = false;
+    let mut project: Option<PathBuf> = None;
     let mut banner = true;
     let mut verify = true;
     let mut symbols = false;
@@ -725,6 +729,14 @@ fn main() -> ExitCode {
             "-w" | "--watch" => watch = true,
             "--check" => check = true,
             "--types" => types = true,
+            "--native-check" => native_check = true,
+            "--project" => match it.next() {
+                Some(path) => project = Some(PathBuf::from(path)),
+                None => {
+                    eprintln!("rlc: --project requires a path to a tsconfig.json");
+                    return ExitCode::FAILURE;
+                }
+            },
             "--symbols" => symbols = true,
             "--emit-map" => emit_map = true,
             "--no-banner" => banner = false,
@@ -814,6 +826,10 @@ fn main() -> ExitCode {
     // Tooling modes stay .rl-only; the compile modes carry hand-written
     // TypeScript along so the output tree is complete.
     let include_ts = !symbols && !emit_map && sidecar_dir.is_none();
+
+    if native_check {
+        return typescript::check::run(&inputs, project.as_deref(), node.as_deref());
+    }
 
     if types {
         let opts = TypesOptions {
