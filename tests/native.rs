@@ -61,7 +61,6 @@ fn project(files: &[(&str, &str)]) -> PathBuf {
     "target": "es2022",
     "module": "preserve",
     "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true
@@ -93,6 +92,76 @@ fn check(dir: &Path, root: &Path) -> String {
 }
 
 #[test]
+fn a_hand_written_ts_file_imports_an_rl_file_by_the_specifier_it_writes() {
+    let root = require_tsgo!();
+    // `"./shape.rl"` is what a user writes, and it needs no configuration:
+    // the lowered module is served at `shape.rl.ts`, which is what ordinary
+    // TypeScript resolution finds for that specifier. The project's
+    // tsconfig here sets no rl-specific option at all.
+    let dir = project(&[
+        (
+            "src/shape.rl",
+            "export enum Shape { Circle(radius: number), Point }\n",
+        ),
+        (
+            "src/use.ts",
+            "import { Shape } from \"./shape.rl\";\n\
+             export const s: Shape = Shape.Point;\n\
+             export const bad: number = Shape.Point;\n",
+        ),
+    ]);
+    let out = check(&dir, &root);
+    // The import resolved — the only error is the deliberate one, reported
+    // in the hand-written file at TypeScript's own coordinates.
+    assert!(
+        out.contains("src/use.ts: ts(2322)"),
+        "the .ts file's own error, in one project with the .rl: {out}"
+    );
+    assert!(
+        !out.contains("2307") && !out.contains("Cannot find module"),
+        "and nothing failed to resolve: {out}"
+    );
+}
+
+#[test]
+fn a_declaration_carries_a_map_back_to_the_rl_source() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/token.rl",
+        "export enum Token { Num(value: number), Eof }\n\
+         export function width(t: Token): number {\n\
+         \x20 return match (t) { Num(value) => value, Eof => 0 };\n\
+         }\n",
+    )]);
+    let out_dir = dir.join("out");
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .args(["--native-check", "src", "-o"])
+        .arg(&out_dir)
+        .current_dir(&dir)
+        .env("RLC_TSGO_ROOT", root)
+        .output()
+        .expect("rlc runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The sidecar takes the name a `"./token.rl"` specifier resolves to
+    // when no compiler is running — which is what makes it a sidecar.
+    let declarations = fs::read_to_string(out_dir.join("src/token.rl.d.ts")).expect("the sidecar");
+    assert!(
+        declarations.contains("//# sourceMappingURL=token.rl.d.ts.map"),
+        "and points at its map: {declarations}"
+    );
+    let map = fs::read_to_string(out_dir.join("src/token.rl.d.ts.map")).expect("the map");
+    assert!(
+        map.contains("token.rl\"") && map.contains("\"mappings\""),
+        "whose sources is the .rl file, so go-to-definition lands there: {map}"
+    );
+}
+
+#[test]
 fn declarations_are_emitted_by_the_compiler_itself() {
     let root = require_tsgo!();
     let dir = project(&[(
@@ -116,7 +185,7 @@ fn declarations_are_emitted_by_the_compiler_itself() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let declaration = fs::read_to_string(out_dir.join("src/shape.d.ts")).expect("a .d.ts");
+    let declaration = fs::read_to_string(out_dir.join("src/shape.rl.d.ts")).expect("a .d.ts");
     // rlc writes no declaration syntax of its own: this is what the compiler
     // emits for the module rlc lowered, exactly as for a hand-written one.
     assert!(
@@ -154,16 +223,13 @@ fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    // The library is one more module of the project, named relatively — no
-    // `paths` entry and no resolver hook.
-    let declaration = fs::read_to_string(out_dir.join("src/parse.d.ts")).expect("a .d.ts");
+    // The library is a module of the project, resolved by ordinary node
+    // resolution — so the specifier stays bare, in the source and in the
+    // declaration alike, and no `paths` entry is involved in this compile.
+    let declaration = fs::read_to_string(out_dir.join("src/parse.rl.d.ts")).expect("a .d.ts");
     assert!(
-        declaration.contains("__rl_std__"),
-        "the declaration points at the library module: {declaration}"
-    );
-    assert!(
-        out_dir.join("__rl_std__.d.ts").is_file(),
-        "and the library's own declarations are emitted beside it"
+        declaration.contains("from \"@rl/std\""),
+        "the declaration keeps the specifier the user wrote: {declaration}"
     );
 }
 
@@ -202,7 +268,7 @@ fn a_ts_file_and_an_rl_file_share_one_project_graph() {
         ),
         (
             "src/state.rl",
-            "import type { State } from \"./user.ts\";\n\
+            "import type { State } from \"./user\";\n\
              export function render(state: State): number {\n\
              \x20 return match (state) { \"idle\" => 0, \"loading\" => 1, \"done\" => 2 };\n\
              }\n",
@@ -222,7 +288,7 @@ fn literal_exhaustiveness_uses_the_narrowed_type_at_the_match() {
         ),
         (
             "src/state.rl",
-            "import type { State } from \"./user.ts\";\n\
+            "import type { State } from \"./user\";\n\
              export function render(state: State): number {\n\
              \x20 if (state !== \"idle\") {\n\
              \x20   return match (state) { \"loading\" => 1 };\n\
@@ -299,7 +365,7 @@ fn val_mutation_is_decided_by_the_method_the_call_resolves_to() {
         ),
         (
             "src/use.rl",
-            "import { Store } from \"./store.ts\";\n\
+            "import { Store } from \"./store\";\n\
              export function go(): void {\n\
              \x20 val const map = new Map<string, number>();\n\
              \x20 map.set(\"a\", 1);\n\

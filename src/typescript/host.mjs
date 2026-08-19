@@ -132,16 +132,19 @@ async function main() {
     const project = snapshot.getProject(job.tsconfig);
     if (!project) fail(3, "rlc host: no project for " + job.tsconfig);
 
-    for (const module of job.modules ?? []) {
-      for (const d of project.program.getSemanticDiagnostics(module.path)) {
-        out.diagnostics.push({
-          file: d.fileName ?? module.path,
-          start: d.pos,
-          end: d.end,
-          code: d.code,
-          message: d.text,
-        });
-      }
+    // The whole program, not just the lowered modules: a hand-written `.ts`
+    // and an `.rl` are in one project, so an error in either is this run's to
+    // report. Which file it lands in decides how it is positioned, and that
+    // is rlc's half.
+    for (const d of project.program.getSemanticDiagnostics()) {
+      if (!d.fileName) continue;
+      out.diagnostics.push({
+        file: d.fileName,
+        start: d.pos,
+        end: d.end,
+        code: d.code,
+        message: d.text,
+      });
     }
 
     const checker = project.checker;

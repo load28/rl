@@ -52,7 +52,7 @@ pub(crate) fn run(
     let tsconfig = tsconfig.canonicalize().unwrap_or(tsconfig);
 
     let root = tsconfig.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let lowered = match project::lower(&files, &root) {
+    let lowered = match project::lower(&files) {
         Ok(lowered) => lowered,
         Err((file, error)) => {
             eprintln!(
@@ -87,7 +87,7 @@ pub(crate) fn run(
     // The declarations the compiler emitted for the lowered modules, laid
     // out under `-o` the way the sources are laid out under the project.
     if let Some(dir) = out_dir
-        && let Err(e) = write_declarations(&answers.declarations, &tsconfig, dir)
+        && let Err(e) = write_declarations(&answers.declarations, &lowered, &root, dir)
     {
         eprintln!("rlc: {e}");
         return ExitCode::FAILURE;
@@ -98,10 +98,18 @@ pub(crate) fn run(
     // TypeScript's own diagnostics, at the position in the `.rl` file the
     // offending code was written at.
     for diagnostic in &answers.diagnostics {
+        reported += 1;
         let Some(file) = lowered.iter().find(|f| f.module_path == diagnostic.file) else {
+            // A hand-written file: TypeScript's own coordinates already name
+            // a file the user can open, so they are used as they are.
+            println!(
+                "{}: ts({}): {}",
+                diagnostic.file.display(),
+                diagnostic.code,
+                diagnostic.message,
+            );
             continue;
         };
-        reported += 1;
         match project::diagnostic_source_offset(file, diagnostic.start) {
             Some((offset, exact)) => {
                 let (line, col) = rlc::line_col(&file.source, offset);
@@ -252,14 +260,19 @@ pub(crate) fn run(
 }
 
 /// Writes the emitted declarations under `out_dir`, mirroring their layout
-/// under the project root — the same shape `--sidecar` produces, and never
-/// beside the sources.
+/// under the project root — never beside the sources.
+///
+/// A declaration emitted for a lowered module becomes an **editor sidecar**:
+/// `src/token.rl.d.ts` plus a `.d.ts.map` whose `sources` is the `.rl` file,
+/// so "go to definition" lands in what the user wrote rather than in a
+/// declaration. The body is the compiler's; only the map is rlc's, and it is
+/// built by the same [`rlc::build_sidecar`] the `--sidecar` mode uses.
 fn write_declarations(
     declarations: &[super::backend::Declaration],
-    tsconfig: &Path,
+    lowered: &[project::Lowered],
+    root: &Path,
     out_dir: &Path,
 ) -> std::io::Result<()> {
-    let root = tsconfig.parent().unwrap_or(Path::new("."));
     for declaration in declarations {
         let relative = declaration.path.strip_prefix(root).unwrap_or(
             declaration
@@ -269,10 +282,25 @@ fn write_declarations(
                 .unwrap_or(&declaration.path),
         );
         let target = out_dir.join(relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+        let dir = target.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(dir)?;
+
+        match lowered
+            .iter()
+            .find(|f| project::declaration_path_of(f) == declaration.path)
+        {
+            Some(file) => {
+                let sidecar = rlc::build_sidecar(
+                    &file.source,
+                    &declaration.text,
+                    &crate::relative_path(dir, &file.source_path),
+                );
+                std::fs::write(&target, &sidecar.declarations)?;
+                std::fs::write(target.with_extension("ts.map"), &sidecar.map)?;
+            }
+            // The standard library has no `.rl` source to map back to.
+            None => std::fs::write(&target, &declaration.text)?,
         }
-        std::fs::write(&target, &declaration.text)?;
     }
     Ok(())
 }

@@ -30,19 +30,28 @@ pub(crate) struct Lowered {
 }
 
 impl Lowered {
-    /// The module path an `.rl` file takes in the project graph.
+    /// The module path an `.rl` file takes in the project graph: its own
+    /// path with `.ts` appended, so `src/token.rl` becomes
+    /// `src/token.rl.ts`.
+    ///
+    /// This is what makes the whole arrangement need no configuration. A
+    /// specifier written `"./token.rl"` — which is what a hand-written `.ts`
+    /// and an `.rl` alike write — resolves to `token.rl.ts` by ordinary
+    /// TypeScript resolution, with no `allowImportingTsExtensions`, no
+    /// `paths`, and no rewriting. And the declaration the compiler emits for
+    /// it lands on `token.rl.d.ts`, which is exactly the editor sidecar the
+    /// same specifier resolves to when no compiler is running.
     fn module_path_of(source_path: &Path) -> PathBuf {
-        source_path.with_extension("ts")
+        let mut name = source_path.as_os_str().to_os_string();
+        name.push(".ts");
+        PathBuf::from(name)
     }
 }
 
 /// Lowers every `.rl` file for the project graph. A file that fails an
 /// rl-level check is returned as an error with its own position — rl
 /// diagnostics come first and are never delegated.
-pub(crate) fn lower(
-    files: &[PathBuf],
-    root: &Path,
-) -> Result<Vec<Lowered>, (PathBuf, rlc::CompileError)> {
+pub(crate) fn lower(files: &[PathBuf]) -> Result<Vec<Lowered>, (PathBuf, rlc::CompileError)> {
     let mut out = Vec::with_capacity(files.len());
     for file in files {
         let source = std::fs::read_to_string(file).map_err(|e| {
@@ -56,20 +65,17 @@ pub(crate) fn lower(
                 },
             )
         })?;
-        // `@rl/std` is not a package: the standard library enters the graph
-        // as one more module of the project, and the importing file points at
-        // it by relative path. No resolver hook, no `paths` entry.
-        let std_import = rlc::imports_std(&source)
-            .then(|| relative_specifier(file.parent().unwrap_or(root), &root.join(STD_MODULE)));
         let options = Options {
             filename: Some(file.to_str().unwrap_or("<input>")),
-            std_import: std_import.as_deref(),
             // Exhaustiveness and `val`'s pairing are the checker's answers
             // here — see `Options::defer_to_checker`.
             defer_to_checker: true,
-            // The lowered module sits where the source did, so a relative
-            // `.rl` specifier names the module beside it: `./x.rl` → `./x.ts`.
-            rewrite_imports: rlc::ImportRewrite::Ts,
+            // Specifiers stay exactly as written. `"./token.rl"` already
+            // names the lowered module ([`Lowered::module_path_of`]), and
+            // `"@rl/std"` already names the standard library ([`STD_MODULE`])
+            // — so the declarations the compiler emits are usable as they
+            // are, by a consumer that never sees this compile.
+            rewrite_imports: rlc::ImportRewrite::Off,
             ..Options::default()
         };
         let emit = rlc::compile_mapped(&source, &options).map_err(|e| (file.clone(), e))?;
@@ -83,36 +89,20 @@ pub(crate) fn lower(
     Ok(out)
 }
 
-/// The standard library's file name in the project graph. It is emitted
-/// only when something imports it, and it sits at the project root so every
-/// module can name it relatively.
-pub(crate) const STD_MODULE: &str = "__rl_std__.ts";
+/// Where the standard library sits in the project graph, relative to the
+/// project root: the package `"@rl/std"` names.
+///
+/// It is a module of the project like any other — served from the same
+/// layered file system, resolved by ordinary node resolution — so the
+/// specifier stays bare in the source and in every declaration emitted from
+/// it. Nothing is written to the user's `node_modules`.
+pub(crate) const STD_MODULE: &str = "node_modules/@rl/std/index.ts";
 
-/// A specifier for `target` as written in a file living in `from`: always
-/// relative, always with the `.ts` extension the lowered modules use.
-fn relative_specifier(from: &Path, target: &Path) -> String {
-    let mut from_parts: Vec<_> = from.components().collect();
-    let mut target_parts: Vec<_> = target.components().collect();
-    let shared = from_parts
-        .iter()
-        .zip(target_parts.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-    from_parts.drain(..shared);
-    target_parts.drain(..shared);
-    let mut specifier = String::new();
-    for _ in 0..from_parts.len() {
-        specifier.push_str("../");
-    }
-    if specifier.is_empty() {
-        specifier.push_str("./");
-    }
-    let tail: Vec<_> = target_parts
-        .iter()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect();
-    specifier.push_str(&tail.join("/"));
-    specifier
+/// The path the compiler emits a lowered module's declarations to:
+/// `src/token.rl.ts` → `src/token.rl.d.ts`, which is the sidecar name a
+/// specifier written `"./token.rl"` resolves to.
+pub(crate) fn declaration_path_of(file: &Lowered) -> PathBuf {
+    file.module_path.with_extension("d.ts")
 }
 
 /// Builds the batch of questions the whole project asks in one round trip.
@@ -294,26 +284,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_specifier_is_relative_to_the_importing_file() {
-        assert_eq!(
-            relative_specifier(Path::new("/p/src"), Path::new("/p/__rl_std__.ts")),
-            "../__rl_std__.ts",
-        );
-        assert_eq!(
-            relative_specifier(Path::new("/p"), Path::new("/p/__rl_std__.ts")),
-            "./__rl_std__.ts",
-        );
-        assert_eq!(
-            relative_specifier(Path::new("/p/a/b"), Path::new("/p/__rl_std__.ts")),
-            "../../__rl_std__.ts",
-        );
-    }
-
-    #[test]
-    fn a_lowered_module_takes_its_source_path_with_a_ts_extension() {
+    fn a_lowered_module_is_named_so_that_an_rl_specifier_resolves_to_it() {
+        // `import "./state.rl"` resolves to `state.rl.ts` — and the
+        // declaration emitted for it lands on `state.rl.d.ts`, the sidecar
+        // the same specifier resolves to without a compiler.
         assert_eq!(
             Lowered::module_path_of(Path::new("/p/src/state.rl")),
-            PathBuf::from("/p/src/state.ts"),
+            PathBuf::from("/p/src/state.rl.ts"),
         );
     }
 }
