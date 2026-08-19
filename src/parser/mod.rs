@@ -4,8 +4,8 @@
 //! first lexed into a significant-token stream ([`crate::lexer`]); the
 //! parser walks that stream and lifts every construct that *fully* parses
 //! as rl syntax — an `enum` declaration, a `match` expression, a `try` or
-//! let-else statement, a relative `.rl` import specifier — into a typed
-//! AST node; everything else, including any candidate that deviates even
+//! let-else statement, a `val` binding modifier, a relative `.rl` import
+//! specifier — into a typed AST node; everything else, including any candidate that deviates even
 //! slightly from rl syntax, is left as a verbatim byte range. This is how
 //! the "every valid TypeScript file is a valid .rl file" contract is
 //! implemented: construct-hood is a purely structural decision made here,
@@ -28,7 +28,8 @@
 //! [`tries`] parses `try` statements; [`lets`] parses let-else statements;
 //! [`results`] parses `result { ... }` computation blocks;
 //! [`imports`] lifts relative `.rl` module specifiers out of static
-//! import/re-export statements.
+//! import/re-export statements. The `val` binding modifier is recognized
+//! here too, through the shared structural rule in [`crate::val`].
 
 mod cursor;
 mod enums;
@@ -43,7 +44,10 @@ mod tries;
 
 use crate::ast::*;
 use crate::lexer::{self, Token, TokenKind, TplPart};
+use crate::val;
 use cursor::Cursor;
+
+pub(crate) use cursor::{dotted_at, find_close_at};
 
 // Words that can never be a variant tag, match pattern tag, or binding name.
 // Meeting one of these while trying to parse an rl construct aborts the
@@ -141,12 +145,20 @@ fn is_pipe_boundary_word(word: &str) -> bool {
 
 /// Parses a whole source file into a [`Program`].
 pub(crate) fn parse(src: &str) -> Program {
+    lex_and_parse(src).0
+}
+
+/// [`parse`], also returning the file's token stream — the `val` analysis
+/// ([`crate::val::check`]) reads the same tokens, and lexing twice is the
+/// compiler's most expensive avoidable work.
+pub(crate) fn lex_and_parse(src: &str) -> (Program, Vec<Token>) {
     let parser = Parser {
         src,
         bytes: src.as_bytes(),
     };
     let tokens = lexer::lex(src, 0, src.len());
-    parser.parse_tokens(&tokens, 0, src.len())
+    let program = parser.parse_tokens(&tokens, 0, src.len());
+    (program, tokens)
 }
 
 /// Shared state for one parse: the source in both views. The parser holds no
@@ -181,6 +193,7 @@ fn segment_start(seg: &Segment) -> usize {
         },
         Segment::Pipe(p) => p.head_span.start,
         Segment::ResultBlock(b) => b.keyword_off,
+        Segment::ValModifier(span) => span.start,
     }
 }
 
@@ -435,6 +448,23 @@ impl Parser<'_> {
                     results::Attempt::Malformed => stray_results.push(tok.span.start),
                     results::Attempt::Pass => {}
                 }
+            }
+
+            // `val` — a binding modifier, dropped from the output. The
+            // two accepted shapes (`val const|let|var` on one line, and
+            // `val <binding>` at the start of a parameter-list entry)
+            // cannot occur in valid TypeScript, so every other `val` is
+            // an ordinary identifier and stays verbatim.
+            if !dotted && word == "val" && val::modifier_at(self.src, tokens, i).is_some() {
+                flush_verbatim(&mut segments, seg_start, tok.span.start);
+                let end = val::modifier_end(self.src, tok.span.end);
+                segments.push(Segment::ValModifier(Span {
+                    start: tok.span.start,
+                    end,
+                }));
+                seg_start = end;
+                i += 1;
+                continue;
             }
 
             if !dotted && is_pipe_boundary_word(word) {

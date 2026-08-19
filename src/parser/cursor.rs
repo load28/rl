@@ -107,7 +107,7 @@ impl<'t> Cursor<'t> {
 }
 
 /// See [`Cursor::find_close`].
-pub(super) fn find_close_at(tokens: &[Token], open_idx: usize) -> Option<usize> {
+pub(crate) fn find_close_at(tokens: &[Token], open_idx: usize) -> Option<usize> {
     let open = match tokens.get(open_idx)?.kind {
         TokenKind::Punct(b @ (b'(' | b'[' | b'{' | b'<')) => b,
         _ => return None,
@@ -137,7 +137,7 @@ pub(super) fn find_close_at(tokens: &[Token], open_idx: usize) -> Option<usize> 
 /// True when the token before `k` (within a scan that started at `from`)
 /// is a member-access dot — `.` or the `?.` of optional chaining — i.e.
 /// the identifier at `k` is a property name, not a keyword.
-pub(super) fn dotted_at(tokens: &[Token], from: usize, k: usize) -> bool {
+pub(crate) fn dotted_at(tokens: &[Token], from: usize, k: usize) -> bool {
     k > from
         && matches!(
             tokens[k - 1].kind,

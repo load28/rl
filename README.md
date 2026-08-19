@@ -8,10 +8,10 @@
 
 ## 목표
 
-TypeScript에 **일곱 구문**만 더합니다 — 태그드 유니언 `enum`, 패턴 매칭
-`match`(태그·리터럴·튜플·중첩 패턴), 에러 전파 `try`, 값 추출 `let-else`와
-`if let`, 파이프라인 `|>` (함수 합성 `flow` 포함), `Result` 계산 블록 `result`.
-그리고 두 가지를 지킵니다.
+TypeScript에 **일곱 구문**과 **바인딩 수식자 하나**만 더합니다 — 태그드 유니언
+`enum`, 패턴 매칭 `match`(태그·리터럴·튜플·중첩 패턴), 에러 전파 `try`, 값 추출
+`let-else`와 `if let`, 파이프라인 `|>` (함수 합성 `flow` 포함), `Result` 계산
+블록 `result`, 그리고 변경 금지 `val`. 그리고 두 가지를 지킵니다.
 
 1. **모든 유효한 TypeScript 파일은 그대로 유효한 `.rl` 파일이고, 자기
    자신으로 컴파일된다.**
@@ -92,6 +92,21 @@ const view = (id: number) => result {
   { user, company }                           // 마지막 식이 Ok로 감싸집니다
 };
 ```
+
+바꾸면 안 되는 바인딩에는 `val`을 붙입니다 — 그 바인딩에서 시작하는 경로의
+변경을 컴파일 시점에 막습니다. 방출물에는 아무것도 남지 않습니다.
+
+```rl
+val const config = loadConfig();
+config.retries = 3;                    // rlc: cannot mutate through val binding `config`
+
+function inspect(val user: User) {     // 이 함수는 user를 못 바꿉니다
+  return user.name;
+}
+```
+
+수식자가 없으면 지금까지의 TypeScript 그대로입니다 — `const user = getUser();`는
+여전히 `user.name = "Lee"`를 허용합니다.
 
 ## 설치와 사용
 

@@ -8,15 +8,16 @@ CLI는 [`cli.md`](./cli.md), 에러 메시지는 [`errors.md`](./errors.md), 표
 3. [`match`](#3-match-표현식) · 4. [표준 라이브러리](#4-표준-라이브러리와-내장-enum) ·
 5. [`try`](#5-에러-전파-try-문) · 6. [`let-else`·`if let`](#6-값-추출-let-else-문) ·
 7. [`|>`](#7-파이프라인-연산자-) · 8. [`result` 블록](#8-result-계산-블록) ·
-9. [모듈](#9-모듈-rl-import-지정자-재작성) · 10. [제한사항](#10-제한사항)
+9. [모듈](#9-모듈-rl-import-지정자-재작성) · 10. [`val`](#10-바인딩-수식자-val) ·
+11. [제한사항](#11-제한사항)
 
 ---
 
 ## 1. 기본 원칙
 
 `.rl` 파일은 TypeScript에 일곱 구문 — `enum` 선언, `match` 표현식, `try` 문,
-let-else 문, `if let` 문, 파이프라인 연산자 `|>`, `result` 계산 블록 — 을 더한
-것입니다.
+let-else 문, `if let` 문, 파이프라인 연산자 `|>`, `result` 계산 블록 — 과 바인딩
+수식자 `val` 하나를 더한 것입니다.
 
 > **모든 유효한 TypeScript 파일은 그대로 유효한 `.rl` 파일이며, 자기 자신으로
 > 컴파일됩니다.** 유일한 예외는 상대 경로 `.rl` import 지정자의 재작성입니다
@@ -223,7 +224,7 @@ const area = ((() => {
 
 스크루티니·가드·암 본문에 `await`가 있으면 async 함수로 방출되고 전체가
 `await`됩니다. 감지는 토큰 단위이므로 중첩 함수 안의 `await`도 async를
-유발합니다 ([§9](#10-제한사항)).
+유발합니다 ([§11](#11-제한사항)).
 
 ### 3.6 소진성 검사
 
@@ -982,7 +983,176 @@ rlc: parser.rl:3:28: match on enum Token (imported from "./token.rl")
 
 ---
 
-## 10. 제한사항
+## 10. 바인딩 수식자 `val`
+
+`val`은 **바인딩 하나의 변경 권한(mutation capability)** 을 제한하는 수식자입니다.
+`val`이 붙은 바인딩에서 시작하는 접근 경로로는 값을 바꿀 수 없고, rlc가 이를
+컴파일 시점에 검사합니다. 수식자가 없는 바인딩은 지금까지와 똑같은 TypeScript
+의미 그대로 — 언제나 변경 가능 — 이므로 `mut` 같은 반대 키워드는 없습니다.
+
+```
+수식자 없음 = 변경 가능 (기존 TypeScript)
+val         = 이 바인딩을 통한 변경 금지
+```
+
+### 10.1 문법
+
+`val`은 선언 키워드 앞과 매개변수 앞, 두 자리에 옵니다.
+
+```rl
+val const user = { name: "Kim", tags: ["dev"] };
+val let state = { count: 0 };
+
+function read(val user: User) { return user.name; }
+const inspect = (val user: User) => user.name;
+
+for (val const item of items) { log(item.id); }
+try { work(); } catch (val error: unknown) { log(error); }
+```
+
+- **선언**: `val` 바로 뒤에 `const`/`let`/`var`가 **같은 줄에** 와야 합니다.
+  선언이 도입하는 이름 전부(구조 분해 포함)가 `val` 바인딩이 됩니다.
+- **매개변수**: `val`은 매개변수 목록 항목의 맨 앞(`(` 또는 `,` 직후, TypeScript
+  매개변수 수식자 `public`/`private`/`protected`/`readonly`/`override` 뒤)에
+  오고, 그 뒤에는 같은 줄의 바인딩(식별자·`{ }`·`[ ]`)이 와야 합니다.
+  함수 선언·함수 식·화살표 함수·메서드·`catch` 절 모두 같은 규칙입니다.
+- 이 두 형태는 유효한 TypeScript에 존재할 수 없으므로 통과 계약([§1](#1-기본-원칙))을
+  깨지 않습니다. 그 밖의 모든 `val`은 **평범한 식별자**입니다 — `const val = 1;`,
+  `o.val`, `f(val, x)`, `(val as User)`, `for (val of xs)`, 그리고 줄바꿈으로
+  분리된 `val\nconst x = 1;`(ASI)까지 전부 그대로 통과합니다.
+
+### 10.2 의미
+
+`val`은 **접근 경로의 읽기 전용화**이지 객체의 불변화가 아닙니다. 같은 객체를
+가리키는 다른 바인딩이 있으면 그쪽 경로로는 여전히 변경할 수 있습니다.
+
+```rl
+let original = { count: 0 };
+val const view = original;
+
+view.count++;      // 에러 — val 바인딩을 통한 변경
+original.count++;  // OK — 이 바인딩에는 제한이 없음
+```
+
+`const`/`let`과 `val`은 서로 다른 축입니다. `const`/`let`은 **바인딩 자체를 다른
+값으로 바꿀 수 있는가**를, `val`은 **바인딩에서 시작하는 경로로 내부 값을 바꿀 수
+있는가**를 정합니다.
+
+| 선언 | 재할당 | 내부 변경 |
+|------|--------|-----------|
+| `const x` | ✗ | ✓ |
+| `let x` | ✓ | ✓ |
+| `val const x` | ✗ | ✗ |
+| `val let x` | ✓ | ✗ |
+
+```rl
+val let state = { count: 0 };
+state.count++;                              // 에러
+state = { ...state, count: state.count + 1 };  // OK — let이므로 교체는 가능
+```
+
+### 10.3 변경으로 간주하는 문법
+
+루트가 `val` 바인딩이면 경로의 깊이와 상관없이 아래가 전부 에러입니다.
+
+| 형태 | 예 |
+|------|-----|
+| 대입 | `x.a = v`, `x.a += v`, `x.a **= v`, `x.a ??= v`, `x.a >>= v`, `x[i] = v` |
+| 증감 | `x.a++`, `x.a--`, `++x.a`, `--x.a`, `x[i]++` |
+| `delete` | `delete x.a`, `delete x[i]` |
+| 변경 메서드 호출 | `x.push(v)`, `x.a.b.tags.push(v)`, `m.set(k, v)`, `s.add(v)` |
+
+```rl
+val const state = { user: { profile: { tags: [] as string[] } } };
+state.user.profile.tags.push("rl");  // 에러 — 경로의 루트가 val
+```
+
+변경 메서드는 **이름 기준**입니다 (rlc에는 타입 정보가 없습니다): `push` `pop`
+`shift` `unshift` `splice` `sort` `reverse` `fill` `copyWithin` `set` `delete`
+`clear` `add`. 같은 이름의 사용자 메서드도 변경으로 간주됩니다 — 그 경로로
+호출해야 하면 `val`을 빼거나 변경 가능한 바인딩을 거칩니다.
+
+바인딩 자체를 다른 값으로 바꾸는 `x = v`는 `val`의 검사 대상이 **아닙니다**
+(`const`면 tsc가, `let`이면 아무도 막지 않습니다 — [§10.2](#102-의미)의 표).
+읽기·비교·전개(`x.a === 1`, `{ ...x }`)도 당연히 허용됩니다.
+
+### 10.4 함수 경계
+
+`val` 바인딩은 **`val`이 아닌 매개변수로 넘길 수 없습니다.** 함수가 그 인자를
+변경할 수 있기 때문입니다.
+
+```
+val 인자   → val 매개변수      OK
+           → 일반 매개변수     에러
+일반 인자  → val 매개변수      OK
+           → 일반 매개변수     OK
+```
+
+```rl
+function read(val user: User) { log(user.name); }
+function update(user: User) { user.name = "Lee"; }
+
+function process(val user: User) {
+  read(user);    // OK
+  update(user);  // 에러 — update는 user를 변경할 수 있음
+}
+```
+
+검사 대상은 **같은 파일에서 이름으로 선언된 함수**입니다: `function f(...)`,
+`const f = (...) => ...`, `const f = function (...) ...`. 인자가 `x`·`x.y.z`
+형태의 접근 경로일 때만 판정하고, 계산된 인자(`f(g(x))`, `f({ ...x })`)는
+검사하지 않습니다. 같은 이름이 서로 다른 시그니처로 두 번 선언되면 그 이름은
+검사에서 제외됩니다.
+
+### 10.5 스코프와 섀도잉
+
+`val` 여부는 **바인딩**의 성질이므로 렉시컬 스코프를 따릅니다. 안쪽 스코프의
+같은 이름 선언은 바깥 `val`을 가립니다.
+
+```rl
+val const x = { a: 1 };
+{
+  const x = { a: 2 };
+  x.a = 3;   // OK — 이 x는 val이 아님
+}
+x.a = 4;     // 에러 — 바깥 x는 여전히 val
+```
+
+매개변수는 함수 본문 스코프에, `for` 머리의 선언은 반복문 스코프에, `catch`
+바인딩은 catch 블록에 속합니다.
+
+### 10.6 컴파일 결과
+
+`val`은 **컴파일 시점 전용**입니다. 방출된 TypeScript에는 키워드도, 런타임
+헬퍼도, `readonly` 같은 타입 변환도 남지 않습니다 — 키워드와 그 뒤의 공백만
+사라집니다.
+
+```rl
+val const user = getUser();
+function read(val user: User) { return user.name; }
+```
+
+```ts
+const user = getUser();
+function read(user: User) { return user.name; }
+```
+
+### 10.7 검사 범위
+
+rlc가 추적할 수 있는 것만 검사합니다. 아래는 **의도적으로** 검사하지 않습니다.
+
+| 항목 | 이유 |
+|------|------|
+| 임의의 외부 함수가 내부에서 하는 변경 | 이펙트 시스템·전역 이펙트 추론을 만들지 않습니다. 시그니처를 알 수 있는 같은 파일 함수만 [§10.4](#104-함수-경계)로 검사합니다 |
+| 메서드 호출로 넘기는 인자(`obj.m(x)`) | 메서드의 매개변수 선언을 이름으로 해석하지 않습니다 |
+| 별칭을 통한 우회 (`const alias = valBinding; alias.a = 1`) | 소유권·borrow checker를 만들지 않습니다. `val`은 바인딩 하나의 권한 제한입니다 |
+| 괄호·단언을 거친 경로 (`(x as any).a = 1`) | 경로의 루트가 식별자일 때만 판정합니다 |
+| 객체 자체의 깊은 불변성 | `Object.freeze`·`Proxy` 같은 런타임 강제를 넣지 않습니다 |
+| match 패턴 바인딩의 `val` (`Ok(val user)`) | 미지원 — 패턴 문법이 아니므로 그 match는 rl 구문으로 파싱되지 않습니다 |
+
+---
+
+## 11. 제한사항
 
 | 항목 | 내용 |
 |------|------|
@@ -1002,6 +1172,7 @@ rlc: parser.rl:3:28: match on enum Token (imported from "./token.rl")
 | `flow` | 첫 스텝이 입력 타입을 정합니다 — 제네릭 함수·커링 콤비네이터를 첫 스텝으로 쓰면 타입 인자를 명시해야 합니다. 첫 스텝은 메서드 스텝 불가. 입력 타입 주석 문법(`flow<T>`)은 없습니다 ([§7.5](#75-함수-합성-flow)) |
 | `result` 블록 | 바인딩이 하나 이상 필요하고 마지막은 세미콜론 없는 값 식이어야 합니다. 바인딩은 `Result` 전용(`Option`·`Promise` do-표기법 없음), `<-`는 블록 안 선언에서만. `<-` 뒤 식의 최상위 `>`는 제네릭 타입 인자와 구분되지 않아 괄호가 필요합니다. 블록 안의 `return`은 블록에서 빠져나가며 `try`·let-else는 쓸 수 없습니다 ([§8.4](#84-구조-규칙)) |
 | async 감지 | 토큰 단위 — 중첩 함수 안의 `await`도 async 방출을 유발하므로, 그런 match를 async가 아닌 곳에 두면 생성물이 문법 에러가 됩니다 |
+| `val` | 같은 줄 규칙(`val const`·`val <바인딩>`)과 접근 경로 루트가 식별자인 경우만. 외부 함수·메서드의 변경, 별칭 우회는 검사하지 않고 match 패턴 바인딩에는 쓸 수 없습니다 ([§10.7](#107-검사-범위)) |
 | `.tsx` | 미지원 (제네릭 화살표 함수 출력이 JSX와 충돌) |
 | 식별자 | rl 구문 안에서는 ASCII만 |
 | `--no-verify` | 필드 타입 오류가 컴파일 시점에 잡히지 않고 tsc 단계에서 드러납니다 |

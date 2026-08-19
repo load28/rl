@@ -2351,3 +2351,315 @@ fn a_block_of_literals_is_not_a_match() {
     let src = "match (x)\n{ 1 }\n";
     assert_eq!(ok(src), src);
 }
+
+/* ------------------------------------------------------------------ */
+/* val — binding modifier                                             */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn plain_typescript_bindings_stay_mutable() {
+    // The default is unchanged TypeScript semantics: without `val` every
+    // mutation is legal and the bytes pass through.
+    let src = "const x = { a: 1 };\nx.a = 2;\nlet y = { a: 1 };\ny.a = 2;\ny = { a: 3 };\n";
+    assert_eq!(ok(src), src);
+    let src = "function f(x: X) {\n  x.value = 1;\n}\n";
+    assert_eq!(ok(src), src);
+}
+
+#[test]
+fn val_declaration_modifier_is_erased_from_the_output() {
+    assert_eq!(
+        ok("val const user = getUser();\n"),
+        "const user = getUser();\n"
+    );
+    assert_eq!(
+        ok("val let state = getState();\n"),
+        "let state = getState();\n"
+    );
+    assert_eq!(
+        ok("export val const cfg = load();\n"),
+        "export const cfg = load();\n"
+    );
+    // the keyword's trailing spaces go with it; a comment stays
+    assert_eq!(ok("val\tconst a = 1;\n"), "const a = 1;\n");
+    assert_eq!(ok("val /*c*/ const a = 1;\n"), "/*c*/ const a = 1;\n");
+}
+
+#[test]
+fn val_parameter_modifier_is_erased_from_the_output() {
+    assert_eq!(
+        ok("function read(val user: User) {\n  return user.name;\n}\n"),
+        "function read(user: User) {\n  return user.name;\n}\n",
+    );
+    assert_eq!(
+        ok("const read = (val user: User) => user.name;\n"),
+        "const read = (user: User) => user.name;\n",
+    );
+    assert_eq!(
+        ok("function pick(a: A, val b: B, val { c }: C) {}\n"),
+        "function pick(a: A, b: B, { c }: C) {}\n",
+    );
+}
+
+#[test]
+fn val_const_forbids_property_assignment() {
+    let e = err("val const x = { a: 1 };\nx.a = 2;\n");
+    assert_eq!((e.line, e.col), (2, 1));
+    assert!(e.message.contains("cannot mutate through val binding `x`"));
+}
+
+#[test]
+fn val_const_forbids_mutation_at_any_depth() {
+    let e = err("val const x = { nested: { a: 1 } };\nx.nested.a = 2;\n");
+    assert_eq!((e.line, e.col), (2, 1));
+    let e =
+        err("val const s = { u: { p: { tags: [] as string[] } } };\ns.u.p.tags.push(\"rl\");\n");
+    assert!(e.message.contains("cannot call mutating method `push`"));
+}
+
+#[test]
+fn val_let_forbids_mutation_but_allows_rebinding() {
+    let e = err("val let state = { count: 0 };\nstate.count++;\n");
+    assert_eq!((e.line, e.col), (2, 1));
+    assert!(e.message.contains("`state`"));
+    let src = "val let state = { count: 0 };\nstate = { ...state, count: state.count + 1 };\n";
+    assert_eq!(ok(src), src.replacen("val ", "", 1));
+}
+
+#[test]
+fn val_forbids_every_mutating_operator() {
+    for stmt in [
+        "x.a = 1;",
+        "x.a += 1;",
+        "x.a -= 1;",
+        "x.a *= 1;",
+        "x.a /= 1;",
+        "x.a **= 2;",
+        "x.a ||= 1;",
+        "x.a &&= 1;",
+        "x.a ??= 1;",
+        "x.a >>= 1;",
+        "x.a >>>= 1;",
+        "x.a++;",
+        "x.a--;",
+        "++x.a;",
+        "--x.a;",
+        "delete x.a;",
+        "x[0] = 1;",
+        "x[0] += 1;",
+        "x[0]++;",
+        "delete x[0];",
+        "x!.a = 1;",
+        "x?.a.b = 1;",
+    ] {
+        let src = format!("val const x = load();\n{stmt}\n");
+        let e = compile(&src, &Options::default())
+            .err()
+            .unwrap_or_else(|| panic!("expected `{stmt}` to be rejected"));
+        assert!(
+            e.message.contains("val binding `x`"),
+            "{stmt}: {}",
+            e.message
+        );
+    }
+}
+
+#[test]
+fn val_leaves_reads_and_comparisons_alone() {
+    // Nothing here mutates `x`, and none of these operators may be
+    // mistaken for an assignment.
+    let src = "val const x = load();\nconst r = [x.a == 1, x.a === 1, x.a != 1, x.a >= 1, x.a <= 1, x.a && 1, x.a || 1, x.a ?? 1, x.a + 1, x.a > 1];\nconst y = x.a;\nconst z = { ...x };\n";
+    assert_eq!(ok(src), src.replacen("val ", "", 1));
+}
+
+#[test]
+fn val_binding_replacement_is_not_a_val_error() {
+    // Whether the binding itself can be replaced is `const`/`let`'s
+    // question, not `val`'s — tsc reports the `const` case.
+    let src = "val let a = 1;\na = 2;\nval const b = 1;\nb = 2;\n";
+    assert_eq!(ok(src), src.replace("val ", ""));
+}
+
+#[test]
+fn val_parameter_is_read_only_inside_the_function() {
+    let e = err("function read(val user: User) {\n  user.name = \"Lee\";\n}\n");
+    assert_eq!((e.line, e.col), (2, 3));
+    let e = err("const read = (val user: User) => user.name = \"Lee\";\n");
+    assert!(e.message.contains("val binding `user`"));
+    // a parameter without the modifier keeps TypeScript's semantics
+    let src = "function update(user: User) {\n  user.name = \"Lee\";\n}\n";
+    assert_eq!(ok(src), src);
+}
+
+#[test]
+fn val_parameter_positions_beyond_plain_identifiers() {
+    let e = err("function foo(val { user }: Ctx) {\n  user.name = \"x\";\n}\n");
+    assert!(e.message.contains("val binding `user`"));
+    let e = err("for (val const item of items) {\n  item.a = 1;\n}\n");
+    assert!(e.message.contains("val binding `item`"));
+    let e = err("try {\n  f();\n} catch (val error: any) {\n  error.code = 1;\n}\n");
+    assert!(e.message.contains("val binding `error`"));
+    let e = err("class B {\n  constructor(private val inner: I) {\n    inner.a = 1;\n  }\n}\n");
+    assert!(e.message.contains("val binding `inner`"));
+}
+
+#[test]
+fn val_argument_may_only_reach_a_val_parameter() {
+    let src = "\
+function read(val user: User) { log(user.name); }
+function update(user: User) { user.name = \"Lee\"; }
+function process(val user: User) {
+  read(user);
+}
+";
+    assert_eq!(ok(src), src.replace("val ", ""));
+
+    let e = err("\
+function read(val user: User) { log(user.name); }
+function update(user: User) { user.name = \"Lee\"; }
+function process(val user: User) {
+  update(user);
+}
+");
+    assert_eq!((e.line, e.col), (4, 10));
+    assert!(
+        e.message
+            .contains("cannot pass val binding `user` to mutable parameter `user` of `update`"),
+        "{}",
+        e.message,
+    );
+}
+
+#[test]
+fn a_mutable_argument_may_reach_any_parameter() {
+    let src = "\
+function read(val user: User) { log(user.name); }
+function update(user: User) { user.name = \"Lee\"; }
+function process(user: User) {
+  read(user);
+  update(user);
+}
+";
+    assert_eq!(ok(src), src.replace("val ", ""));
+}
+
+#[test]
+fn val_capability_flows_through_arrow_declarations() {
+    let e = err("\
+const update = (user: User) => { user.name = \"x\"; };
+function process(val user: User) {
+  update(user);
+}
+");
+    assert!(e.message.contains("mutable parameter `user` of `update`"));
+}
+
+#[test]
+fn val_is_an_access_path_restriction_not_object_immutability() {
+    // An alias keeps its own capability: the `val` binding cannot mutate,
+    // the original binding still can.
+    let src = "let original = { count: 0 };\nval const view = original;\noriginal.count++;\n";
+    assert_eq!(ok(src), src.replacen("val ", "", 1));
+    let e = err("let original = { count: 0 };\nval const view = original;\nview.count++;\n");
+    assert_eq!((e.line, e.col), (3, 1));
+    assert!(e.message.contains("val binding `view`"));
+}
+
+#[test]
+fn an_inner_declaration_shadows_an_outer_val() {
+    let src = "val const x = { a: 1 };\n{\n  const x = { a: 2 };\n  x.a = 3;\n}\n";
+    assert_eq!(ok(src), src.replacen("val ", "", 1));
+    let src = "val const cfg = { a: 1 };\nfunction f(cfg: C) {\n  cfg.a = 2;\n}\n";
+    assert_eq!(ok(src), src.replacen("val ", "", 1));
+    // ... and the outer binding is still `val` after the inner scope ends
+    let e = err("val const x = { a: 1 };\n{\n  const x = { a: 2 };\n  x.a = 3;\n}\nx.a = 4;\n");
+    assert_eq!((e.line, e.col), (6, 1));
+}
+
+#[test]
+fn val_reaches_mutating_built_in_methods() {
+    let e = err("val const items: number[] = [];\nitems.push(1);\n");
+    assert!(
+        e.message
+            .contains("cannot call mutating method `push` through val binding `items`"),
+        "{}",
+        e.message,
+    );
+    let e = err("val const m = new Map<string, number>();\nm.set(\"a\", 1);\n");
+    assert!(e.message.contains("mutating method `set`"));
+    // reading methods are untouched
+    let src =
+        "val const items: number[] = [];\nconst n = items.map((v) => v).filter(Boolean).length;\n";
+    assert_eq!(ok(src), src.replacen("val ", "", 1));
+}
+
+#[test]
+fn val_is_checked_inside_nested_rl_constructs() {
+    let e =
+        err("val const cfg = { a: 1 };\nconst msg = `${(() => { cfg.a = 2; return 1; })()}`;\n");
+    assert!(e.message.contains("val binding `cfg`"));
+    let e = err("\
+enum Shape { Circle(r: number), Point }
+val const s = Shape.Circle(1);
+const v = match (s) {
+  Circle(r) => { s.kind = \"Point\"; return r; },
+  Point => 0,
+};
+");
+    assert!(e.message.contains("val binding `s`"));
+}
+
+#[test]
+fn val_on_a_let_else_pattern_covers_the_names_it_binds() {
+    let e = err("\
+enum Opt { Some(value: Box), None }
+function f(o: Opt) {
+  val const Some(value) = o else { return; };
+  value.n = 1;
+}
+");
+    assert!(e.message.contains("val binding `value`"), "{}", e.message);
+}
+
+#[test]
+fn val_capability_check_only_covers_resolvable_callees() {
+    // An imported (or otherwise unknown) function has no signature rlc can
+    // read, so passing a `val` binding to it is allowed — the documented
+    // limit of the check (language.md §10.7).
+    let src = "import { save } from \"./io.js\";\nfunction f(val user: User) {\n  save(user);\n  user.save();\n}\n";
+    assert_eq!(ok(src), src.replacen("val ", "", 1));
+    // A name declared twice with different signatures is ambiguous and
+    // drops out of the table rather than guessing.
+    let src = "\
+function apply(user: User) {}
+function apply(val user: User) {}
+function f(val user: User) {
+  apply(user);
+}
+";
+    assert_eq!(ok(src), src.replace("val ", ""));
+    // A computed argument is not an access path, so it is not checked.
+    let src = "\
+function update(user: User) { user.name = \"x\"; }
+function f(val user: User) {
+  update({ ...user });
+}
+";
+    assert_eq!(ok(src), src.replacen("val ", "", 1));
+}
+
+#[test]
+fn val_capability_check_reads_annotated_declarators() {
+    let e = err("\
+type Handler = (u: Box) => void;
+const update: Handler = (u) => { u.n = 1; };
+function f(val b: Box) {
+  update(b);
+}
+");
+    assert!(
+        e.message.contains("mutable parameter `u` of `update`"),
+        "{}",
+        e.message
+    );
+}

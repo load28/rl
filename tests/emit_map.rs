@@ -178,3 +178,21 @@ fn rl_import_specifiers_stay_untouched() {
     assert_eq!(m.code, src);
     assert_mapping_invariants(src, &m);
 }
+
+#[test]
+fn val_modifier_is_dropped_and_the_rest_keeps_mapping() {
+    // The editor serves the emitted text as a virtual TypeScript document,
+    // so the erased `val` must leave the surrounding bytes mapped exactly.
+    let src = "val const user = load();\nuser.name;\n";
+    let m = emit_mapped(src);
+    assert_eq!(m.code, "const user = load();\nuser.name;\n");
+    assert_mapping_invariants(src, &m);
+    // `user` in the declaration: source column 11 → output column 7
+    let at = src.find("user").unwrap();
+    assert_eq!(map_offset(&m, at), Some(m.code.find("user").unwrap()));
+    // a parameter modifier, mid-line
+    let src = "function read(val user: User) { return user.name; }\n";
+    let m = emit_mapped(src);
+    assert_eq!(m.code, "function read(user: User) { return user.name; }\n");
+    assert_mapping_invariants(src, &m);
+}

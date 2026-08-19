@@ -95,6 +95,7 @@ const HELP_TOPICS: &[(&str, &[&str], &str)] = &[
     ("if-let", &["iflet"], "## if let"),
     ("pipe", &["pipeline", "|>", "flow"], "## |>"),
     ("result", &["do", "result-block"], "## result block"),
+    ("val", &["mutation", "readonly"], "## val"),
     ("std", &["option"], "## @rl/std"),
     ("modules", &["imports"], "## Modules"),
     ("install", &["update"], "## Install"),

@@ -123,6 +123,8 @@ impl<'a> Emitter<'a> {
                 Segment::IfLet(stmt) => out.append(self.emit_if_let(stmt)),
                 Segment::Pipe(pipe) => out.append(self.emit_pipe(pipe)),
                 Segment::ResultBlock(block) => out.append(self.emit_result_block(block)),
+                // `val` is compile-time only — the keyword leaves no trace
+                Segment::ValModifier(_) => {}
                 Segment::RlImport(decl) => self.emit_rl_import(decl.spec, decl.kind, &mut out),
                 Segment::Template(template) => self.emit_template(template, &mut out),
             }

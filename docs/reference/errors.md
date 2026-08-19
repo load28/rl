@@ -167,6 +167,30 @@ const a = c ? x : y |> f;
 //      expressions; parenthesize ternaries and arrow functions)
 ```
 
+## `val`
+
+| 메시지 | 원인과 해결 |
+|--------|-------------|
+| `` cannot mutate through val binding `<이름>` (the binding is declared with `val`, so every access path from it is read-only) `` | `val` 바인딩에서 시작하는 경로로 대입·증감·`delete`를 했습니다. 위치는 경로의 **루트 식별자**. 변경이 필요하면 `val`을 빼거나, 변경 가능한 다른 바인딩을 통하거나, 새 값을 만들어 교체합니다(`val let`이면 재할당은 가능) |
+| `` cannot call mutating method `<메서드>` through val binding `<이름>` (...) `` | `push`/`set`/`add` 같은 변경 메서드를 `val` 경로로 호출했습니다. 이름 기준 판정이라 같은 이름의 사용자 메서드도 걸립니다 ([`language.md` §10.3](./language.md#103-변경으로-간주하는-문법)) |
+| `` cannot pass val binding `<이름>` to mutable parameter `<매개변수>` of `<함수>` (the parameter is not declared with `val`, so the function may mutate through it) `` | `val` 바인딩을 `val`이 아닌 매개변수로 넘겼습니다. 위치는 인자. 그 함수가 인자를 변경하지 않는다면 매개변수를 `val`로 선언합니다 ([`language.md` §10.4](./language.md#104-함수-경계)) |
+
+```rl
+val const user = { name: "Kim" };
+user.name = "Lee";
+// rlc: file.rl:2:1: cannot mutate through val binding `user` (the binding is
+//      declared with `val`, so every access path from it is read-only)
+```
+
+`val`이 없는 바인딩에는 아무 검사도 걸리지 않습니다 — 기존 TypeScript 그대로
+변경 가능합니다. `val` 바인딩 자체의 재할당(`x = v`)도 이 검사 대상이 아닙니다
+(`const`면 tsc가 잡습니다). 안쪽 스코프의 같은 이름 선언은 바깥 `val`을 가리므로
+섀도잉된 이름은 에러가 되지 않습니다 ([`language.md` §10.5](./language.md#105-스코프와-섀도잉)).
+
+`val`은 매개변수와 선언 앞에서만 수식자입니다. 그 밖의 `val`은 평범한
+식별자이므로 rl 구문으로 해석되지 않고 통과합니다 — `Ok(val user)` 같은 match
+패턴에 쓰면 그 match가 파싱되지 않아 아래 **출력 검증** 에러로 드러납니다.
+
 ## 출력 검증
 
 ```

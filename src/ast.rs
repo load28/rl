@@ -65,6 +65,13 @@ pub(crate) enum Segment {
     /// [`crate::ImportRewrite`]. The clause's imported names are recorded
     /// for the declaration-collection API ([`crate::rl_imports`]).
     RlImport(RlImportDecl),
+    /// A lifted `val` binding modifier (the keyword plus the spaces after
+    /// it). `val` is a compile-time-only modifier — codegen emits nothing
+    /// for this segment, so `val const x = 1;` becomes `const x = 1;`.
+    /// Which occurrences of the identifier `val` are modifiers is decided
+    /// structurally by [`crate::val::modifier_at`]; every other one stays
+    /// verbatim.
+    ValModifier(Span),
     /// A template literal; its interpolations are recursively parsed.
     Template(Template),
     /// An rl pipeline expression (`head |> step |> ...`).

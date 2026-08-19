@@ -76,8 +76,10 @@ rlc help all          # 가이드 전체 (별칭: guide)
 | `try` | — |
 | `let-else` | `letelse` |
 | `if-let` | `iflet` |
-| `pipe` | `pipeline`, `\|>` |
-| `std` | `option`, `result` |
+| `pipe` | `pipeline`, `\|>`, `flow` |
+| `result` | `do`, `result-block` |
+| `val` | `mutation`, `readonly` |
+| `std` | `option` |
 | `modules` | `imports` |
 | `install` | `update` |
 | `setup` | `init` |
