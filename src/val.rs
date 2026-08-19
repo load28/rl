@@ -25,12 +25,6 @@
 //!   root identifier of every mutation path, and checks calls whose callee
 //!   is a function declared in the same file.
 //!
-//! - [`method_calls`] — the *probe* half. A method call through a `val`
-//!   path (`items.push(1)`) may or may not mutate: that depends on what
-//!   the receiver is, which is a fact about a TypeScript type. rlc does
-//!   not guess it from the method's name; it collects the calls as
-//!   questions and `rlc --types` answers them with the real checker,
-//!   exactly as literal-match exhaustiveness does ([`crate::probe`]).
 //! - [`probes`] — the *delegated* form. [`check`]'s scope model answers
 //!   "which binding is this path rooted at?" itself; that is an
 //!   approximation of TypeScript's resolution, and shadowing and
@@ -348,31 +342,6 @@ struct ParamSig {
     is_val: bool,
 }
 
-/// One method call made through a `val` binding's access path — a
-/// *question*, not a verdict.
-///
-/// Whether `items.push(1)` mutates depends on what `items` is, so rlc
-/// reports nothing on its own: [`crate::val_method_calls`] collects these
-/// and `rlc --types` resolves the method against the receiver TypeScript
-/// actually inferred, reporting only the calls it can prove land on a
-/// built-in mutator.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValMethodCall {
-    /// Byte offset of the path's root identifier — where the diagnostic is
-    /// reported (see [`crate::line_col`]).
-    pub offset: usize,
-    /// The `val` binding the path is rooted at, for the message.
-    pub binding: String,
-    /// The method called.
-    pub method: String,
-    /// Byte offset of the method name in the source. The name is copied
-    /// verbatim into the output, so this maps through
-    /// [`crate::EmitMapping`]s to the node the checker is asked about.
-    pub name: usize,
-    /// Byte offset just past the method name.
-    pub name_end: usize,
-}
-
 /// One `val` binding, as a node a checker can resolve — half of the
 /// delegated form of `val`'s analysis ([`crate::val_probes`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,9 +462,6 @@ fn offset_in(src: &str, part: &str) -> usize {
 enum Sink<'a> {
     /// Report the first violation (the compile path).
     Report,
-    /// Collect built-in mutator calls through `val` paths, resolved with
-    /// rlc's own scope model ([`method_calls`]).
-    Calls(&'a RefCell<Vec<ValMethodCall>>),
     /// Collect bindings and mutations without pairing them ([`probes`]).
     Probes(&'a RefCell<ValProbes>),
 }
@@ -504,14 +470,6 @@ enum Sink<'a> {
 /// first violation, like every other rl-level check.
 pub(crate) fn check(src: &str, tokens: &[Token]) -> Result<(), RlError> {
     run(src, tokens, Sink::Report).map(|_| ())
-}
-
-/// Collects every candidate built-in mutator call made through a `val`
-/// path, in source order — the typed half's input. Never reports an error.
-pub(crate) fn method_calls(src: &str, tokens: &[Token]) -> Vec<ValMethodCall> {
-    let sink = RefCell::new(Vec::new());
-    let _ = run(src, tokens, Sink::Calls(&sink));
-    sink.into_inner()
 }
 
 /// Collects the file's `val` bindings and its mutations, unpaired — the
@@ -1320,9 +1278,6 @@ impl<'a> Checker<'a> {
                 });
                 return Ok(());
             }
-            if matches!(self.sink, Sink::Calls(_)) {
-                return Ok(());
-            }
             return Err(RlError::at(
                 offset,
                 format!(
@@ -1339,17 +1294,6 @@ impl<'a> Checker<'a> {
             && punct_at(tokens, path.end, b'(')
         {
             match self.sink {
-                // The candidate list is this legacy collector's own filter.
-                Sink::Calls(sink) if is_builtin_mutator_name(method) => {
-                    sink.borrow_mut().push(ValMethodCall {
-                        offset,
-                        binding: name.to_string(),
-                        method: method.to_string(),
-                        name: tokens[tok].span.start,
-                        name_end: tokens[tok].span.end,
-                    })
-                }
-                Sink::Calls(_) => {}
                 // Every call is collected; which ones count is the verdict's
                 // business ([`is_builtin_mutator_name`]), so a name outside
                 // the policy can never hide a question from the checker.

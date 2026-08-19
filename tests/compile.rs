@@ -2654,7 +2654,7 @@ fn val_never_calls_a_method_a_mutation_from_its_name() {
     // Whether `q.set(k)` mutates depends on what `q` is, and `compile` has
     // no types: a user-defined `set`/`add`/`push` must not be rejected on
     // its name alone (TASK-071). The typed path decides — see
-    // `val_method_calls_are_collected_for_the_typed_pass` below and the
+    // `val_probes_collect_every_method_call_for_the_verdict` below and the
     // `--types` tests in tests/cli.rs.
     for src in [
         "class Query {\n  set(key: string): Query {\n    return new Query();\n  }\n}\nval const query = new Query();\nquery.set(\"name\");\n",
@@ -2668,30 +2668,6 @@ fn val_never_calls_a_method_a_mutation_from_its_name() {
     ] {
         assert_eq!(ok(src), src.replacen("val ", "", 1), "{src}");
     }
-}
-
-#[test]
-fn val_method_calls_are_collected_for_the_typed_pass() {
-    // The name list survives only as a *question* filter: the calls a type
-    // checker could judge are collected, and nothing is decided here.
-    const SRC: &str = "\
-class Query { set(k: string): Query { return new Query(); } }
-val const query = new Query();
-query.set(\"name\");
-val const m = new Map<string, number>();
-m.set(\"a\", 1);
-m.get(\"a\");
-";
-    let calls = rlc::val_method_calls(SRC);
-    let seen: Vec<(&str, &str)> = calls
-        .iter()
-        .map(|c| (c.binding.as_str(), c.method.as_str()))
-        .collect();
-    // `get` mutates no built-in, so it is not even a question
-    assert_eq!(seen, [("query", "set"), ("m", "set")]);
-    // the diagnostic position is the path's root; the query is the method
-    assert_eq!(rlc::line_col(SRC, calls[1].offset), (5, 1));
-    assert_eq!(&SRC[calls[1].name..calls[1].name_end], "set");
 }
 
 #[test]
