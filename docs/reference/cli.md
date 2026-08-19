@@ -439,6 +439,43 @@ import 수집은 소진성 검사와 같은 1-홉입니다. 컴파일 모드와 
 - 다른 입력·모드와 조합되지 않습니다. VSCode 확장이 이 모드를 쓰며,
   서버가 없는 구형 rlc에는 one-shot 명령으로 폴백합니다.
 
+에디터 semantic API도 같은 프로토콜로 제공됩니다 — 엔진의 언어 서비스가
+답하며, 질문도 답도 **`.rl` 원본의 위치**(0-기반 line/character, UTF-16)
+입니다. 방출 TypeScript의 좌표는 프로토콜에 나타나지 않습니다.
+
+```
+openDocument / updateDocument { "path", "text" } → {}     // 버퍼가 디스크를 대신
+closeDocument { "path" } → {}                             // 다시 디스크로
+hover { "path", "position" }
+  → null | { "signature", "documentation", "range" }
+definition { "path", "position" } → { "locations": [{ "path", "range" }] }
+references { "path", "position" }
+  → { "locations": [{ "path", "range", "isDefinition" }] }
+completion { "path", "position", "member" }
+  → { "items": [{ "label", "kind", "sortText" }], "member", "probe" }
+completionResolve { "path", "position", "label", "probe"? }
+  → null | { "signature", "documentation" }
+rename { "path", "position" }
+  → { "edits": null | [{ "path", "range", "newText" }] }
+signatureHelp { "path", "position" } → null | { "signatures", ... }
+tsDiagnostics { "path" }
+  → { "diagnostics": [{ "range", "message", "code", "warning" }] }
+```
+
+- `completion`의 `member`(요청)는 커서가 멤버 접근 자리인지 — 그 자리에서
+  일반 답이 불가능하면 엔진이 **프로브**(`$rl_probe` 삽입 임시 projection)
+  로 답하고 `probe` 번호를 돌려줍니다. `completionResolve`에 그 번호를
+  되넘기면 같은 텍스트에 대해 해석됩니다.
+- `rename`의 `edits: null`은 "안전하게 할 수 없음"입니다 — 생성된 글루로
+  역매핑되지 않는 edit이 하나라도 있으면 전체를 거부합니다(부분 rename
+  없음). `newText`의 `rlRenamePlaceholder`가 새 이름 자리입니다.
+- `tsDiagnostics`는 파스 에러(코드 1000–1999)가 있는 텍스트(미완성 rl
+  구문)에는 아무것도 답하지 않고, 글루에 걸린 span은 버립니다 — 에러
+  계층 계약 그대로.
+- 필요한 TypeScript 언어 서버는 엔진이 스스로 해석·기동·재기동합니다
+  (해석 순서는 [컴파일러 해석](#컴파일러-해석)과 같고, `RLC_TSGO_BIN`이
+  최우선).
+
 ## 에디터 사이드카 (`--sidecar`, 저수준)
 
 `--types`의 마지막 단계만 따로 실행합니다. 선언 방출을 자체적으로 수행하는

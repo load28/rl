@@ -56,7 +56,7 @@ pub struct CheckRequest {
 /// One workspace's compiler state: documents, projections, and the session.
 #[derive(Debug)]
 pub struct Project {
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     tsconfig: Option<PathBuf>,
     /// The output tree a scan must not descend into (`--types`'s sidecar
     /// directory).
@@ -72,12 +72,15 @@ pub struct Project {
     /// [`crate::typescript::backend::Query::sources`].
     sources: Vec<PathBuf>,
     /// Unsaved text standing in for files on disk, keyed by canonical path.
-    overlays: HashMap<PathBuf, String>,
+    pub(crate) overlays: HashMap<PathBuf, String>,
     /// Projections by path, kept across snapshots. An entry is reused when
     /// the file's current text equals the projected text.
     cache: HashMap<PathBuf, Arc<ProjectedDocument>>,
     backend: NativeBackend,
     next_snapshot: u64,
+    /// The language-service half — the running `tsgo --lsp` conversation —
+    /// started by the first editor question ([`crate::engine::language`]).
+    pub(crate) service: Option<super::language::ServiceSession>,
 }
 
 impl Project {
@@ -101,6 +104,7 @@ impl Project {
             cache: HashMap::new(),
             backend,
             next_snapshot: 0,
+            service: None,
         }
     }
 

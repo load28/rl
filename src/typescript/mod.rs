@@ -26,3 +26,4 @@
 pub(crate) mod backend;
 pub(crate) mod mapper;
 pub(crate) mod native;
+pub(crate) mod service;

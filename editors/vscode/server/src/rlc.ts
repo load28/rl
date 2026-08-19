@@ -1,184 +1,17 @@
 /* --------------------------------------------------------------------------
- * Diagnostics come from the real compiler: the buffer is written to a temp
- * file and `rlc --check` is run on it, so editor errors are byte-for-byte
- * the compiler's own (`file:line:col: message` — docs/reference/errors.md).
+ * Diagnostics come from the real compiler: through the engine session
+ * (`rlc --server`, see engine.ts) when one is available, and through the
+ * one-shot commands otherwise — the two produce the same diagnostics, so
+ * the fallback is invisible. Editor errors are byte-for-byte the compiler's
+ * own (`file:line:col: message` — docs/reference/errors.md).
  * ----------------------------------------------------------------------- */
-import {
-  ChildProcess,
-  execFile,
-  execFileSync,
-  ExecFileSyncOptionsWithStringEncoding,
-  spawn,
-} from "child_process";
+import { execFile } from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-/* --------------------------------------------------------------------------
- * The engine server (`rlc --server`, docs/reference/cli.md): one persistent
- * process that answers check/emitMap/typedCheck requests as JSON lines. The
- * answers are the same the one-shot commands produce — the server exists so
- * a typed check reuses a running TypeScript session instead of opening the
- * project from scratch every 1.2 s. Every caller falls back to the one-shot
- * command when the server is unavailable (an older rlc, a crash), so
- * behavior never depends on it.
- * ----------------------------------------------------------------------- */
-
-interface EngineServer {
-  child: ChildProcess;
-  pending: Map<
-    number,
-    { resolve: (v: EngineAnswer) => void; timer: NodeJS.Timeout }
-  >;
-  nextId: number;
-  buffer: string;
-  alive: boolean;
-  /** Whether any request was ever answered — a server that dies before its
-   * first answer is an rlc without `--server`, and retrying is pointless. */
-  answered: boolean;
-}
-
-/** How a request ended: an engine result, an engine error (the session is
- * fine, the request failed), or null — the server itself is unavailable. */
-type EngineAnswer =
-  | { result: unknown }
-  | { error: string }
-  | null;
-
-let engineServer: EngineServer | null = null;
-let engineServerCompiler: string | null = null;
-/** Consecutive server losses without a single answer; two disable it. */
-let engineServerStrikes = 0;
-
-function engineServerFor(compiler: string): EngineServer | null {
-  if (engineServerStrikes >= 2) return null;
-  if (
-    engineServer &&
-    engineServer.alive &&
-    engineServerCompiler === compiler
-  ) {
-    return engineServer;
-  }
-  shutdownEngineServer();
-  let child: ChildProcess;
-  try {
-    child = spawn(compiler, ["--server"], {
-      stdio: ["pipe", "pipe", "ignore"],
-    });
-  } catch {
-    engineServerStrikes += 1;
-    return null;
-  }
-  const server: EngineServer = {
-    child,
-    pending: new Map(),
-    nextId: 1,
-    buffer: "",
-    alive: true,
-    answered: false,
-  };
-  const fail = () => {
-    if (!server.alive) return;
-    server.alive = false;
-    if (!server.answered) engineServerStrikes += 1;
-    for (const [, entry] of server.pending) {
-      clearTimeout(entry.timer);
-      entry.resolve(null);
-    }
-    server.pending.clear();
-  };
-  child.on("error", fail);
-  child.on("exit", fail);
-  child.stdout?.setEncoding("utf8");
-  child.stdout?.on("data", (chunk: string) => {
-    server.buffer += chunk;
-    let newline: number;
-    while ((newline = server.buffer.indexOf("\n")) !== -1) {
-      const line = server.buffer.slice(0, newline);
-      server.buffer = server.buffer.slice(newline + 1);
-      let message: { id?: number; result?: unknown; error?: string };
-      try {
-        message = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const entry =
-        typeof message.id === "number"
-          ? server.pending.get(message.id)
-          : undefined;
-      if (!entry) continue;
-      server.pending.delete(message.id as number);
-      clearTimeout(entry.timer);
-      server.answered = true;
-      engineServerStrikes = 0;
-      entry.resolve(
-        typeof message.error === "string"
-          ? { error: message.error }
-          : { result: message.result },
-      );
-    }
-  });
-  // The server must never keep the host process alive: it exits on its own
-  // when this process's end of stdin closes.
-  child.unref();
-  (child.stdin as unknown as { unref?: () => void })?.unref?.();
-  (child.stdout as unknown as { unref?: () => void })?.unref?.();
-  engineServer = server;
-  engineServerCompiler = compiler;
-  return server;
-}
-
-function engineRequest(
-  compiler: string,
-  method: string,
-  params: unknown,
-  timeoutMs: number,
-): Promise<EngineAnswer> {
-  const server = engineServerFor(compiler);
-  if (!server || !server.child.stdin?.writable) {
-    return Promise.resolve(null);
-  }
-  const id = server.nextId++;
-  return new Promise((resolve) => {
-    // The timeout stays ref'd on purpose: while a request is in flight it
-    // is the one handle keeping the event loop alive (the child and its
-    // pipes are unref'd so an *idle* server never holds the process open).
-    const timer = setTimeout(() => {
-      server.pending.delete(id);
-      resolve(null);
-    }, timeoutMs);
-    server.pending.set(id, { resolve, timer });
-    server.child.stdin?.write(
-      JSON.stringify({ id, method, params }) + "\n",
-      (err) => {
-        if (err) {
-          const entry = server.pending.get(id);
-          if (entry) {
-            server.pending.delete(id);
-            clearTimeout(entry.timer);
-            resolve(null);
-          }
-        }
-      },
-    );
-  });
-}
-
-/** Ends the engine server, if one is running. Tests call this so the
- * process can exit; the language server just dies with its client. */
-export function shutdownEngineServer(): void {
-  if (engineServer) {
-    try {
-      engineServer.child.kill();
-    } catch {
-      // already gone
-    }
-    engineServer.alive = false;
-    engineServer = null;
-    engineServerCompiler = null;
-  }
-}
+import { engineRequest } from "./engine";
 
 /** A typed check opens a project and starts a compiler; it is slower than
  * `--check` by that much, and a project that will not open must not hold the
@@ -236,11 +69,12 @@ export function findCompiler(
 }
 
 /**
- * The `tsgo` executable the TypeScript delegation runs, from the same places
- * the compiler looks: a built typescript-go checkout named by
- * `RLC_TSGO_ROOT`, or the executable an installed `typescript` package ships
- * beside its own files. Empty when there is none — the delegation then has
- * no answers, which the caller reports rather than hides.
+ * Whether a TypeScript language toolchain is around, from the same places
+ * the engine looks: a built typescript-go checkout named by
+ * `RLC_TSGO_ROOT`, or the executable an installed TypeScript package ships
+ * beside its own files. The engine resolves its own; this mirror exists so
+ * the tests can tell "the feature answered nothing" from "the toolchain is
+ * missing" — and skip, not fail, on the latter.
  */
 export function findTsgo(workspaceRoots: string[]): string {
   const root = process.env.RLC_TSGO_ROOT;
@@ -249,9 +83,6 @@ export function findTsgo(workspaceRoots: string[]): string {
     if (exists(built)) return built;
   }
   const platform = `${process.platform}-${process.arch}`;
-  // The workspace first — a project that pins a TypeScript pins the
-  // compiler its own code is checked by — and the server's own directory
-  // after it, which is where a toolchain installed for the editor sits.
   for (const start of [...workspaceRoots, process.cwd()]) {
     let dir = start;
     while (true) {
@@ -434,84 +265,6 @@ export function runSymbols(
   });
 }
 
-/* ----------------------------------------------------------------------
- * Emit map (`rlc --emit-map`, docs/reference/cli.md): the compiler emits
- * the buffer's TypeScript (parse + emit only — no rl-level checks, `.rl`
- * specifiers untouched) plus byte mappings for every chunk copied verbatim
- * from the source. The server serves this as the buffer's virtual document
- * to the TypeScript language service (TASK-050).
- * -------------------------------------------------------------------- */
-
-export interface EmitMapResult {
-  code: string;
-  mappings: { src: number; out: number; len: number }[];
-}
-
-/**
- * Run `rlc --emit-map` on the buffer contents. Returns null when the
- * compiler is missing, predates `--emit-map`, or the output is
- * unparseable — callers degrade to serving the raw text.
- */
-export async function runEmitMap(
-  compiler: string,
-  text: string,
-  docName: string,
-): Promise<EmitMapResult | null> {
-  const answer = await engineRequest(compiler, "emitMap", { text }, 15000);
-  if (answer && "result" in answer) {
-    const result = answer.result as EmitMapResult;
-    if (typeof result.code === "string") {
-      return { code: result.code, mappings: result.mappings ?? [] };
-    }
-  }
-  return runEmitMapOnce(compiler, text, docName);
-}
-
-/** The one-shot `rlc --emit-map`, via a temp file. */
-function runEmitMapOnce(
-  compiler: string,
-  text: string,
-  docName: string,
-): Promise<EmitMapResult | null> {
-  const rawBase = path.basename(docName).replace(/[^\w.-]/g, "_") || "buffer";
-  const base = rawBase.endsWith(".rl") ? rawBase : `${rawBase}.rl`;
-  const hash = crypto.createHash("sha1").update(docName).digest("hex");
-  const file = path.join(tempDir(), `em-${hash.slice(0, 8)}-${base}`);
-
-  try {
-    fs.writeFileSync(file, text);
-  } catch {
-    return Promise.resolve(null);
-  }
-
-  return new Promise((resolve) => {
-    execFile(
-      compiler,
-      ["--emit-map", file],
-      { timeout: 15000, maxBuffer: 64 * 1024 * 1024 },
-      (err, stdout) => {
-        if (err) {
-          resolve(null);
-          return;
-        }
-        try {
-          const parsed = JSON.parse(String(stdout)) as (EmitMapResult & {
-            file: string;
-          })[];
-          const entry = parsed[0];
-          resolve(
-            entry && typeof entry.code === "string"
-              ? { code: entry.code, mappings: entry.mappings ?? [] }
-              : null,
-          );
-        } catch {
-          resolve(null);
-        }
-      },
-    );
-  });
-}
-
 /**
  * The typed half of the rl diagnostics, for the buffer as it stands.
  *
@@ -519,16 +272,8 @@ function runEmitMapOnce(
  * it cannot decide is what a TypeScript *type* says — whether `m.set(...)`
  * calls a built-in mutator through a `val` binding, whether a scrutinee's
  * type still allows a case (`language.md` §10.4). Those answers come from
- * the real compiler, which `rlc --check-types` drives over the project.
- *
- * Two flags make that mode usable from an editor:
- *
- * - `--overlay <path>` puts the unsaved buffer in the project *at its own
- *   path*, so its imports and the imports naming it resolve as they do on
- *   disk while its text is the one being edited. The text goes on stdin.
- * - `--rl-only` drops the TypeScript layer, which the language server
- *   already answers over the virtual document — reporting it here too would
- *   draw every type error twice.
+ * the engine's typed pass over the live project, or — as the fallback —
+ * from `rlc --check-types --rl-only --overlay`.
  *
  * Every message is the compiler's own, verbatim: the editor decides nothing
  * about `val`, it relays what rlc said (CLAUDE.md, error layers).
@@ -549,7 +294,7 @@ export async function runTypedCheck(
   if (!exists(fsPath)) {
     return { kind: "unavailable", detail: "not on disk yet" };
   }
-  // The engine server keeps the project — and the TypeScript compiler
+  // The engine session keeps the project — and the TypeScript compiler
   // behind it — alive between checks, so this answers in milliseconds
   // where the one-shot pays a project open every time. Same diagnostics
   // either way; the outcome mapping below mirrors the one-shot's exactly.
@@ -665,125 +410,4 @@ export function parseStderr(stderr: string, file: string): RlcDiagnostic[] {
     if (m) diagnostics.push({ line: 0, col: 0, message: m[1] });
   }
   return diagnostics;
-}
-
-/* --------------------------------------------------------------------------
- * Synchronous compiler calls for the TypeScript language-service host
- * (TASK-055). The host's `readFile`/`fileExists` are synchronous, so the two
- * things it needs from the compiler — the standard library module and the
- * emitted TypeScript of an imported `.rl` file — are produced with
- * `execFileSync` and cached. Both are keyed so a call happens at most once
- * per compiler path (std) or per file mtime (modules).
- * -------------------------------------------------------------------- */
-
-const EXEC_SYNC_OPTIONS: ExecFileSyncOptionsWithStringEncoding = {
-  encoding: "utf8",
-  timeout: 15000,
-  maxBuffer: 64 * 1024 * 1024,
-  // stderr stays out of the server's own stderr; only stdout is read.
-  stdio: ["ignore", "pipe", "ignore"],
-};
-
-const stdModules = new Map<string, string | null>();
-
-/**
- * The standard library module (`rlc --emit-std`) materialized in the temp
- * directory, so `"@rl/std"` resolves to a real file even in a project that
- * has never run `rlc --types`. Null when the compiler is missing or
- * predates `--emit-std` — the caller then leaves the specifier unresolved.
- */
-/**
- * Makes `"@rl/std"` resolvable in `root`, by putting the standard library
- * where TypeScript looks for a package of that name.
- *
- * The compiler serves the library from memory; a language server cannot —
- * module resolution reads the file system, not the buffers a client has
- * opened. So for the editor the library has to *be* there. Only our own
- * scoped package is ever written, and never over one that already exists:
- * a project that installs `@rl/std` itself keeps its own copy.
- *
- * Returns the package directory, or null when the library could not be
- * produced (no compiler) or already resolves on its own.
- */
-export function ensureStdModule(compiler: string, root: string): string | null {
-  const pkg = path.join(root, "node_modules", "@rl", "std");
-  const entry = path.join(pkg, "index.ts");
-  if (exists(entry)) return pkg;
-  if (exists(pkg)) return null; // something else owns the name
-
-  const source = stdModuleSource(compiler);
-  if (source === null) return null;
-  try {
-    fs.mkdirSync(pkg, { recursive: true });
-    fs.writeFileSync(entry, source);
-    fs.writeFileSync(
-      path.join(pkg, "package.json"),
-      JSON.stringify({ name: "@rl/std", version: "0.0.0", types: "index.ts" }, null, 2) + "\n",
-    );
-    return pkg;
-  } catch {
-    return null;
-  }
-}
-
-/** The standard library's source, as the compiler writes it. */
-function stdModuleSource(compiler: string): string | null {
-  try {
-    const code = String(execFileSync(compiler, ["--emit-std"], EXEC_SYNC_OPTIONS));
-    return code.trim() === "" ? null : code;
-  } catch {
-    return null;
-  }
-}
-
-export function stdModulePath(compiler: string): string | null {
-  const cached = stdModules.get(compiler);
-  if (cached !== undefined) return cached;
-
-  let resolved: string | null = null;
-  try {
-    const code = String(
-      execFileSync(compiler, ["--emit-std"], EXEC_SYNC_OPTIONS),
-    );
-    if (code.trim() !== "") {
-      const hash = crypto.createHash("sha1").update(compiler).digest("hex");
-      const file = path.join(tempDir(), `std-${hash.slice(0, 8)}.ts`);
-      fs.writeFileSync(file, code);
-      resolved = file;
-    }
-  } catch {
-    resolved = null;
-  }
-  stdModules.set(compiler, resolved);
-  return resolved;
-}
-
-/**
- * `rlc --emit-map` for an `.rl` file on disk — an imported module the editor
- * does not have open. Serving its emitted TypeScript (instead of the raw
- * source, which TypeScript can only error-recover through) is what makes an
- * imported rl enum a tagged union rather than a misparsed TS `enum`.
- * Null when the compiler is missing, too old, or the output is unparseable.
- */
-export function runEmitMapFileSync(
-  compiler: string,
-  file: string,
-): EmitMapResult | null {
-  let stdout: string;
-  try {
-    stdout = String(
-      execFileSync(compiler, ["--emit-map", file], EXEC_SYNC_OPTIONS),
-    );
-  } catch {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(stdout) as (EmitMapResult & { file: string })[];
-    const entry = parsed[0];
-    return entry && typeof entry.code === "string"
-      ? { code: entry.code, mappings: entry.mappings ?? [] }
-      : null;
-  } catch {
-    return null;
-  }
 }

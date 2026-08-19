@@ -38,16 +38,34 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use rlc::engine::{CheckRequest, Engine, Project, ProjectOptions};
+use rlc::engine::{
+    CheckRequest, CompletionAnswer, Engine, Location, Position, Project, ProjectOptions, Range,
+};
+
+/// A project's identity: the `(tsconfig, root)` pair it was opened as.
+type Identity = (Option<PathBuf>, PathBuf);
+
+/// Everything the server keeps between requests.
+struct Sessions {
+    engine: Engine,
+    /// One live project per identity — the map a server exists to keep.
+    projects: HashMap<Identity, Project>,
+    /// The documents a consumer holds open, and which project each landed
+    /// in — so `closeDocument` releases the right overlay, and a
+    /// `typedCheck` for an open document leaves its overlay in place.
+    docs: HashMap<PathBuf, Identity>,
+}
 
 /// Runs the server until stdin closes.
 pub(crate) fn run(node: Option<PathBuf>) -> ExitCode {
-    let engine = Engine::new(node);
-    // One live project per identity — the map a server exists to keep.
-    let mut projects: HashMap<(Option<PathBuf>, PathBuf), Project> = HashMap::new();
+    let mut sessions = Sessions {
+        engine: Engine::new(node),
+        projects: HashMap::new(),
+        docs: HashMap::new(),
+    };
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -59,7 +77,7 @@ pub(crate) fn run(node: Option<PathBuf>) -> ExitCode {
         if line.trim().is_empty() {
             continue;
         }
-        let response = respond(&engine, &mut projects, &line);
+        let response = respond(&mut sessions, &line);
         let mut out = stdout.lock();
         if writeln!(out, "{response}")
             .and_then(|_| out.flush())
@@ -72,11 +90,7 @@ pub(crate) fn run(node: Option<PathBuf>) -> ExitCode {
 }
 
 /// One request, one answer — errors included, so the session survives them.
-fn respond(
-    engine: &Engine,
-    projects: &mut HashMap<(Option<PathBuf>, PathBuf), Project>,
-    line: &str,
-) -> serde_json::Value {
+fn respond(sessions: &mut Sessions, line: &str) -> serde_json::Value {
     use serde_json::json;
     let request: serde_json::Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -87,13 +101,217 @@ fn respond(
     let result = match request["method"].as_str().unwrap_or_default() {
         "check" => check(params),
         "emitMap" => emit_map(params),
-        "typedCheck" => typed_check(engine, projects, params),
+        "typedCheck" => typed_check(sessions, params),
+        "openDocument" | "updateDocument" => open_document(sessions, params),
+        "closeDocument" => close_document(sessions, params),
+        "hover" => semantic(sessions, params, |project, path, position| {
+            Ok(match project.hover(path, position)? {
+                None => serde_json::Value::Null,
+                Some(info) => json!({
+                    "signature": info.signature,
+                    "documentation": info.documentation,
+                    "range": range_json(info.range),
+                }),
+            })
+        }),
+        "definition" => semantic(sessions, params, |project, path, position| {
+            let locations: Vec<_> = project
+                .definition(path, position)?
+                .into_iter()
+                .map(location_json)
+                .collect();
+            Ok(json!({ "locations": locations }))
+        }),
+        "references" => semantic(sessions, params, |project, path, position| {
+            let locations: Vec<_> = project
+                .references(path, position)?
+                .into_iter()
+                .map(|reference| {
+                    let mut value = location_json(reference.location);
+                    value["isDefinition"] = json!(reference.is_definition);
+                    value
+                })
+                .collect();
+            Ok(json!({ "locations": locations }))
+        }),
+        "completion" => semantic(sessions, params, |project, path, position| {
+            let member = params["member"].as_bool().unwrap_or(false);
+            let CompletionAnswer {
+                items,
+                member,
+                probe,
+            } = project.completion(path, position, member)?;
+            Ok(json!({
+                "items": items.iter().map(|item| json!({
+                    "label": item.label,
+                    "kind": item.kind,
+                    "sortText": item.sort_text,
+                })).collect::<Vec<_>>(),
+                "member": member,
+                "probe": probe,
+            }))
+        }),
+        "completionResolve" => semantic(sessions, params, |project, path, position| {
+            let label = params["label"].as_str().unwrap_or_default();
+            let probe = params["probe"].as_u64();
+            Ok(
+                match project.completion_resolve(path, position, label, probe)? {
+                    None => serde_json::Value::Null,
+                    Some(detail) => json!({
+                        "signature": detail.signature,
+                        "documentation": detail.documentation,
+                    }),
+                },
+            )
+        }),
+        "rename" => semantic(sessions, params, |project, path, position| {
+            Ok(match project.rename(path, position)? {
+                None => json!({ "edits": serde_json::Value::Null }),
+                Some(edits) => json!({
+                    "edits": edits.into_iter().map(|edit| {
+                        let mut value = location_json(edit.location);
+                        value["newText"] = match edit.new_text {
+                            Some(text) => json!(text),
+                            None => serde_json::Value::Null,
+                        };
+                        value
+                    }).collect::<Vec<_>>(),
+                }),
+            })
+        }),
+        "signatureHelp" => semantic(sessions, params, |project, path, position| {
+            Ok(match project.signature_help(path, position)? {
+                None => serde_json::Value::Null,
+                Some(help) => json!({
+                    "signatures": help.signatures.iter().map(|signature| json!({
+                        "label": signature.label,
+                        "documentation": signature.documentation,
+                        "parameters": signature.parameters.iter().map(|parameter| json!({
+                            "label": [parameter.label.0, parameter.label.1],
+                            "documentation": parameter.documentation,
+                        })).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+                    "activeSignature": help.active_signature,
+                    "activeParameter": help.active_parameter,
+                }),
+            })
+        }),
+        "tsDiagnostics" => semantic(sessions, params, |project, path, _position| {
+            let diagnostics: Vec<_> = project
+                .service_diagnostics(path)?
+                .into_iter()
+                .map(|d| {
+                    json!({
+                        "range": range_json(d.range),
+                        "message": d.message,
+                        "code": d.code,
+                        "warning": d.warning,
+                    })
+                })
+                .collect();
+            Ok(json!({ "diagnostics": diagnostics }))
+        }),
         method => Err(format!("unknown method \"{method}\"")),
     };
     match result {
         Ok(result) => json!({ "id": id, "result": result }),
         Err(error) => json!({ "id": id, "error": error }),
     }
+}
+
+/// Routes a semantic request to the live project the file belongs to. The
+/// position defaults to 0:0 for the requests that do not carry one.
+fn semantic(
+    sessions: &mut Sessions,
+    params: &serde_json::Value,
+    handle: impl FnOnce(&mut Project, &Path, Position) -> Result<serde_json::Value, String>,
+) -> Result<serde_json::Value, String> {
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?
+        .to_string();
+    let position = Position {
+        line: params["position"]["line"].as_u64().unwrap_or(0) as u32,
+        character: params["position"]["character"].as_u64().unwrap_or(0) as u32,
+    };
+    let project = project_for(sessions, &path)?;
+    handle(project, Path::new(&path), position)
+}
+
+/// The live project `path` belongs to, opened on first use.
+fn project_for<'a>(sessions: &'a mut Sessions, path: &str) -> Result<&'a mut Project, String> {
+    let inputs = vec![path.to_string()];
+    let options = ProjectOptions::default();
+    let identity = Engine::project_identity(&inputs, &options)?;
+    match sessions.projects.entry(identity) {
+        std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            Ok(entry.insert(sessions.engine.open_project(&inputs, &options)?))
+        }
+    }
+}
+
+/// `openDocument` / `updateDocument`: the consumer's buffer stands in for
+/// the file, in whichever project it belongs to, until `closeDocument`.
+fn open_document(
+    sessions: &mut Sessions,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?
+        .to_string();
+    let text = text_param(params)?.to_string();
+    let canonical = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("{path}: {e}"))?;
+    let inputs = vec![path.to_string()];
+    let options = ProjectOptions::default();
+    let identity = Engine::project_identity(&inputs, &options)?;
+    let project = match sessions.projects.entry(identity.clone()) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(sessions.engine.open_project(&inputs, &options)?)
+        }
+    };
+    project.open_document(canonical.clone(), text);
+    sessions.docs.insert(canonical, identity);
+    Ok(serde_json::json!({}))
+}
+
+/// `closeDocument`: the file's text is the disk's again.
+fn close_document(
+    sessions: &mut Sessions,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?;
+    let canonical = PathBuf::from(path)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(path));
+    if let Some(identity) = sessions.docs.remove(&canonical)
+        && let Some(project) = sessions.projects.get_mut(&identity)
+    {
+        project.close_document(&canonical);
+    }
+    Ok(serde_json::json!({}))
+}
+
+/// A [`Range`] as the JSON the protocol speaks.
+fn range_json(range: Range) -> serde_json::Value {
+    serde_json::json!({
+        "start": { "line": range.start.line, "character": range.start.character },
+        "end": { "line": range.end.line, "character": range.end.character },
+    })
+}
+
+/// A [`Location`] as the JSON the protocol speaks.
+fn location_json(location: Location) -> serde_json::Value {
+    serde_json::json!({
+        "path": location.path,
+        "range": range_json(location.range),
+    })
 }
 
 /// `--check` for a buffer: rl-level diagnostics from the text alone.
@@ -128,34 +346,25 @@ fn emit_map(params: &serde_json::Value) -> Result<serde_json::Value, String> {
 /// `--check-types --rl-only --overlay <path>` for a buffer, against the live
 /// project it belongs to.
 fn typed_check(
-    engine: &Engine,
-    projects: &mut HashMap<(Option<PathBuf>, PathBuf), Project>,
+    sessions: &mut Sessions,
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use serde_json::json;
     let path = params["path"]
         .as_str()
-        .ok_or_else(|| "typedCheck needs a \"path\"".to_string())?;
-    let text = text_param(params)?;
-    let canonical = PathBuf::from(path)
+        .ok_or_else(|| "typedCheck needs a \"path\"".to_string())?
+        .to_string();
+    let text = text_param(params)?.to_string();
+    let canonical = PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| format!("--overlay {path}: {e}"))?;
+    // A document the consumer holds open keeps its overlay after the check;
+    // a one-off buffer's overlay is scoped to this request, so the answer
+    // stays stateless while the projection cache keeps the incremental win.
+    let registered = sessions.docs.contains_key(&canonical);
+    let project = project_for(sessions, &path)?;
 
-    let inputs = vec![path.to_string()];
-    let options = ProjectOptions::default();
-    let identity = Engine::project_identity(&inputs, &options)?;
-    let project = match projects.entry(identity) {
-        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(engine.open_project(&inputs, &options)?)
-        }
-    };
-
-    // The overlay is scoped to this request: the *answer* is stateless (a
-    // fallen-back one-shot sees the same project), while the projection
-    // cache keeps the incremental win — the same buffer next time is a
-    // text-equality hit, not a recompile.
-    project.open_document(canonical.clone(), text.to_string());
+    project.open_document(canonical.clone(), text);
     let files = {
         let scanned = project.scan().map_err(|e| e.to_string())?;
         if scanned.is_empty() {
@@ -185,7 +394,9 @@ fn typed_check(
             );
             match checked {
                 Err(e) => {
-                    project.close_document(&canonical);
+                    if !registered {
+                        project.close_document(&canonical);
+                    }
                     return Err(e);
                 }
                 Ok(checked) => {
@@ -207,7 +418,9 @@ fn typed_check(
             }
         }
     };
-    project.close_document(&canonical);
+    if !registered {
+        project.close_document(&canonical);
+    }
     Ok(response)
 }
 

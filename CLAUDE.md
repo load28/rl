@@ -35,7 +35,8 @@ Rust 스타일 `enum`(태그드 유니언), `match` 표현식(or-패턴·가드�
 ```
 src/
   main.rs        CLI 진입점 — 인자 파싱, 배치 빌드, typed 모드는 engine 소비
-  server.rs      rlc --server — 엔진 세션을 지속시키는 JSON-lines 서버 (에디터용)
+  server.rs      rlc --server — 엔진 세션을 지속시키는 JSON-lines 서버:
+                 check/emitMap/typedCheck + 문서 lifecycle + 에디터 semantic API
   lib.rs         공개 API: compile(...) + engine (Engine/Project/Snapshot)
   engine/
     mod.rs       Engine — 툴체인 발견과 프로젝트 열기 (라이브러리 진입점)
@@ -45,10 +46,15 @@ src/
                  Query 조립 (rl↔TS 좌표 매핑의 유일한 소유자)
     semantics.rs RL-owned 결과 타입 (Diagnostic/Checked/Declarations)과
                  checker 답의 진단화 (문안·순서의 단일 원천)
+    language.rs  에디터 semantic API — hover/definition/references/completion
+                 (프로브 포함)/rename(원자성)/signatureHelp/tsDiagnostics,
+                 질문·답 모두 .rl 좌표 (lsp-architecture.md)
   typescript/
     mod.rs       계층 설명 — backend가 seam, native가 도달 방법
     backend.rs   TypeScriptBackend seam — Query/Answers, rl의 용어로만
     native.rs    tsgo API server 도달 방법 (불안정성을 여기 가둔다)
+    service.rs   tsgo --lsp 도달 방법 — language-service 표면 (API 서버에
+                 없는 hover/rename 등; 역시 여기 가둔다)
     mapper.rs    .rl 바이트 ↔ 방출 TS 바이트 ↔ UTF-16 좌표
     host.mjs     tsgo API를 부르는 Node host (layered FS, 증분 snapshot, batch)
   error.rs       CompileError(공개) / RlError(내부, 바이트 오프셋) / line_col

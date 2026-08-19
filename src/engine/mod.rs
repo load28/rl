@@ -39,11 +39,17 @@
 //! }
 //! ```
 
+mod language;
 mod project;
 mod projection;
 mod semantics;
 mod snapshot;
 
+pub use language::{
+    CompletionAnswer, CompletionDetail, CompletionItem, HoverInfo, Location, Position,
+    RENAME_PLACEHOLDER, Range, Reference, RenameEdit, ServiceDiagnostic, Signature, SignatureHelp,
+    SignatureParameter,
+};
 pub use project::{Blocked, CheckRequest, Project, collect_sources};
 pub use projection::ProjectedDocument;
 pub use semantics::{Checked, Declarations, Diagnostic, ModuleDeclaration};
