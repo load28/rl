@@ -9,7 +9,7 @@
 //! emission — belongs to no `.rl` byte, and a diagnostic landing there is
 //! reported without a mapped position rather than at a made-up one.
 
-use rlc::EmitMapping;
+use crate::EmitMapping;
 
 /// Offset of `byte` in `text`, counted in UTF-16 code units — TypeScript's
 /// own coordinate space. An offset past the end clamps to the end.

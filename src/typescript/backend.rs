@@ -34,7 +34,7 @@ pub(crate) struct LiteralQuery {
     /// UTF-16 offset of the scrutinee in that module.
     pub position: usize,
     /// The literals the match's unguarded arms cover.
-    pub covered: Vec<rlc::Literal>,
+    pub covered: Vec<crate::Literal>,
 }
 
 /// "Which case tags does the scrutinee's type still allow?" — the same
@@ -108,7 +108,7 @@ pub(crate) struct Diagnostic {
 pub(crate) struct LiteralMissing {
     /// Index into [`Query::literals`].
     pub index: usize,
-    pub missing: Vec<rlc::Literal>,
+    pub missing: Vec<crate::Literal>,
 }
 
 /// The case tags a [`TagQuery`]'s arms fail to cover, under the same

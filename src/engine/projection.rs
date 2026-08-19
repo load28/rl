@@ -1,104 +1,95 @@
-//! The one project graph.
+//! The projection — rl's own layer between a source and the type checker.
 //!
-//! rlc lowers every `.rl` file to ordinary TypeScript and hands those modules
-//! to the compiler *as part of the user's own project* — the same
-//! `tsconfig.json`, the same `lib`, the same module resolution, the same
-//! `node_modules`. Hand-written `.ts` files are not handed over at all: they
-//! are already on disk, where the compiler reads them. That is what makes a
-//! `.ts` file and an `.rl` file see each other.
+//! An `.rl` file enters the TypeScript project as ordinary TypeScript. The
+//! [`ProjectedDocument`] is that fact made first-class: one file's source
+//! text, the module it becomes, the byte-exact mappings between the two, and
+//! every question the file wants asked of the checker (match probes, `val`
+//! probes) — computed **once per content version** and reused across
+//! snapshots. This is where the engine's incrementality lives: a file whose
+//! text did not change between two snapshots costs nothing to re-project.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use rlc::{EmitMapping, MappedEmit, Options};
+use crate::typescript::backend::{LiteralQuery, Module, Query, SymbolQuery, TagQuery};
+use crate::typescript::mapper;
+use crate::{CompileError, LiteralMatch, MappedEmit, Options, TagMatch, ValProbes};
 
-use super::backend::*;
-use super::mapper;
-
-/// One `.rl` file as both halves of the pipeline see it: the source the user
-/// wrote, and the TypeScript the compiler is given.
-#[derive(Debug, Clone)]
-pub(crate) struct Lowered {
+/// One `.rl` file as every consumer of the engine sees it: the source the
+/// user wrote, and the TypeScript the compiler is given — plus everything
+/// the engine derives from the text, cached with it.
+#[derive(Debug)]
+pub struct ProjectedDocument {
     /// The `.rl` file.
     pub source_path: PathBuf,
     /// The source text — the coordinate space diagnostics are reported in.
     pub source: String,
     /// The path the lowered module occupies in the project: the same place,
-    /// with a `.ts` extension.
-    pub module_path: PathBuf,
+    /// with a `.ts` extension (`src/token.rl` → `src/token.rl.ts`).
+    pub(crate) module_path: PathBuf,
     /// The emitted TypeScript and its verbatim-chunk mappings.
-    pub emit: MappedEmit,
+    pub(crate) emit: MappedEmit,
+    /// Whether the file imports `@rl/std` — decides whether the standard
+    /// library joins the project graph.
+    pub(crate) imports_std: bool,
+    /// The literal-match exhaustiveness probes of this file.
+    pub(crate) literal_probes: Vec<LiteralMatch>,
+    /// The tag-match exhaustiveness probes of this file.
+    pub(crate) tag_probes: Vec<TagMatch>,
+    /// The `val` bindings, mutations, declarations and passes of this file,
+    /// unpaired — pairing is symbol identity, the checker's answer.
+    pub(crate) val: ValProbes,
 }
 
-impl Lowered {
-    /// The module path an `.rl` file takes in the project graph: its own
-    /// path with `.ts` appended, so `src/token.rl` becomes
-    /// `src/token.rl.ts`.
-    ///
-    /// This is what makes the whole arrangement need no configuration. A
-    /// specifier written `"./token.rl"` — which is what a hand-written `.ts`
-    /// and an `.rl` alike write — resolves to `token.rl.ts` by ordinary
-    /// TypeScript resolution, with no `allowImportingTsExtensions`, no
-    /// `paths`, and no rewriting. And the declaration the compiler emits for
-    /// it lands on `token.rl.d.ts`, which is exactly the editor sidecar the
-    /// same specifier resolves to when no compiler is running.
-    fn module_path_of(source_path: &Path) -> PathBuf {
-        let mut name = source_path.as_os_str().to_os_string();
-        name.push(".ts");
-        PathBuf::from(name)
-    }
-}
-
-/// Lowers every `.rl` file for the project graph. A file that fails an
-/// rl-level check is returned as an error with its own position — rl
-/// diagnostics come first and are never delegated.
-/// `overlay` substitutes text for a file's contents on disk, keyed by the
-/// canonical path. It is how an editor has the buffer it is showing checked
-/// as part of the project it belongs to: the module keeps its real path — so
-/// its imports, and the imports that name it, resolve exactly as they do on
-/// disk — and only its text is the unsaved one.
-pub(crate) fn lower(
-    files: &[PathBuf],
-    overlay: &HashMap<PathBuf, String>,
-) -> Result<Vec<Lowered>, (PathBuf, rlc::CompileError)> {
-    let mut out = Vec::with_capacity(files.len());
-    for file in files {
-        let source = match overlay.get(file) {
-            Some(text) => text.clone(),
-            None => std::fs::read_to_string(file).map_err(|e| {
-                (
-                    file.clone(),
-                    rlc::CompileError {
-                        message: format!("cannot read: {e}"),
-                        filename: Some(file.display().to_string()),
-                        line: 0,
-                        col: 0,
-                    },
-                )
-            })?,
-        };
+impl ProjectedDocument {
+    /// Projects one file: lowers it to ordinary TypeScript and derives every
+    /// probe the typed pass will ask about. An rl-level error is the file's
+    /// own, with its position.
+    pub(crate) fn project(
+        source_path: &Path,
+        source: String,
+    ) -> Result<ProjectedDocument, CompileError> {
         let options = Options {
-            filename: Some(file.to_str().unwrap_or("<input>")),
+            filename: Some(source_path.to_str().unwrap_or("<input>")),
             // Exhaustiveness and `val`'s pairing are the checker's answers
             // here — see `Options::defer_to_checker`.
             defer_to_checker: true,
             // Specifiers stay exactly as written. `"./token.rl"` already
-            // names the lowered module ([`Lowered::module_path_of`]), and
-            // `"@rl/std"` already names the standard library ([`STD_MODULE`])
-            // — so the declarations the compiler emits are usable as they
-            // are, by a consumer that never sees this compile.
-            rewrite_imports: rlc::ImportRewrite::Off,
+            // names the lowered module ([`module_path_of`]), and `"@rl/std"`
+            // already names the standard library ([`STD_MODULE`]) — so the
+            // declarations the compiler emits are usable as they are, by a
+            // consumer that never sees this compile.
+            rewrite_imports: crate::ImportRewrite::Off,
             ..Options::default()
         };
-        let emit = rlc::compile_mapped(&source, &options).map_err(|e| (file.clone(), e))?;
-        out.push(Lowered {
-            module_path: Lowered::module_path_of(file),
-            source_path: file.clone(),
+        let emit = crate::compile_mapped(&source, &options)?;
+        Ok(ProjectedDocument {
+            module_path: module_path_of(source_path),
+            imports_std: crate::imports_std(&source),
+            literal_probes: crate::literal_matches(&source),
+            tag_probes: crate::tag_matches(&source),
+            val: crate::val_probes(&source),
+            source_path: source_path.to_path_buf(),
             source,
             emit,
-        });
+        })
     }
-    Ok(out)
+}
+
+/// The module path an `.rl` file takes in the project graph: its own path
+/// with `.ts` appended, so `src/token.rl` becomes `src/token.rl.ts`.
+///
+/// This is what makes the whole arrangement need no configuration. A
+/// specifier written `"./token.rl"` — which is what a hand-written `.ts`
+/// and an `.rl` alike write — resolves to `token.rl.ts` by ordinary
+/// TypeScript resolution, with no `allowImportingTsExtensions`, no
+/// `paths`, and no rewriting. And the declaration the compiler emits for
+/// it lands on `token.rl.d.ts`, which is exactly the editor sidecar the
+/// same specifier resolves to when no compiler is running.
+pub(crate) fn module_path_of(source_path: &Path) -> PathBuf {
+    let mut name = source_path.as_os_str().to_os_string();
+    name.push(".ts");
+    PathBuf::from(name)
 }
 
 /// Where the standard library sits in the project graph, relative to the
@@ -113,42 +104,46 @@ pub(crate) const STD_MODULE: &str = "node_modules/@rl/std/index.ts";
 /// The path the compiler emits a lowered module's declarations to:
 /// `src/token.rl.ts` → `src/token.rl.d.ts`, which is the sidecar name a
 /// specifier written `"./token.rl"` resolves to.
-pub(crate) fn declaration_path_of(file: &Lowered) -> PathBuf {
+pub(crate) fn declaration_path_of(file: &ProjectedDocument) -> PathBuf {
     file.module_path.with_extension("d.ts")
 }
 
-/// Builds the batch of questions the whole project asks in one round trip.
+/// Builds the batch of questions the whole snapshot asks in one round trip.
 ///
 /// Every question is anchored at a byte the compiler can see: a probe whose
 /// anchor did not survive lowering as verbatim text (a nested rl construct)
 /// is dropped rather than asked about at an approximate position.
-pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Query, Probes) {
+pub(crate) fn assemble(
+    files: &[Arc<ProjectedDocument>],
+    root: &Path,
+    sources: &[PathBuf],
+) -> (Query, Probes) {
     let mut query = Query {
         sources: sources.to_vec(),
         ..Query::default()
     };
     let mut probes = Probes::default();
 
-    if lowered.iter().any(|f| rlc::imports_std(&f.source)) {
+    if files.iter().any(|f| f.imports_std) {
         query.modules.push(Module {
             path: root.join(STD_MODULE),
-            text: rlc::STD_SOURCE.to_string(),
+            text: crate::STD_SOURCE.to_string(),
         });
     }
 
-    for file in lowered {
+    for file in files {
         query.modules.push(Module {
             path: file.module_path.clone(),
             text: file.emit.code.clone(),
         });
 
-        for probe in rlc::literal_matches(&file.source) {
+        for probe in &file.literal_probes {
             // A BigInt is never a member of a finite literal union
             // TypeScript reports, so such a match is left unchecked.
             if probe
                 .covered
                 .iter()
-                .any(|l| matches!(l, rlc::Literal::BigInt(_)))
+                .any(|l| matches!(l, crate::Literal::BigInt(_)))
             {
                 continue;
             }
@@ -158,7 +153,7 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
             query.literals.push(LiteralQuery {
                 module: file.module_path.clone(),
                 position,
-                covered: probe.covered,
+                covered: probe.covered.clone(),
             });
             probes.literals.push(SourceAnchor {
                 source_path: file.source_path.clone(),
@@ -166,14 +161,14 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
             });
         }
 
-        for probe in rlc::tag_matches(&file.source) {
+        for probe in &file.tag_probes {
             let Some(position) = scrutinee_position(&file.emit, probe.offset) else {
                 continue;
             };
             query.tags.push(TagQuery {
                 module: file.module_path.clone(),
                 position,
-                covered: probe.covered,
+                covered: probe.covered.clone(),
             });
             probes.tags.push(SourceAnchor {
                 source_path: file.source_path.clone(),
@@ -184,8 +179,8 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
         // `val`: rlc finds the bindings and the mutations; which mutation
         // belongs to which binding is symbol identity, which is the
         // checker's to answer.
-        let val = rlc::val_probes(&file.source);
-        for binding in val.bindings {
+        let val = &file.val;
+        for binding in &val.bindings {
             let Some(position) = anchor(&file.emit, binding.ident) else {
                 continue;
             };
@@ -195,15 +190,16 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
             });
             probes.val_bindings.push(query.symbols.len() - 1);
         }
-        for mutation in val.mutations {
+        for mutation in &val.mutations {
             // A method call outside rl's mutator policy can never be
             // reported — the verdict needs the checker's `builtin` *and*
             // the policy name — so nothing is asked about it. The policy
-            // itself lives at the verdict ([`rlc::is_builtin_mutator_name`],
-            // applied in `check.rs`); skipping here is only the observation
-            // that a question whose answer is settled is not worth asking.
+            // itself lives at the verdict ([`crate::is_builtin_mutator_name`],
+            // applied by the engine's report); skipping here is only the
+            // observation that a question whose answer is settled is not
+            // worth asking.
             if let Some((name, _)) = &mutation.method
-                && !rlc::is_builtin_mutator_name(name)
+                && !crate::is_builtin_mutator_name(name)
             {
                 continue;
             }
@@ -234,16 +230,16 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
                     source_path: file.source_path.clone(),
                     offset: mutation.root,
                 },
-                name: mutation.name,
+                name: mutation.name.clone(),
                 root: query.symbols.len() - 1,
                 method,
-                method_name: mutation.method.map(|(name, _)| name),
+                method_name: mutation.method.as_ref().map(|(name, _)| name.clone()),
             });
         }
         // The callee half: every declaration a call might name, as a node.
         // Which call names which declaration is symbol identity, so the
         // declaration identifiers are asked about alongside the calls.
-        for function in val.functions {
+        for function in &val.functions {
             let Some(position) = anchor(&file.emit, function.ident) else {
                 continue;
             };
@@ -253,10 +249,10 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
             });
             probes.functions.push(FnAnchor {
                 root: query.symbols.len() - 1,
-                params: function.params,
+                params: function.params.clone(),
             });
         }
-        for pass in val.passes {
+        for pass in &val.passes {
             let Some(position) = anchor(&file.emit, pass.offset) else {
                 continue;
             };
@@ -277,8 +273,8 @@ pub(crate) fn query(lowered: &[Lowered], root: &Path, sources: &[PathBuf]) -> (Q
                     source_path: file.source_path.clone(),
                     offset: pass.offset,
                 },
-                name: pass.name,
-                callee: pass.callee,
+                name: pass.name.clone(),
+                callee: pass.callee.clone(),
                 root,
                 callee_symbol: query.symbols.len() - 1,
                 arg_index: pass.arg_index,
@@ -319,7 +315,7 @@ pub(crate) struct MutationAnchor {
 pub(crate) struct FnAnchor {
     /// Index into [`Query::symbols`] for the declared name's identifier.
     pub root: usize,
-    pub params: Vec<rlc::ValParam>,
+    pub params: Vec<crate::ValParam>,
 }
 
 /// One plain-path argument of a call to a name its file declares, with the
@@ -369,7 +365,7 @@ fn anchor(emit: &MappedEmit, source_byte: usize) -> Option<usize> {
 /// byte is `getShape` — a function, whose type has no `kind` property and no
 /// literal constituents, so every exhaustiveness question came back silent.
 /// The temporary is the scrutinee's *value*, and the type the checker gives
-/// it is the narrowed one at the match. See [`rlc::ScrutineeTemp`].
+/// it is the narrowed one at the match. See [`crate::ScrutineeTemp`].
 fn scrutinee_position(emit: &MappedEmit, keyword_offset: usize) -> Option<usize> {
     let temp = emit
         .scrutinee_temps
@@ -386,15 +382,11 @@ fn scrutinee_position(emit: &MappedEmit, keyword_offset: usize) -> Option<usize>
 /// message says so. By the error-layer contract it should not happen at
 /// all: rlc's own output must not draw type errors.
 pub(crate) fn diagnostic_source_offset(
-    file: &Lowered,
+    file: &ProjectedDocument,
     utf16_start: usize,
 ) -> Option<(usize, bool)> {
     let out = mapper::from_utf16(&file.emit.code, utf16_start);
-    mapper::to_source_or_nearest(mappings(&file.emit), out)
-}
-
-fn mappings(emit: &MappedEmit) -> &[EmitMapping] {
-    &emit.mappings
+    mapper::to_source_or_nearest(&file.emit.mappings, out)
 }
 
 #[cfg(test)]
@@ -407,7 +399,7 @@ mod tests {
         // declaration emitted for it lands on `state.rl.d.ts`, the sidecar
         // the same specifier resolves to without a compiler.
         assert_eq!(
-            Lowered::module_path_of(Path::new("/p/src/state.rl")),
+            module_path_of(Path::new("/p/src/state.rl")),
             PathBuf::from("/p/src/state.rl.ts"),
         );
     }

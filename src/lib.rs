@@ -52,6 +52,7 @@
 
 mod ast;
 mod codegen;
+pub mod engine;
 mod error;
 mod lexer;
 mod parser;
@@ -60,6 +61,7 @@ mod scanner;
 mod sema;
 mod sidecar;
 mod stdlib;
+pub(crate) mod typescript;
 mod val;
 mod verify;
 
