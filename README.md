@@ -145,7 +145,8 @@ export default defineConfig({ plugins: [rl()] });
 | [`std.md`](./docs/reference/std.md) | `Option`/`Result` API |
 | [`errors.md`](./docs/reference/errors.md) | 에러 메시지 전체 목록 |
 | [`docs/ai/`](./docs/ai/) | AI 코딩 도구용 컨텍스트 문서 — Claude Code·Cursor·Copilot 등에 rl을 가르치기 |
-| [`examples/shapes.rl`](./examples/shapes.rl) | 동작하는 예제 (→ [`shapes.ts`](./examples/shapes.ts)) |
+| [`examples/shapes.rl`](./examples/shapes.rl) | 단일 파일 예제 (→ [`shapes.ts`](./examples/shapes.ts)) |
+| [`examples/typed-val-demo`](./examples/typed-val-demo) | `val` 타입 진단과 `result`/pipeline을 보여주는 작은 프로젝트 |
 | [`editors/vscode`](./editors/vscode) | VSCode 확장 (하이라이팅·진단·정의 이동) |
 | [`docs/design/`](./docs/design/) | 설계 문서 |
 

@@ -12,6 +12,7 @@ import * as path from "node:path";
 
 import { runEmitMap, runEmitMapFileSync, stdModulePath } from "../rlc";
 import { TsProject } from "../tsproject";
+import { valMethodProbes } from "../valdiag";
 import { MappedDoc } from "../virtual";
 
 const COMPILER = "rlc";
@@ -387,3 +388,48 @@ test(
     assert.deepEqual(ts.diagnosticsFor(file), []);
   },
 );
+
+test("typed val mutation probes work over the emitted virtual doc", { skip }, async () => {
+  const source = [
+    "val const map = new Map<string, number>();",
+    'map.set("a", 1);',
+    "",
+  ].join("\n");
+  const { file, mapped, ts } = await stdProject(source);
+  const probes = valMethodProbes(source);
+  assert.equal(probes.length, 1);
+  const start = mapped.srcToOut(probes[0].nameStart);
+  const end = mapped.srcToOut(probes[0].nameEnd);
+  assert.notEqual(start, null);
+  assert.notEqual(end, null);
+  assert.deepEqual(
+    ts.valMutationsFor(file, [
+      { start: start!, end: end!, method: probes[0].method },
+    ]),
+    [{ index: 0, receiver: "Map" }],
+  );
+});
+
+test("result block binding declarations have types at their source spans", { skip }, async () => {
+  const source = [
+    'import { Result } from "@rl/std";',
+    "",
+    "declare function parseNumber(raw: string): Result<number, string>;",
+    "",
+    "export const parsed = result {",
+    '  const id <- parseNumber("42");',
+    "  id + 1",
+    "};",
+    "",
+  ].join("\n");
+  const { file, mapped, ts } = await stdProject(source);
+  const src = source.indexOf("id <-");
+  const at = mapped.srcToOut(src);
+  assert.notEqual(at, null, "result binding must map to emitted declaration");
+  const info = ts.quickInfoAt(file, at!);
+  assert.ok(info, "expected quick info on result binding");
+  assert.ok(
+    info!.signature.includes("id: number"),
+    `signature was: ${info!.signature}`,
+  );
+});

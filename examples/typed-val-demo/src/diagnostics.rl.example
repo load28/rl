@@ -1,0 +1,16 @@
+// Rename this file to diagnostics.rl, open it in the editor, or run
+// `npm run types:rl` to see the typed `val` diagnostic.
+
+val const byId = new Map<number, string>();
+byId.set(1, "Write docs");
+
+class Notebook {
+  private readonly entries: string[] = [];
+
+  set(entry: string): void {
+    this.entries.push(entry);
+  }
+}
+
+val const notebook = new Notebook();
+notebook.set("user-defined methods are not judged by name alone");

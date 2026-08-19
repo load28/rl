@@ -187,6 +187,15 @@ macro_rules! require_toolchain {
     };
 }
 
+macro_rules! require_node {
+    () => {
+        if !have("node") {
+            eprintln!("skipping: node not available");
+            return;
+        }
+    };
+}
+
 /* ------------------------------------------------------------------ */
 /* runtime behavior                                                    */
 /* ------------------------------------------------------------------ */
@@ -1026,15 +1035,51 @@ const TOKEN_RL: &str =
 /// Runs the rlc binary itself — declaration collection across files lives
 /// in the CLI, not in `compile`. No tsc/node needed.
 fn run_rlc(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .expect("failed to run rlc");
+    run_rlc_env(dir, args, &[])
+}
+
+fn run_rlc_env(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> (bool, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rlc"));
+    command.current_dir(dir).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let out = command.output().expect("failed to run rlc");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+fn tsgo_root() -> Option<PathBuf> {
+    let root = std::env::var_os("RLC_TSGO_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/Users/seominyeong/orca/typescript-go"));
+    let api = root.join("_packages/native-preview/src/api/sync/api.ts");
+    let exe = root.join("built/local/tsgo");
+    (api.exists() && exe.exists()).then_some(root)
+}
+
+fn node_supports_strip_types() -> bool {
+    Command::new("node")
+        .args(["--experimental-strip-types", "--no-warnings", "-e", ""])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+macro_rules! require_tsgo_native_backend {
+    () => {{
+        let Some(root) = tsgo_root() else {
+            eprintln!("skipping: no built typescript-go checkout for native backend tests");
+            return;
+        };
+        if !node_supports_strip_types() {
+            eprintln!("skipping: node cannot run tsgo source API with strip-types");
+            return;
+        }
+        root
+    }};
 }
 
 /// Whether TypeScript resolves without a project-local copy — true when a
@@ -1545,6 +1590,113 @@ fn cli_types_sidecars_typecheck_the_source_tree() {
         out.status.success(),
         "consumer typecheck failed:\n{}\n---sidecar---\n{sidecar}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn cli_types_tsgo_sidecars_typecheck_the_source_tree() {
+    require_node!();
+    let tsgo = require_tsgo_native_backend!();
+    let dir = tmpdir();
+    write_consumer_tree(&dir);
+
+    let tsgo = tsgo.to_string_lossy().into_owned();
+    let (ok, err) = run_rlc_env(
+        &dir,
+        &["--types", "src"],
+        &[("RLC_TS_BACKEND", "tsgo"), ("RLC_TSGO_ROOT", &tsgo)],
+    );
+    assert!(ok, "tsgo --types failed:\n{err}");
+
+    let sidecar = fs::read_to_string(dir.join(".rl-types/notice.rl.d.ts")).unwrap();
+    assert!(sidecar.contains("from \"@rl/std\""), "{sidecar}");
+    assert!(sidecar.contains("from \"./level.rl\""), "{sidecar}");
+    assert!(
+        sidecar.contains("export declare function render"),
+        "{sidecar}"
+    );
+    assert!(dir.join(".rl-types/notice.rl.d.ts.map").exists());
+    assert!(dir.join(".rl-types/level.rl.d.ts").exists());
+    assert!(dir.join(".rl-types/rl.d.ts").exists(), "std types missing");
+}
+
+#[test]
+fn cli_types_tsgo_resolves_default_imports_from_rl_modules() {
+    require_node!();
+    let tsgo = require_tsgo_native_backend!();
+    let dir = tmpdir();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/labels.rl"),
+        "export default function label(value: number): string {\n\
+         \x20 return `#${value}`;\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/use-label.rl"),
+        "import label from \"./labels.rl\";\n\
+         export const rendered = label(7);\n",
+    )
+    .unwrap();
+
+    let tsgo = tsgo.to_string_lossy().into_owned();
+    let (ok, err) = run_rlc_env(
+        &dir,
+        &["--types", "src"],
+        &[("RLC_TS_BACKEND", "tsgo"), ("RLC_TSGO_ROOT", &tsgo)],
+    );
+    assert!(ok, "tsgo --types failed:\n{err}");
+
+    let sidecar = fs::read_to_string(dir.join(".rl-types/use-label.rl.d.ts")).unwrap();
+    assert!(
+        sidecar.contains("export declare const rendered: string"),
+        "{sidecar}"
+    );
+}
+
+#[test]
+fn cli_types_tsgo_resolves_project_local_package_types() {
+    require_node!();
+    let tsgo = require_tsgo_native_backend!();
+    let dir = tmpdir();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("node_modules/domain-lib")).unwrap();
+    fs::write(
+        dir.join("node_modules/domain-lib/package.json"),
+        r#"{
+  "name": "domain-lib",
+  "version": "1.0.0",
+  "types": "index.d.ts"
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("node_modules/domain-lib/index.d.ts"),
+        "export interface Money { cents: number }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/price.rl"),
+        "import type { Money } from \"domain-lib\";\n\
+         export const price: Money = { cents: 1200 };\n",
+    )
+    .unwrap();
+
+    let tsgo = tsgo.to_string_lossy().into_owned();
+    let (ok, err) = run_rlc_env(
+        &dir,
+        &["--types", "src"],
+        &[("RLC_TS_BACKEND", "tsgo"), ("RLC_TSGO_ROOT", &tsgo)],
+    );
+    assert!(ok, "tsgo --types failed:\n{err}");
+
+    let sidecar = fs::read_to_string(dir.join(".rl-types/price.rl.d.ts")).unwrap();
+    assert!(sidecar.contains("from \"domain-lib\""), "{sidecar}");
+    assert!(
+        sidecar.contains("export declare const price: Money"),
+        "{sidecar}"
     );
 }
 

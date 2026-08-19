@@ -196,3 +196,34 @@ fn val_modifier_is_dropped_and_the_rest_keeps_mapping() {
     assert_eq!(m.code, "function read(user: User) { return user.name; }\n");
     assert_mapping_invariants(src, &m);
 }
+
+#[test]
+fn result_block_bindings_are_mapped_to_emitted_declarations() {
+    let src = r#"type Res<T, E> = { kind: "Ok"; value: T } | { kind: "Err"; error: E };
+declare function load(): Res<{ id: number; name: string }, string>;
+declare function read(): Res<[number, string], string>;
+
+const user = result {
+  const loaded <- load();
+  const { id, name }: { id: number; name: string } <- load();
+  const [count, label] <- read();
+  { loaded, id, name, count, label }
+};
+"#;
+    let m = emit_mapped(src);
+    assert_mapping_invariants(src, &m);
+
+    for needle in [
+        "loaded",
+        "{ id, name }: { id: number; name: string }",
+        "[count, label]",
+    ] {
+        let at = src.find(needle).unwrap();
+        let out = map_offset(&m, at).unwrap_or_else(|| panic!("expected {needle:?} to map"));
+        assert_eq!(&m.code[out..out + needle.len()], needle);
+        assert!(
+            m.code[..out].ends_with("const "),
+            "{needle:?} maps to a declaration"
+        );
+    }
+}

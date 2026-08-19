@@ -199,3 +199,30 @@ test("typeAt strips generic arguments from the type name", () => {
   assert.ok(info, "expected a type");
   assert.equal(info!.name, "Option");
 });
+
+test("valMutationsFor reports built-in mutating methods only", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-tsproject-"));
+  const file = path.join(dir, "val.rl");
+  const src = [
+    "const map = new Map<string, number>();",
+    'map.set("a", 1);',
+    "class Query { set(_key: string, _value: number): void {} }",
+    "const query = new Query();",
+    'query.set("a", 1);',
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, src);
+  const ts = new TsProject(() => null, () => [file], dir);
+
+  const mapSet = src.indexOf("set");
+  const querySet = src.lastIndexOf("set");
+  assert.deepEqual(ts.valMutationsFor(file, [
+    { start: mapSet, end: mapSet + 3, method: "set" },
+  ]), [{ index: 0, receiver: "Map" }]);
+  assert.deepEqual(
+    ts.valMutationsFor(file, [
+      { start: querySet, end: querySet + 3, method: "set" },
+    ]),
+    [],
+  );
+});

@@ -94,7 +94,8 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
             BindRun::Malformed => return Attempt::Malformed,
             BindRun::Bind {
                 kw,
-                binding,
+                binding_start,
+                binding_end,
                 arrow_end,
                 expr_from,
             } => {
@@ -110,7 +111,10 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
                 };
                 items.push(ResultItem::Bind(ResultBind {
                     kw: kw.to_string(),
-                    binding: binding.to_string(),
+                    binding_span: Span {
+                        start: binding_start,
+                        end: binding_end,
+                    },
                     expr: cur.parser.parse_tokens(
                         &cur.tokens[expr_from..k],
                         expr_span.start,
@@ -174,8 +178,9 @@ enum BindRun<'t> {
     Bind {
         /// The declaration keyword.
         kw: &'t str,
-        /// The verbatim text between the keyword and `<-`.
-        binding: &'t str,
+        /// Source byte range of `binding`.
+        binding_start: usize,
+        binding_end: usize,
         /// The byte just past the `<-`.
         arrow_end: usize,
         /// The token index of the expression's first token.
@@ -260,7 +265,14 @@ fn scan_bind<'t>(cur: &Cursor<'t>, from: usize, boundary: usize) -> BindRun<'t> 
     if !matches!(cur.tokens[boundary].kind, TokenKind::Punct(b';')) {
         return BindRun::Malformed; // a binding must end with `;`
     }
-    let binding = cur.parser.src[cur.tokens[from].span.end..cur.tokens[lt].span.start].trim();
+    let raw_start = cur.tokens[from].span.end;
+    let raw_end = cur.tokens[lt].span.start;
+    let binding_start = raw_start
+        + cur.parser.src[raw_start..raw_end]
+            .len()
+            .saturating_sub(cur.parser.src[raw_start..raw_end].trim_start().len());
+    let binding_end = binding_start + cur.parser.src[binding_start..raw_end].trim_end().len();
+    let binding = &cur.parser.src[binding_start..binding_end];
     if binding.is_empty() {
         return BindRun::Malformed;
     }
@@ -285,7 +297,8 @@ fn scan_bind<'t>(cur: &Cursor<'t>, from: usize, boundary: usize) -> BindRun<'t> 
     }
     BindRun::Bind {
         kw,
-        binding,
+        binding_start,
+        binding_end,
         arrow_end,
         expr_from: lt + 2,
     }

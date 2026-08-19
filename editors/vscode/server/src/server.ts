@@ -40,6 +40,7 @@ import * as path from "node:path";
 import * as probe from "./probe";
 import * as sidecar from "./sidecar";
 import * as tsproject from "./tsproject";
+import * as valdiag from "./valdiag";
 import * as virtual from "./virtual";
 
 const connection = createConnection(ProposedFeatures.all);
@@ -836,6 +837,33 @@ function typeDiagnostics(doc: TextDocument, fsPath: string): Diagnostic[] {
       message: d.message,
       code: d.code,
       source: "ts",
+    });
+  }
+  const probes = valdiag.valMethodProbes(text);
+  const serviceProbes: tsproject.TsValProbe[] = [];
+  const sourceIndexes: number[] = [];
+  probes.forEach((probe, index) => {
+    const start = mapped.srcToOut(probe.nameStart);
+    const end = mapped.srcToOut(probe.nameEnd);
+    if (start === null || end === null || end < start) return;
+    serviceProbes.push({ start, end, method: probe.method });
+    sourceIndexes.push(index);
+  });
+  for (const mutation of getTsProject().valMutationsFor(fsPath, serviceProbes)) {
+    const probe = probes[sourceIndexes[mutation.index]];
+    if (!probe) continue;
+    out.push({
+      severity: DiagnosticSeverity.Error,
+      range: {
+        start: doc.positionAt(probe.rootStart),
+        end: doc.positionAt(probe.rootEnd),
+      },
+      message:
+        `cannot call mutating method \`${probe.method}\` of built-in ` +
+        `\`${mutation.receiver}\` through val binding \`${probe.binding}\` ` +
+        "(the binding is declared with `val`, so every access path from it " +
+        "is read-only)",
+      source: "rlc",
     });
   }
   return out;

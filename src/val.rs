@@ -401,10 +401,11 @@ fn run(
 fn uses_val(src: &str, tokens: &[Token]) -> bool {
     for (i, tok) in tokens.iter().enumerate() {
         match &tok.kind {
-            TokenKind::Ident if &src[tok.span.start..tok.span.end] == "val" => {
-                if modifier_at(src, tokens, i).is_some() {
-                    return true;
-                }
+            TokenKind::Ident
+                if &src[tok.span.start..tok.span.end] == "val"
+                    && modifier_at(src, tokens, i).is_some() =>
+            {
+                return true;
             }
             TokenKind::Template(parts) => {
                 for part in parts.iter() {

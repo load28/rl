@@ -15,15 +15,20 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use rlc::{
-    EmitMapping, EnumSymbol, ExternEnum, ImportRewrite, Literal, ModuleScan, Options, RlImport,
-    RlImportNames, ValMethodCall, compile, compile_mapped,
+    EmitMapping, EnumSymbol, ExternEnum, ImportRewrite, ModuleScan, Options, RlImport,
+    RlImportNames, compile, compile_mapped,
+};
+
+mod typescript;
+use typescript::{
+    LiteralCheck, TypeOrigin, ValCheck, VirtualModule, literal_checks, run_types_host, val_checks,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1262,29 +1267,9 @@ fn watch_mode(inputs: &[String], out_dir: Option<&Path>, opts: &BuildOptions) ->
 /// Default `-o` of `--types` — where the sidecars land.
 const TYPES_DIR: &str = ".rl-types";
 
-/// The in-memory host script, embedded so there is nothing to install and
-/// no version to drift: it is written to a temp file per run and executed
-/// with `node`.
-const TYPES_HOST: &str = include_str!("types_host.mjs");
-
 /// Virtual module name the standard library takes when declarations are
 /// emitted — the same shape the bundler plugin uses.
 const STD_VIRTUAL: &str = "__rl_std__.ts";
-
-/// The compiler options declaration emit runs with. Passed as data, not as
-/// a synthesized `tsconfig.json`: `.rl` specifiers and `@rl/std` are
-/// resolved by the host itself, so no `paths`, no shim files, and no
-/// `allowArbitraryExtensions` are involved.
-const TYPES_COMPILER_OPTIONS: &str = r#"{
-  "target": "es2022",
-  "module": "preserve",
-  "moduleResolution": "bundler",
-  "allowImportingTsExtensions": true,
-  "declaration": true,
-  "emitDeclarationOnly": true,
-  "skipLibCheck": true,
-  "strict": true
-}"#;
 
 /// Everything the `--types` pipeline needs beyond the file list.
 struct TypesOptions {
@@ -1295,160 +1280,6 @@ struct TypesOptions {
     verify: bool,
     /// Worker threads for the compile phase (`--jobs`).
     jobs: Option<usize>,
-}
-
-/// One module handed to the host: the text a `.rl` file compiles to, keyed
-/// by the path it would occupy on disk.
-struct VirtualModule {
-    /// Path relative to the project root (`src/engine.ts`).
-    path: String,
-    text: String,
-    /// The `.rl` file it came from — `None` for the standard library.
-    source: Option<PathBuf>,
-}
-
-/// Where a virtual module came from, kept so a tsc diagnostic over the
-/// emitted TypeScript can be reported at the position in the `.rl` source
-/// the offending code was written at. The virtual module has no file on
-/// disk, so its own coordinates would name a file the user cannot open.
-struct RlOrigin<'a> {
-    /// The `.rl` file.
-    file: &'a Path,
-    /// Its text — the coordinate space diagnostics are reported in.
-    source: &'a str,
-    /// The emitted TypeScript the host type-checked.
-    code: &'a str,
-    /// Source↔output mappings of every verbatim-copied chunk, by output.
-    mappings: &'a [EmitMapping],
-}
-
-/// One wildcard-free literal match handed to the host for typed
-/// exhaustiveness ([`rlc::literal_matches`]).
-///
-/// rlc cannot answer "does `\"north\" | \"south\"` cover this scrutinee?" —
-/// that is a fact about a TypeScript type, and the design contract keeps a
-/// type system out of rlc. The checker the `--types` pipeline already runs
-/// answers it: the probe carries where the scrutinee landed in the emitted
-/// module (so the host can ask `getTypeAtLocation`) and where the `match`
-/// keyword sits in the `.rl` source (so the answer is reported there).
-struct LiteralCheck {
-    /// Virtual module path the checker sees.
-    module: String,
-    /// UTF-16 offsets of the scrutinee expression in that module.
-    start: usize,
-    end: usize,
-    /// The literals the match's unguarded arms cover.
-    covered: Vec<Literal>,
-    /// The `.rl` file, and the byte offset of its `match` keyword.
-    file: PathBuf,
-    offset: usize,
-    /// Index into the loaded sources, for the source text to position in.
-    source_index: usize,
-}
-
-/// The emitted byte offset a source byte was copied to, or None when the
-/// byte belongs to compiler-written glue rather than a verbatim chunk.
-fn output_offset(mappings: &[EmitMapping], src: usize) -> Option<usize> {
-    mappings
-        .iter()
-        .find(|m| src >= m.src && src < m.src + m.len)
-        .map(|m| m.out + (src - m.src))
-}
-
-/// Offset of `byte` in `text` counted in UTF-16 code units — TypeScript's
-/// own coordinate space.
-fn utf16_position(text: &str, byte: usize) -> usize {
-    text.get(..byte)
-        .map_or(0, |prefix| prefix.encode_utf16().count())
-}
-
-/// The probes of one compiled module, dropped when the scrutinee did not
-/// survive into the output as verbatim text (a nested rl construct) or when
-/// a covered literal is a BigInt, which no TypeScript literal union holds.
-fn literal_checks(
-    source: &str,
-    module: &str,
-    code: &str,
-    mappings: &[EmitMapping],
-    file: &Path,
-    source_index: usize,
-) -> Vec<LiteralCheck> {
-    rlc::literal_matches(source)
-        .into_iter()
-        .filter(|probe| {
-            !probe
-                .covered
-                .iter()
-                .any(|l| matches!(l, Literal::BigInt(_)))
-        })
-        .filter_map(|probe| {
-            let start = output_offset(mappings, probe.scrutinee)?;
-            let end = output_offset(mappings, probe.scrutinee_end.checked_sub(1)?)? + 1;
-            Some(LiteralCheck {
-                module: module.to_string(),
-                start: utf16_position(code, start),
-                end: utf16_position(code, end),
-                covered: probe.covered,
-                file: file.to_path_buf(),
-                offset: probe.offset,
-                source_index,
-            })
-        })
-        .collect()
-}
-
-/// One method call made through a `val` binding, handed to the host so the
-/// checker can say what the receiver actually is ([`rlc::val_method_calls`]).
-///
-/// rlc deliberately does not answer "does `q.set(k)` mutate?" from the
-/// method's name — a user-defined `set` is not `Map#set`. The probe carries
-/// where the method name landed in the emitted module (so the host can
-/// resolve its symbol) and where the access path starts in the `.rl` source
-/// (so the answer is reported there).
-struct ValCheck {
-    /// Virtual module path the checker sees.
-    module: String,
-    /// UTF-16 offsets of the method name in that module.
-    start: usize,
-    end: usize,
-    /// The method name and the `val` binding the path is rooted at.
-    method: String,
-    binding: String,
-    /// The `.rl` file, and the byte offset of the path's root identifier.
-    file: PathBuf,
-    offset: usize,
-    /// Index into the loaded sources, for the source text to position in.
-    source_index: usize,
-}
-
-/// The `val` probes of one compiled module, dropped when the method name
-/// did not survive into the output as verbatim text — an unresolvable
-/// question is not asked, and nothing is reported for it.
-fn val_checks(
-    source: &str,
-    module: &str,
-    code: &str,
-    mappings: &[EmitMapping],
-    file: &Path,
-    source_index: usize,
-) -> Vec<ValCheck> {
-    rlc::val_method_calls(source)
-        .into_iter()
-        .filter_map(|call: ValMethodCall| {
-            let start = output_offset(mappings, call.name)?;
-            let end = output_offset(mappings, call.name_end.checked_sub(1)?)? + 1;
-            Some(ValCheck {
-                module: module.to_string(),
-                start: utf16_position(code, start),
-                end: utf16_position(code, end),
-                method: call.method,
-                binding: call.binding,
-                file: file.to_path_buf(),
-                offset: call.offset,
-                source_index,
-            })
-        })
-        .collect()
 }
 
 /// `--types`: one pass of the unified type pipeline.
@@ -1551,14 +1382,14 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
         return Ok(failed);
     }
 
-    let origins: HashMap<&str, RlOrigin<'_>> = modules
+    let origins: HashMap<&str, TypeOrigin<'_>> = modules
         .iter()
         .zip(&emitted_from)
         .map(|(module, (index, mappings))| {
             let source = loaded[*index].as_ref().map_or("", |l| l.source.as_str());
             (
                 module.path.as_str(),
-                RlOrigin {
+                TypeOrigin {
                     file: rl_jobs[*index].file.as_path(),
                     source,
                     code: module.text.as_str(),
@@ -1746,442 +1577,6 @@ fn input_relative(file: &Path, inputs: &[String]) -> PathBuf {
     PathBuf::from(file.file_name().unwrap_or_default())
 }
 
-/// What the host sent back.
-struct EmittedTypes {
-    /// Virtual module path → declaration text.
-    declarations: HashMap<String, String>,
-    /// Type errors the host reported, in its own coordinates.
-    diagnostics: Vec<TypeDiagnostic>,
-    /// Literal matches the checker found non-exhaustive.
-    literal_missing: Vec<LiteralMissing>,
-    /// `val` path method calls the checker resolved to a built-in mutator.
-    val_mutations: Vec<ValMutation>,
-}
-
-/// One non-exhaustive literal match, as the host reports it: the index of
-/// the [`LiteralCheck`] it answers and the missing literals, already
-/// rendered as a comma-separated list.
-struct LiteralMissing {
-    index: usize,
-    missing: String,
-}
-
-/// One proven built-in mutation, as the host reports it: the index of the
-/// [`ValCheck`] it answers and the built-in that declares the method —
-/// which is *why* it is a mutation, and what the diagnostic names.
-struct ValMutation {
-    index: usize,
-    receiver: String,
-}
-
-/// One tsc diagnostic as the host reports it. Positions are TypeScript's:
-/// 1-based line, 1-based column counted in UTF-16 code units, over the file
-/// the checker saw — which for a `.rl` module is the emitted TypeScript,
-/// not the source. [`TypeDiagnostic::render`] translates that back.
-struct TypeDiagnostic {
-    /// Path relative to the working directory, or `None` for a diagnostic
-    /// with no file (a bad compiler option, say).
-    file: Option<String>,
-    line: usize,
-    col: usize,
-    message: String,
-}
-
-impl TypeDiagnostic {
-    /// The `file:line:col: message` line rlc prints. A diagnostic over a
-    /// virtual module is moved onto the `.rl` file it was compiled from;
-    /// a hand-written `.ts` file already has real coordinates and is left
-    /// alone.
-    fn render(&self, origins: &HashMap<&str, RlOrigin<'_>>) -> String {
-        let Some(file) = &self.file else {
-            return self.message.clone();
-        };
-        let key = file.replace('\\', "/");
-        let Some(origin) = origins.get(key.as_str()) else {
-            return format!("{file}:{}:{}: {}", self.line, self.col, self.message);
-        };
-        let out = utf16_offset(origin.code, self.line, self.col);
-        let src = source_offset(origin.mappings, out);
-        let (line, col) = rlc::line_col(origin.source, src);
-        format!("{}:{line}:{col}: {}", slash_path(origin.file), self.message)
-    }
-}
-
-/// Byte offset in `text` of a 1-based `(line, col)` whose column counts
-/// UTF-16 code units — TypeScript's coordinates. Positions past the end of
-/// a line, or of the text, clamp to it.
-fn utf16_offset(text: &str, line: usize, col: usize) -> usize {
-    let mut at = 0;
-    for _ in 1..line.max(1) {
-        match text[at..].find('\n') {
-            Some(newline) => at += newline + 1,
-            None => return text.len(),
-        }
-    }
-    let rest = &text[at..];
-    let line_text = &rest[..rest.find('\n').unwrap_or(rest.len())];
-    let mut units = 0;
-    for (offset, ch) in line_text.char_indices() {
-        if units >= col.saturating_sub(1) {
-            return at + offset;
-        }
-        units += ch.len_utf16();
-    }
-    at + line_text.len()
-}
-
-/// The source byte offset an emitted byte offset came from, given the
-/// mappings of the verbatim-copied chunks (ordered by output offset).
-///
-/// A position inside compiler-written glue has no source counterpart. That
-/// only happens when tsc flags generated code, which the error-layer
-/// contract says it should not; rather than drop the diagnostic, the next
-/// verbatim chunk stands in, so the report still lands near the construct
-/// that produced the glue.
-fn source_offset(mappings: &[EmitMapping], out: usize) -> usize {
-    let after = mappings.partition_point(|m| m.out <= out);
-    if let Some(m) = after.checked_sub(1).map(|i| &mappings[i])
-        && out < m.out + m.len
-    {
-        return m.src + (out - m.out);
-    }
-    mappings
-        .get(after)
-        .map(|m| m.src)
-        .or_else(|| mappings.last().map(|m| m.src + m.len))
-        .unwrap_or(0)
-}
-
-/// Runs the embedded host with `node`, handing it the compiled modules on
-/// stdin and reading declarations back from stdout.
-fn run_types_host(
-    node: Option<&Path>,
-    modules: &[VirtualModule],
-    std_module: Option<&VirtualModule>,
-    sources: &[String],
-    rl_map: &[(String, String)],
-    checks: &[LiteralCheck],
-    val_probes: &[ValCheck],
-) -> Result<EmittedTypes, ExitCode> {
-    let dir = std::env::temp_dir().join(format!("rlc-types-{}", std::process::id()));
-    let script = dir.join("types_host.mjs");
-    if let Err(e) = fs::create_dir_all(&dir).and_then(|()| fs::write(&script, TYPES_HOST)) {
-        eprintln!("rlc: {}: {e}", script.display());
-        return Err(ExitCode::FAILURE);
-    }
-
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let job = types_job(
-        &cwd, modules, std_module, sources, rl_map, checks, val_probes,
-    );
-    let binary = node.map_or_else(|| PathBuf::from("node"), Path::to_path_buf);
-
-    let mut child = match Command::new(&binary)
-        .arg(&script)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
-                "rlc: node not found — install Node.js or pass --node <path> (--types needs it)"
-            );
-            return Err(ExitCode::FAILURE);
-        }
-        Err(e) => {
-            eprintln!("rlc: {}: {e}", binary.display());
-            return Err(ExitCode::FAILURE);
-        }
-    };
-
-    // Write the job from another thread: a large job would otherwise fill
-    // the pipe while this side is still waiting to read.
-    let mut stdin = child.stdin.take().expect("piped stdin");
-    let writer = thread::spawn(move || {
-        use std::io::Write;
-        let _ = stdin.write_all(job.as_bytes());
-    });
-    let output = child.wait_with_output();
-    let _ = writer.join();
-    let _ = fs::remove_dir_all(&dir);
-
-    let output = match output {
-        Ok(output) => output,
-        Err(e) => {
-            eprintln!("rlc: {}: {e}", binary.display());
-            return Err(ExitCode::FAILURE);
-        }
-    };
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        let detail = detail.trim();
-        if output.status.code() == Some(2) {
-            eprintln!("rlc: typescript not found — install it (npm i -D typescript)");
-        } else if output.status.code() == Some(4) {
-            // TypeScript 7 is the native compiler: `require("typescript")`
-            // exposes no JS compiler API, which --types drives directly.
-            eprintln!(
-                "rlc: the resolved typescript has no JS compiler API \
-                 (TypeScript 7's native compiler) — --types needs \
-                 typescript 5 or 6 (npm i -D typescript@6)"
-            );
-        } else {
-            eprintln!("rlc: declaration emit failed: {detail}");
-        }
-        return Err(ExitCode::FAILURE);
-    }
-
-    Ok(parse_types_result(&String::from_utf8_lossy(&output.stdout)))
-}
-
-/// Serializes the host's job. Hand-written `.ts` files are deliberately
-/// absent — the host reads them from disk.
-fn types_job(
-    cwd: &Path,
-    modules: &[VirtualModule],
-    std_module: Option<&VirtualModule>,
-    sources: &[String],
-    rl_map: &[(String, String)],
-    checks: &[LiteralCheck],
-    val_probes: &[ValCheck],
-) -> String {
-    let list = |items: &[&VirtualModule]| {
-        items
-            .iter()
-            .map(|m| {
-                format!(
-                    "{{\"path\":{},\"text\":{}}}",
-                    json_str(&m.path),
-                    json_str(&m.text)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let refs: Vec<&VirtualModule> = modules.iter().collect();
-    let std_json = match std_module {
-        Some(module) => list(&[module]),
-        None => "null".to_string(),
-    };
-    let map = rl_map
-        .iter()
-        .map(|(source, virtual_path)| format!("{}:{}", json_str(source), json_str(virtual_path)))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let source_list = sources
-        .iter()
-        .map(|path| json_str(path))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let literal_checks = checks
-        .iter()
-        .map(|c| {
-            format!(
-                "{{\"module\":{},\"start\":{},\"end\":{},\"covered\":[{}]}}",
-                json_str(&c.module),
-                c.start,
-                c.end,
-                c.covered
-                    .iter()
-                    .map(json_literal)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let val_checks = val_probes
-        .iter()
-        .map(|c| {
-            format!(
-                "{{\"module\":{},\"start\":{},\"end\":{},\"method\":{}}}",
-                json_str(&c.module),
-                c.start,
-                c.end,
-                json_str(&c.method)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-
-    format!(
-        "{{\"cwd\":{},\"compilerOptions\":{},\"modules\":[{}],\"std\":{},\"sources\":[{}],\"rlModules\":{{{}}},\"literalChecks\":[{}],\"valChecks\":[{}]}}",
-        json_str(&cwd.display().to_string()),
-        TYPES_COMPILER_OPTIONS,
-        list(&refs),
-        std_json,
-        source_list,
-        map,
-        literal_checks,
-        val_checks
-    )
-}
-
-/// One covered literal as a JSON value the host compares against the
-/// checker's literal types.
-fn json_literal(literal: &Literal) -> String {
-    match literal {
-        Literal::String(s) => json_str(s),
-        Literal::Number(n) => format!("{n}"),
-        Literal::Boolean(b) => b.to_string(),
-        // Filtered out before a check is built — never reaches the host.
-        Literal::BigInt(d) => json_str(d),
-    }
-}
-
-/// Reads the host's reply. The shapes are fixed and produced by our own
-/// script, so a minimal scan beats pulling in a JSON parser.
-fn parse_types_result(stdout: &str) -> EmittedTypes {
-    let mut declarations = HashMap::new();
-    let mut diagnostics = Vec::new();
-
-    for entry in json_objects(stdout, "\"declarations\":[") {
-        if let (Some(path), Some(text)) = (json_field(&entry, "path"), json_field(&entry, "text")) {
-            declarations.insert(path, text);
-        }
-    }
-    for entry in json_objects(stdout, "\"diagnostics\":[") {
-        diagnostics.push(TypeDiagnostic {
-            file: json_field(&entry, "file"),
-            line: json_number(&entry, "line") as usize,
-            col: json_number(&entry, "col") as usize,
-            message: json_field(&entry, "message").unwrap_or_default(),
-        });
-    }
-    let mut literal_missing = Vec::new();
-    for entry in json_objects(stdout, "\"literalMissing\":[") {
-        if let Some(missing) = json_field(&entry, "missing") {
-            literal_missing.push(LiteralMissing {
-                index: json_number(&entry, "index") as usize,
-                missing,
-            });
-        }
-    }
-
-    let mut val_mutations = Vec::new();
-    for entry in json_objects(stdout, "\"valMutations\":[") {
-        if let Some(receiver) = json_field(&entry, "receiver") {
-            val_mutations.push(ValMutation {
-                index: json_number(&entry, "index") as usize,
-                receiver,
-            });
-        }
-    }
-
-    EmittedTypes {
-        declarations,
-        diagnostics,
-        literal_missing,
-        val_mutations,
-    }
-}
-
-/// The `{...}` objects of the array that follows `key`, as raw slices.
-fn json_objects(text: &str, key: &str) -> Vec<String> {
-    let Some(start) = text.find(key) else {
-        return Vec::new();
-    };
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut i = start + key.len();
-    let mut depth = 0usize;
-    let mut begin = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    while i < bytes.len() {
-        let byte = bytes[i];
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-        } else {
-            match byte {
-                b'"' => in_string = true,
-                b'{' => {
-                    if depth == 0 {
-                        begin = i;
-                    }
-                    depth += 1;
-                }
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        out.push(text[begin..=i].to_string());
-                    }
-                }
-                b']' if depth == 0 => break,
-                _ => {}
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-/// The string value of `field` in a flat JSON object, unescaped.
-fn json_field(object: &str, field: &str) -> Option<String> {
-    let key = format!("\"{field}\":\"");
-    let start = object.find(&key)? + key.len();
-    let bytes = object.as_bytes();
-    let mut out = String::new();
-    let mut i = start;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => return Some(out),
-            b'\\' => {
-                i += 1;
-                match bytes.get(i) {
-                    Some(b'n') => out.push('\n'),
-                    Some(b'r') => out.push('\r'),
-                    Some(b't') => out.push('\t'),
-                    Some(b'u') => {
-                        let hex = object.get(i + 1..i + 5)?;
-                        let code = u32::from_str_radix(hex, 16).ok()?;
-                        out.push(char::from_u32(code)?);
-                        i += 4;
-                    }
-                    Some(other) => out.push(*other as char),
-                    None => return None,
-                }
-            }
-            _ => {
-                // Copy whole UTF-8 sequences, not bytes.
-                let rest = &object[i..];
-                let ch = rest.chars().next()?;
-                out.push(ch);
-                i += ch.len_utf8() - 1;
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// The numeric value of `field`, or 0.
-fn json_number(object: &str, field: &str) -> u32 {
-    let key = format!("\"{field}\":");
-    object
-        .find(&key)
-        .map(|at| {
-            object[at + key.len()..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-        })
-        .and_then(|digits| digits.parse().ok())
-        .unwrap_or(0)
-}
-
 /// A path in `/`-separated form, which is what the host expects.
 fn slash_path(path: &Path) -> String {
     path.components()
@@ -2305,16 +1700,17 @@ mod help_tests {
 #[cfg(test)]
 mod type_diagnostic_tests {
     use super::*;
+    use crate::typescript::{TypeDiagnostic, TypeOrigin, source_offset, utf16_offset};
 
     fn origin<'a>(
         file: &'a Path,
         source: &'a str,
         code: &'a str,
         mappings: &'a [EmitMapping],
-    ) -> HashMap<&'a str, RlOrigin<'a>> {
+    ) -> HashMap<&'a str, TypeOrigin<'a>> {
         HashMap::from([(
             "src/calc.ts",
-            RlOrigin {
+            TypeOrigin {
                 file,
                 source,
                 code,
@@ -2415,7 +1811,7 @@ mod type_diagnostic_tests {
 
     #[test]
     fn a_diagnostic_over_a_real_file_keeps_its_own_position() {
-        let origins: HashMap<&str, RlOrigin<'_>> = HashMap::new();
+        let origins: HashMap<&str, TypeOrigin<'_>> = HashMap::new();
         let diagnostic = TypeDiagnostic {
             file: Some("src/hand-written.ts".to_string()),
             line: 4,
@@ -2430,7 +1826,7 @@ mod type_diagnostic_tests {
 
     #[test]
     fn a_positionless_diagnostic_is_just_its_message() {
-        let origins: HashMap<&str, RlOrigin<'_>> = HashMap::new();
+        let origins: HashMap<&str, TypeOrigin<'_>> = HashMap::new();
         let diagnostic = TypeDiagnostic {
             file: None,
             line: 0,

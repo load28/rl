@@ -112,6 +112,19 @@ export interface TsDiagnostic {
   warning: boolean;
 }
 
+/** One `val` typed-mutation question in service-file coordinates. */
+export interface TsValProbe {
+  start: number;
+  end: number;
+  method: string;
+}
+
+/** One proven built-in mutation for a `val` probe. */
+export interface TsValMutation {
+  index: number;
+  receiver: string;
+}
+
 /** One reference or rename location. */
 export interface TsReference extends TsDefinition {
   isDefinition: boolean;
@@ -142,6 +155,49 @@ const COMPILER_OPTIONS: ts.CompilerOptions = {
 
 /** The `lib.*.d.ts` these options are checked against (`lib.esnext.full.d.ts`). */
 const DEFAULT_LIB_NAME = ts.getDefaultLibFileName(COMPILER_OPTIONS);
+
+const BUILTIN_MUTATOR_ENTRIES: [string, string[]][] = [
+  [
+    "Array",
+    [
+      "push",
+      "pop",
+      "shift",
+      "unshift",
+      "splice",
+      "sort",
+      "reverse",
+      "fill",
+      "copyWithin",
+    ],
+  ],
+  ["Map", ["set", "delete", "clear"]],
+  ["Set", ["add", "delete", "clear"]],
+  ["WeakMap", ["set", "delete"]],
+  ["WeakSet", ["add", "delete"]],
+  ...[
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+    "BigInt64Array",
+    "BigUint64Array",
+  ].map(
+    (name): [string, string[]] => [
+      name,
+      ["set", "sort", "reverse", "fill", "copyWithin"],
+    ],
+  ),
+];
+
+const BUILTIN_MUTATORS = new Map<string, Set<string>>(
+  BUILTIN_MUTATOR_ENTRIES.map(([name, methods]) => [name, new Set(methods)]),
+);
 
 /**
  * TypeScript's default library file, or null when it is not on disk.
@@ -496,6 +552,29 @@ export class TsProject {
     return out;
   }
 
+  /** Typed `val` mutation verdicts for candidate method calls. */
+  valMutationsFor(fileName: string, probes: TsValProbe[]): TsValMutation[] {
+    if (probes.length === 0 || this.typeEnvironmentError() !== null) return [];
+    try {
+      if (this.service.getSyntacticDiagnostics(fileName).length > 0) return [];
+      const program = this.service.getProgram();
+      if (!program) return [];
+      const sourceFile = program.getSourceFile(fileName);
+      if (!sourceFile) return [];
+      const checker = program.getTypeChecker();
+      const out: TsValMutation[] = [];
+      probes.forEach((probe, index) => {
+        const node = widestNodeIn(sourceFile, probe.start, probe.end);
+        if (!node) return;
+        const receiver = builtinMutator(program, checker, node, probe.method);
+        if (receiver !== null) out.push({ index, receiver });
+      });
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
   /** TypeScript's references for the symbol at a UTF-16 offset.
    * `isDefinition` is computed against the definition spans — the service's
    * own flag is unreliable in current TypeScript. */
@@ -627,6 +706,58 @@ export class TsProject {
       length: info.textSpan.length,
     };
   }
+}
+
+function widestNodeIn(
+  file: ts.SourceFile,
+  start: number,
+  end: number,
+): ts.Node | null {
+  let best: ts.Node | null = null;
+  const visit = (node: ts.Node): void => {
+    const from = node.getStart(file);
+    const to = node.getEnd();
+    if (to <= start || from >= end) return;
+    if (from >= start && to <= end) {
+      if (best === null || to - from > best.getEnd() - best.getStart(file)) {
+        best = node;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(file, visit);
+  return best;
+}
+
+function builtinMutator(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+  node: ts.Node,
+  method: string,
+): string | null {
+  if (!ts.isIdentifier(node) || node.text !== method) return null;
+  const access = node.parent;
+  if (
+    access === undefined ||
+    !ts.isPropertyAccessExpression(access) ||
+    access.name !== node
+  ) {
+    return null;
+  }
+  const declarations = checker.getSymbolAtLocation(node)?.declarations ?? [];
+  if (declarations.length === 0) return null;
+  const receivers = new Set<string>();
+  for (const declaration of declarations) {
+    const owner = declaration.parent;
+    if (owner === undefined || !ts.isInterfaceDeclaration(owner)) return null;
+    if (!program.isSourceFileDefaultLibrary(declaration.getSourceFile())) {
+      return null;
+    }
+    const mutators = BUILTIN_MUTATORS.get(owner.name.text);
+    if (mutators === undefined || !mutators.has(method)) return null;
+    receivers.add(owner.name.text);
+  }
+  return [...receivers].join(" | ");
 }
 
 /** Convert a UTF-16 offset in `text` to an LSP position. */

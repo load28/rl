@@ -1,0 +1,18 @@
+{
+  "name": "rl-typed-val-demo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:rl": "../../target/debug/rlc --check src/main.rl",
+    "build:rl": "../../target/debug/rlc src/main.rl -o build/rl",
+    "types:rl": "../../target/debug/rlc --types src -o .rl-types",
+    "check:ts": "tsc -p tsconfig.json --noEmit",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:rl && npm run build:ts",
+    "start": "node dist/main.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

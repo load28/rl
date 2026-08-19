@@ -210,16 +210,40 @@ fn have(cmd: &str) -> bool {
 
 /// Runs `rlc --types` over a one-file project and returns rlc's stderr.
 fn types_stderr(source: &str) -> String {
+    types_stderr_env(source, &[])
+}
+
+fn types_stderr_env(source: &str, envs: &[(&str, &str)]) -> String {
     let dir = tmpdir();
     let src = dir.join("src");
     fs::create_dir_all(&src).unwrap();
     fs::write(src.join("main.rl"), source).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rlc"));
+    command
         .args(["--types", "src", "-o", ".rl-types"])
-        .current_dir(&dir)
-        .output()
-        .expect("failed to run rlc");
+        .current_dir(&dir);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let out = command.output().expect("failed to run rlc");
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn tsgo_root() -> Option<PathBuf> {
+    let root = std::env::var_os("RLC_TSGO_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/Users/seominyeong/orca/typescript-go"));
+    let api = root.join("_packages/native-preview/src/api/sync/api.ts");
+    let exe = root.join("built/local/tsgo");
+    (api.exists() && exe.exists()).then_some(root)
+}
+
+fn node_supports_strip_types() -> bool {
+    Command::new("node")
+        .args(["--experimental-strip-types", "--no-warnings", "-e", ""])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 macro_rules! require_types_toolchain {
@@ -229,6 +253,24 @@ macro_rules! require_types_toolchain {
             return;
         }
     };
+}
+
+macro_rules! require_tsgo_native_backend {
+    () => {{
+        if !have("node") {
+            eprintln!("skipping: node not available");
+            return;
+        }
+        let Some(root) = tsgo_root() else {
+            eprintln!("skipping: no built typescript-go checkout for native backend tests");
+            return;
+        };
+        if !node_supports_strip_types() {
+            eprintln!("skipping: node cannot run tsgo source API with strip-types");
+            return;
+        }
+        root
+    }};
 }
 
 #[test]
@@ -246,6 +288,24 @@ fn types_reports_a_missing_literal_of_a_finite_union() {
     );
     // reported at the `match` keyword of the .rl source, not in the
     // generated TypeScript
+    assert!(err.contains("src/main.rl:3:10:"), "{err}");
+}
+
+#[test]
+fn types_tsgo_reports_a_missing_literal_of_a_finite_union() {
+    let root = require_tsgo_native_backend!();
+    let root = root.to_string_lossy().into_owned();
+    let err = types_stderr_env(
+        "type Direction = \"north\" | \"south\";\n\
+         export function short(dir: Direction) {\n\
+         \x20 return match (dir) { \"north\" => \"N\" };\n\
+         }\n",
+        &[("RLC_TS_BACKEND", "tsgo"), ("RLC_TSGO_ROOT", &root)],
+    );
+    assert!(
+        err.contains("match on literal union is not exhaustive: missing \"south\""),
+        "{err}"
+    );
     assert!(err.contains("src/main.rl:3:10:"), "{err}");
 }
 
@@ -355,6 +415,24 @@ fn types_reports_a_mutating_method_of_a_built_in() {
 }
 
 #[test]
+fn types_tsgo_reports_a_mutating_method_of_a_built_in() {
+    let root = require_tsgo_native_backend!();
+    let root = root.to_string_lossy().into_owned();
+    let err = types_stderr_env(
+        "val const map = new Map<string, number>();\n\
+         map.set(\"a\", 1);\n",
+        &[("RLC_TS_BACKEND", "tsgo"), ("RLC_TSGO_ROOT", &root)],
+    );
+    assert!(
+        err.contains(
+            "cannot call mutating method `set` of built-in `Map` through val binding `map`"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("src/main.rl:2:1:"), "{err}");
+}
+
+#[test]
 fn types_reports_set_add_and_array_push() {
     require_types_toolchain!();
     let err = types_stderr(
@@ -404,6 +482,23 @@ fn types_leaves_a_user_defined_method_of_the_same_name_alone() {
          val const collection = new Collection();\n\
          collection.add(1);\n\
          collection.push(2);\n",
+    );
+    assert!(!err.contains("mutating method"), "{err}");
+}
+
+#[test]
+fn types_tsgo_leaves_a_user_defined_method_of_the_same_name_alone() {
+    let root = require_tsgo_native_backend!();
+    let root = root.to_string_lossy().into_owned();
+    let err = types_stderr_env(
+        "class Query {\n\
+         \x20 set(key: string): Query {\n\
+         \x20   return new Query();\n\
+         \x20 }\n\
+         }\n\
+         val const query = new Query();\n\
+         query.set(\"name\");\n",
+        &[("RLC_TS_BACKEND", "tsgo"), ("RLC_TSGO_ROOT", &root)],
     );
     assert!(!err.contains("mutating method"), "{err}");
 }

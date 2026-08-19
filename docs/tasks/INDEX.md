@@ -79,8 +79,24 @@
 | TASK-069 | match 리터럴 패턴 — 문자열/숫자/불리언 | 완료 | 2026-08-18 | 2026-08-18 | [TASK-069](./TASK-069-match-literal-patterns.md) |
 | TASK-070 | `val` — 변경 금지 바인딩 수식자 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-070](./TASK-070-val-binding-modifier.md) |
 | TASK-071 | `val` 변경 메서드 판정을 타입 기반으로 — 이름 기준 오탐 제거 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-071](./TASK-071-val-typed-mutation.md) |
-| TASK-072 | 에디터에 타입 기반 `val` 진단 노출 | 대기 | — | — | [TASK-072](./TASK-072-val-typed-diagnostics-in-editor.md) |
+| TASK-072 | 에디터에 타입 기반 `val` 진단 노출 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-072](./TASK-072-val-typed-diagnostics-in-editor.md) |
+| TASK-073 | TypeScript 7.1 native backend 전환 검토 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-073](./TASK-073-tsgo-native-backend-review.md) |
+| TASK-074 | tsgo native backend project graph parity 1단계 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-074](./TASK-074-tsgo-project-graph-parity.md) |
+| TASK-075 | TypeScript backend 선택 경계와 default export parity | 완료 | 2026-08-19 | 2026-08-19 | [TASK-075](./TASK-075-typescript-backend-seam.md) |
+| TASK-076 | TypeScript backend 모듈 분리 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-076](./TASK-076-typescript-backend-module.md) |
+| TASK-077 | TypeScript backend protocol result model 분리 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-077](./TASK-077-typescript-backend-protocol-model.md) |
+| TASK-078 | TypeScript backend job/probe model 분리 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-078](./TASK-078-typescript-backend-job-model.md) |
+| TASK-079 | TypeScript backend host runner 분리 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-079](./TASK-079-typescript-backend-host-runner.md) |
+| TASK-080 | tsgo native backend package boundary parity | 완료 | 2026-08-19 | 2026-08-19 | [TASK-080](./TASK-080-tsgo-package-boundary-parity.md) |
+| TASK-081 | TypeScript backend module root 이동 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-081](./TASK-081-typescript-module-root.md) |
+| TASK-082 | TypeScript diagnostic mapper 모듈 분리 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-082](./TASK-082-typescript-mapper-module.md) |
+| TASK-083 | TypeScript backend protocol 모듈 분리 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-083](./TASK-083-typescript-protocol-module.md) |
+| TASK-084 | TypeScript semantic probe 모듈 분리 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-084](./TASK-084-typescript-semantic-module.md) |
+| TASK-085 | TypeScript backend 모듈 경계 정리 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-085](./TASK-085-typescript-host-module.md) |
+| TASK-086 | typed val 예시 프로젝트와 Cursor 확장 갱신 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-086](./TASK-086-typed-val-example-project.md) |
+| TASK-087 | result 바인딩 선언 위치 emit-map | 완료 | 2026-08-19 | 2026-08-19 | [TASK-087](./TASK-087-result-binding-emit-map.md) |
+| TASK-088 | Cursor 확장과 rlc 바이너리 갱신 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-088](./TASK-088-update-cursor-extension-binary.md) |
 
 ## 다음 태스크 번호
 
-**TASK-073**
+**TASK-089**
