@@ -95,7 +95,8 @@
 | TASK-085 | call-capability 검사의 callee를 symbol identity로 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-085](./TASK-085-callee-symbol-pairing.md) |
 | TASK-086 | Project/Snapshot 기반 Language Engine 아키텍처 재구성 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-086](./TASK-086-engine-architecture.md) |
 | TASK-087 | LSP 재설계 — 엔진 어댑터화와 TsgoProject 제거 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-087](./TASK-087-lsp-engine-adapter.md) |
+| TASK-088 | CI native 테스트 guard 개수 갱신 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-088](./TASK-088-ci-native-guard-count.md) |
 
 ## 다음 태스크 번호
 
-**TASK-088**
+**TASK-089**
