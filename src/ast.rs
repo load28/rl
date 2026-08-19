@@ -163,9 +163,11 @@ pub(crate) enum ResultItem {
 pub(crate) struct ResultBind {
     /// The declaration keyword: `const`, `let`, or `var`.
     pub kw: String,
-    /// The verbatim text between the keyword and `<-` (identifier or
-    /// destructuring pattern, optionally type-annotated).
-    pub binding: String,
+    /// Span of the verbatim text between the keyword and `<-` (identifier
+    /// or destructuring pattern, optionally type-annotated), trimmed of the
+    /// whitespace around it. Carried as a span, not a copy, so the emitted
+    /// declaration maps back to the name the user wrote.
+    pub binding_span: Span,
     /// The expression after `<-`, recursively parsed.
     pub expr: Program,
 }
