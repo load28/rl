@@ -54,6 +54,30 @@ import * as path from "node:path";
 import process from "node:process";
 
 /**
+ * Writes a whole answer line to stdout **synchronously**.
+ *
+ * `process.stdout.write` queues anything past the pipe's buffer (64 KB on
+ * Linux) for the event loop to flush — and this host then blocks the event
+ * loop in `readSync` waiting for the next request, which never comes
+ * because the client is still waiting for the rest of the answer. A
+ * project with a few hundred diagnostics crosses 64 KB, so the flush has
+ * to happen before the loop turns around: partial writes and EAGAIN are
+ * retried until every byte is out.
+ */
+function writeLine(text) {
+  const buffer = Buffer.from(text + "\n", "utf8");
+  let pos = 0;
+  while (pos < buffer.length) {
+    try {
+      pos += fs.writeSync(1, buffer, pos, buffer.length - pos);
+    } catch (e) {
+      if (e.code === "EAGAIN") continue;
+      throw e;
+    }
+  }
+}
+
+/**
  * Reads stdin one line at a time, blocking. The client waits for each
  * answer before sending the next request, so a single buffer is enough.
  */
@@ -151,7 +175,7 @@ async function main() {
     ...(open.tsgoBin ? { tsserverPath: open.tsgoBin } : {}),
     fs: layeredFileSystem(files, dirs),
   });
-  process.stdout.write(JSON.stringify({ ok: true }) + "\n");
+  writeLine(JSON.stringify({ ok: true }));
 
   let opened = false;
   try {
@@ -165,7 +189,7 @@ async function main() {
       } catch (e) {
         answer = { error: String((e && e.stack) || e) };
       }
-      process.stdout.write(JSON.stringify(answer) + "\n");
+      writeLine(JSON.stringify(answer));
     }
   } finally {
     api.close();
@@ -257,13 +281,36 @@ async function main() {
         () => checker.getTypeAtPosition(module, positions),
         () => positions.map((p) => checker.getTypeAtPosition(module, p)),
       ));
+    // A project's matches share their scrutinee types: one enum matched in
+    // three hundred places is one type, and the answers derived from a type
+    // — its constituents, each constituent's `kind` — depend on nothing
+    // else. Both are asked once per type, not once per match. (Type ids are
+    // snapshot-scoped, so the memo lives and dies with this ask.)
+    const constituentCache = new Map();
+    const constituentsOf = (type) => {
+      let constituents = constituentCache.get(type.id);
+      if (constituents === undefined) {
+        constituents = type.isUnionType?.() ? type.getTypes() : [type];
+        constituentCache.set(type.id, constituents);
+      }
+      return constituents;
+    };
+    const kindCache = new Map();
+    const kindSymbolOf = (constituent) => {
+      let kind = kindCache.get(constituent.id);
+      if (kind === undefined) {
+        kind = checker.getPropertyOfType(constituent, "kind") ?? null;
+        kindCache.set(constituent.id, kind);
+      }
+      return kind;
+    };
     // A tag check needs a second round: the `kind` property's type of every
-    // constituent. The property lookups are per constituent, but the types
-    // of all their symbols — across every tag check — are one batch.
+    // constituent. The types of the distinct `kind` symbols — across every
+    // tag check — are one batch.
     const tagWork = [];
     typeChecks.forEach((entry, at) => {
       if (!entry.tag) {
-        const missing = missingLiterals(types[at], entry.check.covered);
+        const missing = missingLiterals(types[at], entry.check.covered, constituentsOf);
         if (missing) out.literalMissing.push({ index: entry.index, missing });
         return;
       }
@@ -271,20 +318,27 @@ async function main() {
       // "which `kind` values does the scrutinee's type still allow?" —
       // again at the match, so a case an earlier guard removed is not
       // demanded back.
-      const symbols = tagKindSymbols(checker, types[at]);
+      const symbols = tagKindSymbols(types[at], constituentsOf, kindSymbolOf);
       if (symbols) tagWork.push({ index: entry.index, covered: entry.check.covered, symbols });
     });
     if (tagWork.length > 0) {
-      const all = tagWork.flatMap((work) => work.symbols);
+      // One question per distinct symbol: the same case tag reached from
+      // three hundred matches is still one symbol.
+      const distinct = new Map();
+      for (const work of tagWork) {
+        for (const symbol of work.symbols) {
+          if (!distinct.has(symbol.id)) distinct.set(symbol.id, symbol);
+        }
+      }
+      const asked = [...distinct.values()];
       const kinds = batched(
         "typesOfSymbols",
-        () => checker.getTypeOfSymbol(all),
-        () => all.map((symbol) => checker.getTypeOfSymbol(symbol)),
+        () => checker.getTypeOfSymbol(asked),
+        () => asked.map((symbol) => checker.getTypeOfSymbol(symbol)),
       );
-      let cursor = 0;
+      const valueOf = new Map(asked.map((symbol, i) => [symbol.id, literalValue(kinds[i])]));
       for (const work of tagWork) {
-        const tags = work.symbols.map((_, i) => literalValue(kinds[cursor + i]));
-        cursor += work.symbols.length;
+        const tags = work.symbols.map((symbol) => valueOf.get(symbol.id));
         // Every constituent must carry a single string-literal `kind`;
         // anything less definite makes the whole question indefinite, and
         // an indefinite question gets no answer.
@@ -374,9 +428,9 @@ function serve(files, dirs, modules) {
  * a type parameter, `"a" | string` — is left alone: a missed diagnostic
  * beats a false one.
  */
-function missingLiterals(type, covered) {
+function missingLiterals(type, covered, constituentsOf) {
   if (!type) return null;
-  const constituents = type.isUnionType?.() ? type.getTypes() : [type];
+  const constituents = constituentsOf(type);
   const values = [];
   for (const c of constituents) {
     const value = literalValue(c);
@@ -395,12 +449,12 @@ function missingLiterals(type, covered) {
  * question gets no answer. Whether each `kind` is a single string literal is
  * the caller's half, batched over every tag check at once.
  */
-function tagKindSymbols(checker, type) {
+function tagKindSymbols(type, constituentsOf, kindSymbolOf) {
   if (!type) return null;
-  const constituents = type.isUnionType?.() ? type.getTypes() : [type];
+  const constituents = constituentsOf(type);
   const symbols = [];
   for (const c of constituents) {
-    const kind = checker.getPropertyOfType(c, "kind");
+    const kind = kindSymbolOf(c);
     if (!kind) return null;
     symbols.push(kind);
   }

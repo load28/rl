@@ -627,6 +627,28 @@ fn an_any_receiver_is_never_called_a_mutation() {
 }
 
 #[test]
+fn an_answer_past_the_pipe_buffer_still_arrives() {
+    // A few hundred diagnostics make the host's one-line answer larger
+    // than a pipe buffer (64 KB on Linux). The host must flush the whole
+    // line synchronously before it turns around to wait for the next
+    // request — an async write that queued the tail past the buffer
+    // deadlocked the session: the host blocked reading, the compiler
+    // blocked waiting for the rest of the answer.
+    let root = require_tsgo!();
+    let mut source = String::new();
+    for i in 0..400 {
+        source.push_str(&format!("export const a{i}: number = \"x{i}\";\n"));
+    }
+    let dir = project(&[("src/big.rl", source.as_str())]);
+    let out = check(&dir, &root);
+    assert_eq!(
+        out.lines().filter(|l| l.contains("ts(2322)")).count(),
+        400,
+        "every diagnostic of a >64 KB answer arrives: {out}"
+    );
+}
+
+#[test]
 fn a_non_mutating_builtin_method_is_not_a_mutation() {
     // Collection asks about every method call through a `val` path; the
     // verdict is two halves — the checker's (a built-in's method) and rl's
