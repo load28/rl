@@ -143,6 +143,53 @@ fn literal_exhaustiveness_uses_the_narrowed_type_at_the_match() {
 }
 
 #[test]
+fn enum_exhaustiveness_uses_the_narrowed_type_at_the_match() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/shape.rl",
+        "export enum Shape { Circle(radius: number), Square(side: number), Point }\n\
+         export function area(s: Shape): number {\n\
+         \x20 if (s.kind !== \"Point\") {\n\
+         \x20   return match (s) { Circle(radius) => radius };\n\
+         \x20 }\n\
+         \x20 return 0;\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("missing \"Square\""),
+        "the narrowed type still allows Square: {out}"
+    );
+    assert!(
+        !out.contains("Point"),
+        "the guard removed Point before the match: {out}"
+    );
+}
+
+#[test]
+fn an_enum_from_another_module_needs_no_declaration_collecting() {
+    let root = require_tsgo!();
+    let dir = project(&[
+        (
+            "src/token.rl",
+            "export enum Token { Num(value: number), Eof }\n",
+        ),
+        (
+            "src/parse.rl",
+            "import { Token } from \"./token.rl\";\n\
+             export function width(t: Token): number {\n\
+             \x20 return match (t) { Num(value) => value };\n\
+             }\n",
+        ),
+    ]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("missing \"Eof\""),
+        "the enum's cases come from the imported module's own type: {out}"
+    );
+}
+
+#[test]
 fn val_mutation_is_decided_by_the_method_the_call_resolves_to() {
     let root = require_tsgo!();
     let dir = project(&[

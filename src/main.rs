@@ -1136,6 +1136,7 @@ fn compile_jobs(jobs: &[Job], opts: &BuildOptions) -> bool {
                 verify: opts.verify,
                 rewrite_imports: opts.rewrite_imports,
                 extern_enums: &extern_enums,
+                defer_exhaustiveness: false,
                 std_import: std_import.as_deref(),
             };
             let mut code = match compile(&loaded.source, &options) {
@@ -1534,6 +1535,7 @@ fn types_once(inputs: &[String], opts: &TypesOptions) -> Result<bool, ExitCode> 
                 // must carry the ones the consumer resolves — the originals.
                 rewrite_imports: ImportRewrite::Off,
                 extern_enums: &extern_enums,
+                defer_exhaustiveness: false,
                 std_import: None,
             };
             compile_mapped(&loaded.source, &options).map_err(|e| format!("rlc: {e}"))

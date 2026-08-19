@@ -55,6 +55,9 @@ pub(crate) fn lower(files: &[PathBuf]) -> Result<Vec<Lowered>, (PathBuf, rlc::Co
         })?;
         let options = Options {
             filename: Some(file.to_str().unwrap_or("<input>")),
+            // Exhaustiveness is the checker's answer here, from the narrowed
+            // type at each match — see `Options::defer_exhaustiveness`.
+            defer_exhaustiveness: true,
             // The lowered module sits where the source did, so a relative
             // `.rl` specifier names the module beside it: `./x.rl` → `./x.ts`.
             rewrite_imports: rlc::ImportRewrite::Ts,
@@ -110,6 +113,21 @@ pub(crate) fn query(lowered: &[Lowered]) -> (Query, Probes) {
             });
         }
 
+        for probe in rlc::tag_matches(&file.source) {
+            let Some(position) = anchor(&file.emit, probe.scrutinee) else {
+                continue;
+            };
+            query.tags.push(TagQuery {
+                module: file.module_path.clone(),
+                position,
+                covered: probe.covered,
+            });
+            probes.tags.push(SourceAnchor {
+                source_path: file.source_path.clone(),
+                offset: probe.offset,
+            });
+        }
+
         for call in rlc::val_method_calls(&file.source) {
             let Some(position) = anchor(&file.emit, call.name) else {
                 continue;
@@ -150,6 +168,7 @@ pub(crate) struct ValAnchor {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Probes {
     pub literals: Vec<SourceAnchor>,
+    pub tags: Vec<SourceAnchor>,
     pub vals: Vec<ValAnchor>,
 }
 

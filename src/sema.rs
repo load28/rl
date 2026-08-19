@@ -81,11 +81,16 @@ struct TupleMatchCheck {
 
 /// Checks a whole program; `verify` enables swc validation of field types;
 /// `externs` are enum declarations collected from imported modules
-/// ([`crate::Options::extern_enums`]).
+/// ([`crate::Options::extern_enums`]). With `defer_exhaustiveness` the two
+/// exhaustiveness passes are skipped, because a TypeScript backend answers
+/// the question better than this file's declaration table can
+/// ([`crate::Options::defer_exhaustiveness`]); every other rl-level rule is
+/// checked either way.
 pub(crate) fn check(
     program: &Program,
     verify: bool,
     externs: &[ExternEnum],
+    defer_exhaustiveness: bool,
 ) -> Result<(), RlError> {
     let mut checker = Checker {
         verify,
@@ -95,6 +100,9 @@ pub(crate) fn check(
         tuple_checks: Vec::new(),
     };
     checker.visit_program(program, Ctx::Top)?;
+    if defer_exhaustiveness {
+        return Ok(());
+    }
     checker.check_exhaustiveness()?;
     checker.check_tuple_exhaustiveness()
 }

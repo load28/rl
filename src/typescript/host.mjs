@@ -16,11 +16,13 @@
  *
  *   { tsgoBin, apiModule, cwd, tsconfig,
  *     modules: [{ path, text }],          // lowered .rl → virtual .ts
- *     literalChecks: [{ module, start, end, covered: [...] }],
- *     valChecks: [{ module, start, end, method }] }
+ *     literalChecks: [{ module, start, covered: [...] }],
+ *     tagChecks: [{ module, start, covered: [...] }],
+ *     valChecks: [{ module, start }] }
  *
  *   { diagnostics: [{ file, start, end, code, message }],
  *     literalMissing: [{ index, missing }],
+ *     tagMissing: [{ index, missing }],
  *     valMutations: [{ index, receiver, declaredIn }] }
  *
  * `start`/`end` are UTF-16 code-unit offsets — TypeScript's own coordinate
@@ -122,7 +124,7 @@ async function main() {
     fs: layeredFileSystem(job.modules ?? []),
   });
 
-  const out = { diagnostics: [], literalMissing: [], valMutations: [] };
+  const out = { diagnostics: [], literalMissing: [], tagMissing: [], valMutations: [] };
   try {
     const snapshot = api.updateSnapshot({ openProjects: [job.tsconfig] });
     const project = snapshot.getProject(job.tsconfig);
@@ -148,6 +150,16 @@ async function main() {
       const type = checker.getTypeAtPosition(check.module, check.start);
       const missing = missingLiterals(type, check.covered);
       if (missing) out.literalMissing.push({ index, missing });
+    });
+
+    // Tag-match exhaustiveness: an rl enum lowers to a discriminated union,
+    // so the same question is "which `kind` values does the scrutinee's type
+    // still allow?" — again at the match, so a case an earlier guard removed
+    // is not demanded back.
+    (job.tagChecks ?? []).forEach((check, index) => {
+      const type = checker.getTypeAtPosition(check.module, check.start);
+      const missing = missingTags(checker, type, check.covered);
+      if (missing) out.tagMissing.push({ index, missing });
     });
 
     // `val` mutation: what the method resolves to decides, never its name.
@@ -184,6 +196,30 @@ function missingLiterals(type, covered) {
   }
   const seen = new Set(covered.map((c) => JSON.stringify(c)));
   const missing = values.filter((v) => !seen.has(JSON.stringify(v)));
+  return missing.length > 0 ? missing : null;
+}
+
+/**
+ * The case tags of `type` that `covered` does not, or `null` when the type is
+ * not a definite union of tagged object types. Every constituent must carry a
+ * `kind` that is a single string literal — anything else (a bare object, a
+ * type parameter, `any`) makes the whole question indefinite, and an
+ * indefinite question gets no answer.
+ */
+function missingTags(checker, type, covered) {
+  if (!type) return null;
+  const constituents = type.isUnionType?.() ? type.getTypes() : [type];
+  const tags = [];
+  for (const c of constituents) {
+    const kind = checker.getPropertyOfType(c, "kind");
+    if (!kind) return null;
+    const kindType = checker.getTypeOfSymbol(kind);
+    const value = kindType && literalValue(kindType);
+    if (typeof value !== "string") return null;
+    tags.push(value);
+  }
+  const seen = new Set(covered);
+  const missing = tags.filter((t) => !seen.has(t));
   return missing.length > 0 ? missing : null;
 }
 

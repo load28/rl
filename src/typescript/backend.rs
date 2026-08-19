@@ -37,6 +37,20 @@ pub(crate) struct LiteralQuery {
     pub covered: Vec<rlc::Literal>,
 }
 
+/// "Which case tags does the scrutinee's type still allow?" — the same
+/// question as [`LiteralQuery`], for an rl enum. The enum lowers to a
+/// discriminated union, so the answer is the `kind` literals of the type's
+/// constituents at that point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TagQuery {
+    /// The module the scrutinee lives in.
+    pub module: PathBuf,
+    /// UTF-16 offset of the scrutinee in that module.
+    pub position: usize,
+    /// The tags the match's unguarded arms cover.
+    pub covered: Vec<String>,
+}
+
 /// "What does this method call resolve to?" — the typed half of `val`.
 ///
 /// rlc does not decide from the method's name whether a call mutates; it
@@ -56,6 +70,7 @@ pub(crate) struct Query {
     /// the compiler reads those from disk, where they already are.
     pub modules: Vec<Module>,
     pub literals: Vec<LiteralQuery>,
+    pub tags: Vec<TagQuery>,
     pub vals: Vec<ValQuery>,
 }
 
@@ -83,6 +98,15 @@ pub(crate) struct LiteralMissing {
     pub missing: Vec<rlc::Literal>,
 }
 
+/// The case tags a [`TagQuery`]'s arms fail to cover, under the same
+/// certainty rule as [`LiteralMissing`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TagMissing {
+    /// Index into [`Query::tags`].
+    pub index: usize,
+    pub missing: Vec<String>,
+}
+
 /// What a [`ValQuery`]'s method resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValResolution {
@@ -101,6 +125,7 @@ pub(crate) struct ValResolution {
 pub(crate) struct Answers {
     pub diagnostics: Vec<Diagnostic>,
     pub literal_missing: Vec<LiteralMissing>,
+    pub tag_missing: Vec<TagMissing>,
     pub val_resolutions: Vec<ValResolution>,
 }
 

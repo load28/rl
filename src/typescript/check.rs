@@ -129,6 +129,30 @@ pub(crate) fn run(inputs: &[String], project_arg: Option<&Path>, node: Option<&P
         );
     }
 
+    // Tag exhaustiveness, from the same narrowed type.
+    for missing in &answers.tag_missing {
+        let Some(anchor) = probes.tags.get(missing.index) else {
+            continue;
+        };
+        let Some(file) = lowered.iter().find(|f| f.source_path == anchor.source_path) else {
+            continue;
+        };
+        let (line, col) = rlc::line_col(&file.source, anchor.offset);
+        reported += 1;
+        println!(
+            "{}:{}:{}: rl: match is not exhaustive: missing {}",
+            file.source_path.display(),
+            line,
+            col,
+            missing
+                .missing
+                .iter()
+                .map(|t| format!("{t:?}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+
     // `val`: a call mutates only when the method it resolves to is declared
     // in TypeScript's own lib files. A user-defined method that shares a
     // name — and anything the checker could not resolve — is not a mutation.

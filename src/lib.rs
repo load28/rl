@@ -64,7 +64,7 @@ mod val;
 mod verify;
 
 pub use error::CompileError;
-pub use probe::{Literal, LiteralMatch, literal_matches};
+pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};
 pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
 pub use val::ValMethodCall;
@@ -448,6 +448,17 @@ pub struct Options<'a> {
     /// built-ins of the same name). The `rlc` CLI fills this from the
     /// file's direct relative `.rl` imports.
     pub extern_enums: &'a [ExternEnum],
+    /// Leave match exhaustiveness to a TypeScript backend instead of
+    /// resolving it from this file's enum declarations.
+    ///
+    /// rlc's own answer is complete for the enums it can see, but it is the
+    /// *declared* type's answer: a case an earlier guard already removed is
+    /// still demanded, and an enum from another module has to be collected
+    /// ([`Options::extern_enums`]). A checker asked at the `match` answers
+    /// from the **narrowed** type and needs no collecting. Callers that have
+    /// one — `rlc --native-check` — set this and report what it says; every
+    /// other rl-level check runs unchanged.
+    pub defer_exhaustiveness: bool,
     /// What `"@rl/std"` ([`STD_SPECIFIER`]) is rewritten to on the way out
     /// — the path of the standard library module this output will sit
     /// next to (`"./rl.js"`, `"../rl.ts"`, ...). `None` leaves the bare
@@ -463,6 +474,7 @@ impl Default for Options<'_> {
             verify: true,
             rewrite_imports: ImportRewrite::default(),
             extern_enums: &[],
+            defer_exhaustiveness: false,
             std_import: None,
         }
     }
@@ -541,7 +553,13 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
     // tsc; `val`'s binding analysis reads the token stream the parse
     // already produced) → code emission (infallible).
     let (program, tokens) = parser::lex_and_parse(source);
-    sema::check(&program, options.verify, options.extern_enums).map_err(to_compile_error)?;
+    sema::check(
+        &program,
+        options.verify,
+        options.extern_enums,
+        options.defer_exhaustiveness,
+    )
+    .map_err(to_compile_error)?;
     val::check(source, &tokens).map_err(to_compile_error)?;
     let (code, mappings) = codegen::emit_with_map(
         &program,

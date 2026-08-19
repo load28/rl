@@ -176,6 +176,13 @@ fn job_json(
                 "covered": l.covered.iter().map(literal_json).collect::<Vec<_>>(),
             }))
             .collect::<Vec<_>>(),
+        "tagChecks": query.tags.iter()
+            .map(|t| json!({
+                "module": t.module,
+                "start": t.position,
+                "covered": t.covered,
+            }))
+            .collect::<Vec<_>>(),
         "valChecks": query.vals.iter()
             .map(|v| json!({ "module": v.module, "start": v.position }))
             .collect::<Vec<_>>(),
@@ -218,6 +225,19 @@ fn parse_answers(stdout: &str) -> Result<Answers, String> {
             missing: m["missing"]
                 .as_array()
                 .map(|a| a.iter().filter_map(json_literal).collect())
+                .unwrap_or_default(),
+        });
+    }
+    for m in array(&value, "tagMissing") {
+        answers.tag_missing.push(TagMissing {
+            index: m["index"].as_u64().unwrap_or_default() as usize,
+            missing: m["missing"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
         });
     }
