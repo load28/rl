@@ -86,7 +86,8 @@
 | TASK-076 | 증분 검사 — 서버를 살려 두고 스냅샷만 갱신 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-076](./TASK-076-incremental-native-check.md) |
 | TASK-077 | 언어 서비스를 네이티브 백엔드로 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-077](./TASK-077-language-service-native.md) |
 | TASK-078 | `result` 바인딩 선언 위치 emit-map | 완료 | 2026-08-19 | 2026-08-19 | [TASK-078](./TASK-078-result-binding-emit-map.md) |
+| TASK-079 | tsgo native backend 전환 설계 문서 편입 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-079](./TASK-079-tsgo-backend-design-record.md) |
 
 ## 다음 태스크 번호
 
-**TASK-079**
+**TASK-080**
