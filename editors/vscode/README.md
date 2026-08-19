@@ -115,7 +115,9 @@ head와 맞지 않아 콤비네이터 파라미터가 `unknown`으로 추론되�
 
 1. `rl.compilerPath` 설정
 2. 워크스페이스의 `target/release/rlc` → `target/debug/rlc`
-3. PATH의 `rlc`
+3. 워크스페이스에 `file:`로 설치된 로컬 개발용 `rl-lang` 패키지의 rlc
+   (RL 저장소에서 `scripts/setup`을 돌린 경우 — `server/src/dev.ts`)
+4. PATH의 `rlc`
 
 `rlc`가 없으면 진단과 엔진 위임 기능이 꺼지고, rl 구문 계층(enum·케이스
 태그·문서 심볼·빠른 수정)은 그대로 동작합니다.
@@ -132,6 +134,13 @@ TypeScript 7에는 인프로세스 JS 언어 서비스 API가 없기 때문이�
    typescript-go 체크아웃 (`built/local/tsgo`)
 2. 프로젝트에서 위로 올라가며 찾는 `node_modules/@typescript/
    typescript-<platform>/lib/tsc` (또는 `native-preview-<platform>`)
+
+RL 저장소에서 `scripts/setup`으로 toolchain을 연결해 뒀다면(체크아웃 모드,
+`.rl-dev/toolchain.json`) 이 서버가 rlc를 띄울 때 그 `RLC_TSGO_*` 변수를
+**그 child process에만** 주입해 CLI launcher와 동일한 toolchain을 쓰게
+합니다 — 셸이나 VSCode 환경은 건드리지 않습니다 (`server/src/dev.ts`).
+npm 모드(`--tsgo-npm`)면 아무것도 주입하지 않고 위 순서 그대로 각
+프로젝트의 TypeScript를 씁니다.
 
 즉 **프로젝트가 `typescript@7`을 설치해 두면 그대로 동작합니다.** 찾지
 못하면 위 위임 기능들이 답하지 않고, rl 자신이 아는 것(enum·케이스 태그·
@@ -222,6 +231,10 @@ npm test           # 서버 분석 로직 단위 테스트 (node --test)
 
 VSCode에서 `editors/vscode` 폴더를 열고 **F5** (Launch Extension)를 누르면
 확장 개발 호스트가 뜹니다. `.rl` 파일을 열어 확인하세요.
+
+저장소 루트의 `./scripts/setup`은 이 확장을 빌드해 vsix로 만들고 실제
+VSCode에 설치까지 합니다 — 업데이트는 항상 기존 설치를 삭제한 뒤 새로
+설치합니다 ([`CONTRIBUTING.md`](../../CONTRIBUTING.md)의 "로컬 개발 환경").
 
 ### 패키징
 

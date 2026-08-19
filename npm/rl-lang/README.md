@@ -50,6 +50,21 @@ const { binaryPath } = require("rl-lang");
 binaryPath(); // absolute path to the rlc binary for this platform
 ```
 
+## Local development install
+
+In a checkout of the [rl repository](https://github.com/load28/rl),
+`./scripts/setup` stamps this directory for local installs. A project can
+then use the work-in-progress compiler like any other dependency:
+
+```sh
+pnpm add -D file:/path/to/rl/npm/rl-lang
+```
+
+The launcher runs the repository's `target/release/rlc` and, when setup was
+pointed at a typescript-go checkout, hands that toolchain to the spawned
+compiler process only — your shell environment is never modified. Published
+installs are unaffected (the stamp file is not committed or published).
+
 ## Documentation
 
 Language reference, CLI options, standard library and error index:

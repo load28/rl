@@ -23,14 +23,18 @@ function platformKey() {
  * Absolute path to the rlc binary for this platform.
  *
  * Resolution order: the `RLC_BINARY` environment variable (escape hatch for
- * local builds and tests), then the installed platform package. Throws with
- * install guidance when neither is available.
+ * local builds and tests), then a local development install (`scripts/setup`
+ * in the RL repository — see dev.js), then the installed platform package.
+ * Throws with install guidance when none is available.
  *
  * @returns {string}
  */
 function binaryPath() {
   const override = process.env.RLC_BINARY;
   if (override) return path.resolve(override);
+
+  const dev = require("./dev.js").devEnvironment();
+  if (dev) return dev.binary;
 
   const key = platformKey();
   const exe = process.platform === "win32" ? "rlc.exe" : "rlc";
