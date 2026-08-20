@@ -472,6 +472,9 @@ rl이 직접 답합니다. `semanticTokens`처럼 텍스트만으로 답하되, 
 rlSymbol { "path", "text", "position" }
   → null | { "kind": "enum" | "case" | "field", "range", "name", "enumName",
              "signature", "detail", "definition": null | { "path", "range" } }
+
+rlCompletions { "path", "text", "position" }
+  → { "items": [{ "label", "kind": "case" | "field", "detail", "covered" }] }
 ```
 
 - 답하는 자리는 **체커에게 물을 수 없는 자리뿐**입니다: enum 선언 안(이름·
@@ -482,6 +485,23 @@ rlSymbol { "path", "text", "position" }
   컴파일러 자신의 것이라 열 파일이 없습니다.
 - import된 enum의 선언은 **디스크에서** 읽습니다(저장되지 않은 편집은 보이지
   않습니다).
+
+`rlCompletions`는 **패턴 자리**에서만 답합니다. 자리는 토큰 스트림으로
+판정하므로 구문이 아직 완성되지 않아도(`match (s) { Circle(r) => r, Po`) 답이
+나옵니다 — 완성이 필요한 순간이 바로 그때이기 때문입니다.
+
+| 자리 | 답 |
+|------|-----|
+| match 암의 패턴 시작(`{`·`,`·`\|` 뒤) | 그 match가 대상으로 하는 enum의 케이스들. 이미 쓴 케이스는 `covered: true`로 표시만 하고 빼지 않습니다 |
+| `if let ` 뒤 | 보이는 모든 enum의 케이스(어느 enum인지 말해 주는 것이 아직 없으므로). 편집기가 접두사로 거릅니다 |
+| 패턴 괄호 안(`Tag(` 또는 `,` 뒤) | 그 케이스의 페이로드 필드 이름들 — `match`·let-else·`if let` 어디서나 |
+| `Tag(field: ` 뒤 | 그 필드의 **선언된 타입**이 가리키는 enum의 케이스들 |
+
+- let-else의 **태그** 자리(`const Ci`)는 답하지 않습니다 — 평범한 선언과
+  구분되지 않습니다. 괄호를 연 뒤의 필드 자리는 답합니다.
+- 튜플 패턴의 원소 자리(`(No`)는 아직 답하지 않습니다.
+- 일반 TypeScript 완성은 여기 섞이지 않습니다 — `completion`의 답과 합치는
+  것은 소비자의 몫입니다.
 
 - `completion`의 `member`(요청)는 커서가 멤버 접근 자리인지 — 그 자리에서
   일반 답이 불가능하면 엔진이 **프로브**(`$rl_probe` 삽입 임시 projection)

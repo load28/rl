@@ -29,6 +29,9 @@
 //! ← { "id": 5, "result": { "kind", "range", "name", "enumName",
 //!                          "signature", "detail", "definition" } | null }
 //!
+//! → { "id": 6, "method": "rlCompletions", "params": { "path", "text", "position" } }
+//! ← { "id": 6, "result": { "items": [{ "label", "kind", "detail", "covered" }] } }
+//!
 //! ← { "id": N, "error": "sentence" }   // the request failed; the session lives
 //! ```
 //!
@@ -205,6 +208,7 @@ fn respond(sessions: &mut Sessions, line: &str) -> serde_json::Value {
         }),
         "semanticTokens" => semantic_tokens(params),
         "rlSymbol" => rl_symbol(params),
+        "rlCompletions" => rl_completions(params),
         "tsDiagnostics" => semantic(sessions, params, |project, path, _position| {
             let diagnostics: Vec<_> = project
                 .service_diagnostics(path)?
@@ -379,6 +383,35 @@ fn rl_symbol(params: &serde_json::Value) -> Result<serde_json::Value, String> {
             "range": range_json(location.range),
         })),
     }))
+}
+
+/// What can be written at a pattern position — case tags, payload field
+/// names. Text-only, for the same reason [`rl_symbol`] is.
+fn rl_completions(params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?;
+    let position = Position {
+        line: params["position"]["line"].as_u64().unwrap_or(0) as u32,
+        character: params["position"]["character"].as_u64().unwrap_or(0) as u32,
+    };
+    let items: Vec<_> =
+        rlc::engine::rl_completions_at(Path::new(path), text_param(params)?, position)
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "label": item.label,
+                    "kind": match item.kind {
+                        rlc::engine::RlCompletionKind::Case => "case",
+                        rlc::engine::RlCompletionKind::Field => "field",
+                    },
+                    "detail": item.detail,
+                    "covered": item.covered,
+                })
+            })
+            .collect();
+    Ok(json!({ "items": items }))
 }
 
 fn semantic_tokens(params: &serde_json::Value) -> Result<serde_json::Value, String> {

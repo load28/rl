@@ -39,6 +39,7 @@
 //! }
 //! ```
 
+mod completions;
 mod language;
 mod names;
 mod project;
@@ -47,6 +48,7 @@ mod semantics;
 mod snapshot;
 mod tokens;
 
+pub use completions::{RlCompletion, RlCompletionKind, rl_completions_at};
 pub use language::{
     CompletionAnswer, CompletionDetail, CompletionItem, HoverInfo, Location, Position,
     RENAME_PLACEHOLDER, Range, Reference, RenameEdit, ServiceDiagnostic, Signature, SignatureHelp,

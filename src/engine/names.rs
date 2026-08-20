@@ -352,7 +352,7 @@ fn enum_signature(declaration: &EnumSymbol) -> String {
     )
 }
 
-fn case_signature(enum_name: &str, constructor: &MatchConstructor) -> String {
+pub(super) fn case_signature(enum_name: &str, constructor: &MatchConstructor) -> String {
     match &constructor.fields {
         None => format!("{enum_name}.{}", constructor.tag),
         Some(fields) => format!(
@@ -367,7 +367,7 @@ fn case_signature(enum_name: &str, constructor: &MatchConstructor) -> String {
     }
 }
 
-fn field_signature(field: &PayloadField) -> String {
+pub(super) fn field_signature(field: &PayloadField) -> String {
     format!(
         "{}{}: {}",
         field.name,
