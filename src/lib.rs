@@ -50,6 +50,7 @@
 //!   diagnostics reference.
 //! - `docs/design/` — architecture and design decisions.
 
+mod analysis;
 mod ast;
 mod codegen;
 pub mod engine;
@@ -65,6 +66,10 @@ pub(crate) mod typescript;
 mod val;
 mod verify;
 
+pub use analysis::{
+    AnalyzedArm, BodyBinding, Coverage, MatchAnalyses, MatchAnalysis, MatchConstructor,
+    MatchSubject, PatternBinding, PayloadField, match_analyses,
+};
 pub use error::CompileError;
 pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};
 pub use sidecar::{Sidecar, build_sidecar};

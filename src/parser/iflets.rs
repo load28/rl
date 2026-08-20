@@ -54,6 +54,7 @@ pub(super) fn parse_if_let<'t>(
         cur.sub(open + 1, close, cur.tokens[close].span.start),
         true,
     )?;
+    let pattern_end = cur.tokens[close].span.end;
     cur.idx = close + 1;
 
     // `=` (but not `==` / `=>`; `=>` lexes as a fused Arrow token)
@@ -132,6 +133,7 @@ pub(super) fn parse_if_let<'t>(
             pattern: TagPattern {
                 tag: tag.to_string(),
                 tag_off: tag_span.start,
+                end: pattern_end,
                 bindings: Some(bindings),
             },
             expr,

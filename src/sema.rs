@@ -134,6 +134,46 @@ fn binding_set(bindings: &Option<Vec<Binding>>) -> Vec<(&str, &str)> {
     set
 }
 
+/// Why two or-pattern alternatives do not bind the same set — the first
+/// difference, named, so the message points at the binding to fix instead
+/// of restating the rule: a name only one side binds, or a name the two
+/// sides bind from different fields.
+fn binding_mismatch(first: &TagPattern, other: &TagPattern) -> String {
+    let a = binding_set(&first.bindings);
+    let b = binding_set(&other.bindings);
+    let bound = |set: &[(&str, &str)], name: &str| set.iter().any(|&(_, n)| n == name);
+    for &(_, name) in &a {
+        if !bound(&b, name) {
+            return format!(
+                "`{name}` is bound in `{}(...)` but not in `{}(...)`",
+                first.tag, other.tag
+            );
+        }
+    }
+    for &(_, name) in &b {
+        if !bound(&a, name) {
+            return format!(
+                "`{name}` is bound in `{}(...)` but not in `{}(...)`",
+                other.tag, first.tag
+            );
+        }
+    }
+    // Same names on both sides, so some name is bound from different
+    // fields (`A(x) | B(v: x)`).
+    for &(field, name) in &a {
+        if let Some(&(other_field, _)) = b.iter().find(|&&(_, n)| n == name)
+            && field != other_field
+        {
+            return format!(
+                "`{name}` is bound from field `{field}` in `{}(...)` but from field `{other_field}` in `{}(...)`",
+                first.tag, other.tag
+            );
+        }
+    }
+    // The caller only asks when the sets differ, but stay total.
+    "the alternatives bind different sets".to_string()
+}
+
 /// True when the alternative carries a nested pattern (any depth starts
 /// with one at the first binding level).
 fn has_nested(alt: &TagPattern) -> bool {
@@ -469,8 +509,10 @@ impl Checker<'_> {
                         if binding_set(&alt.bindings) != first_set {
                             return Err(RlError::at(
                                 alt.tag_off,
-                                "match: or-pattern alternatives must bind the same fields"
-                                    .to_string(),
+                                format!(
+                                    "match: or-pattern alternatives must bind the same names — {}",
+                                    binding_mismatch(&alts[0], alt)
+                                ),
                             ));
                         }
                     }
@@ -573,8 +615,10 @@ impl Checker<'_> {
                             if binding_set(&alt.bindings) != first_set {
                                 return Err(RlError::at(
                                     alt.tag_off,
-                                    "match: or-pattern alternatives must bind the same fields"
-                                        .to_string(),
+                                    format!(
+                                        "match: or-pattern alternatives must bind the same names — {}",
+                                        binding_mismatch(&alts[0], alt)
+                                    ),
                                 ));
                             }
                         }
