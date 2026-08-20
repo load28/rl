@@ -162,11 +162,19 @@ sema.rs       Coverage → 위치 있는 RlError (문안·오프셋·보고 순�
 
 ```
 Coverage
-  positions: Vec<Option<CoveredEnum>>   // 위치별 subject, None = 보편 위치(`_`만 쓰인 자리)
-  covered:   Vec<String>                // 단일 match 전용 (튜플 arm은 태그가 아니라 조합을 커버)
-  missing:   Vec<Vec<Option<String>>>   // 커버되지 않은 조합들 (행 = 조합, 칸 = 위치)
+  positions:   Vec<Option<CoveredEnum>>  // 위치별 subject, None = 보편 위치(`_`만 쓰인 자리)
+  covered:     Vec<String>               // 단일 match에서 arm이 통째로 덮은 태그 (요약)
+  missing:     Vec<Vec<String>>          // witness: 빠진 값을 rl 패턴으로 렌더 (행 = 값, 칸 = 위치)
+  unreachable: Vec<usize>                // 죽은 arm의 인덱스 (계산만 — 아래)
 CoveredEnum { name, origin: Local | Imported { from } | Builtin }
 ```
+
+**TASK-103 갱신**: 계산은 이제 `analysis/usefulness.rs`의 Maranget usefulness다.
+`missing`이 태그가 아니라 **패턴**인 이유가 그것이다 — 재귀가 페이로드 안까지
+내려가므로 빠진 것이 `Ok(value: None)`처럼 값의 모양으로 나온다. 중첩 패턴 arm이
+"아무것도 커버하지 못한다"는 v1 규칙은 사라졌고(가드 arm만 남는다), 도달 불가
+arm은 같은 재귀가 답하지만 **보고하지 않는다**: rl에는 경고 계층이 없어 rustc의
+lint를 하드 에러로 바꾸면 지금 컴파일되는 프로그램이 깨진다.
 
 `origin`이 모델에 있는 이유는 에러 문안이 그것을 부르기 때문이다 —
 "enum E" / "built-in enum Option" / "enum T (imported from \"./token.rl\")".

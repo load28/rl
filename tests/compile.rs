@@ -1809,9 +1809,9 @@ fn plain_alias_is_still_an_alias_not_a_nested_pattern() {
 }
 
 #[test]
-fn nested_pattern_arm_covers_nothing_for_exhaustiveness() {
-    // Like a guard: the inner tag may mismatch, so `Ok(value: Some(..))`
-    // does not cover Ok.
+fn a_nested_pattern_covers_exactly_what_it_matches() {
+    // The exhaustiveness recursion descends into the payload, so the
+    // witness names the *value* that is missing, not just its outer case.
     let e = err(r#"
 const n = match (r) {
   Ok(value: Some(value: v)) => v,
@@ -1819,8 +1819,9 @@ const n = match (r) {
 };
 "#);
     assert!(
-        e.message
-            .contains("match on built-in enum Result is not exhaustive: missing \"Ok\""),
+        e.message.contains(
+            "match on built-in enum Result is not exhaustive: missing \"Ok(value: None)\""
+        ),
         "{}",
         e.message
     );
@@ -3074,6 +3075,84 @@ const n = match (d, s) {
     assert!(
         e.message
             .contains("enum Dir has no case `Nrth` — did you mean `North`?"),
+        "{}",
+        e.message
+    );
+}
+
+/* ------------------------------------------------------------------ */
+/* exhaustiveness by usefulness (TASK-103)                             */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn nested_patterns_that_cover_the_payload_are_exhaustive() {
+    // The old rule counted tags, so an arm with a nested pattern covered
+    // nothing and this exhaustive match was rejected.
+    let out = ok(r#"enum Inner { Yes(n: number), No }
+enum Outer { Wrap(inner: Inner), Bare }
+const a = match (o) {
+  Wrap(inner: Yes(n)) => n,
+  Wrap(inner: No()) => 0,
+  Bare => -1,
+};
+"#);
+    assert!(out.contains("$rl_m.inner.kind === \"Yes\""), "{out}");
+}
+
+#[test]
+fn a_generic_payload_is_typed_by_the_patterns_written_in_it() {
+    // `Ok`'s payload is declared `T`, which names no enum — but `Some`
+    // and `None` written there name Option, exactly as arm tags name a
+    // match's subject.
+    let out = ok(r#"const n = match (r) {
+  Ok(value: Some(value: v)) => v,
+  Ok(value: None()) => 0,
+  Err(error) => -1,
+};
+"#);
+    assert!(out.contains("$rl_m.value.kind === \"Some\""), "{out}");
+}
+
+#[test]
+fn a_witness_names_the_value_that_is_missing() {
+    let e = err(r#"enum Inner { Yes(n: number), No }
+enum Outer { Wrap(inner: Inner), Bare }
+const a = match (o) { Wrap(inner: Yes(n)) => n, Bare => -1 };
+"#);
+    assert!(
+        e.message.contains("missing \"Wrap(inner: No)\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_fully_guarded_match_still_names_every_case() {
+    // No arm covers anything, so every constructor is a witness — the
+    // column has no wildcard row to hide behind.
+    let e =
+        err("const f = (o: Option<number>) => match (o) { Some(value) if value > 0 => value };\n");
+    assert!(
+        e.message.contains("missing \"Some\", \"None\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn deeply_nested_exhaustiveness_terminates_and_answers() {
+    // Three levels of payload, one hole at the bottom.
+    let e = err(r#"enum A { A1(b: B), A2 }
+enum B { B1(c: C), B2 }
+enum C { C1(n: number), C2 }
+const v = match (a) {
+  A1(b: B1(c: C1(n))) => n,
+  A1(b: B2()) => 2,
+  A2 => 3,
+};
+"#);
+    assert!(
+        e.message.contains("missing \"A1(b: B1(c: C2))\""),
         "{}",
         e.message
     );

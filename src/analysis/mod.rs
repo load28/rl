@@ -40,8 +40,11 @@
 //!
 //! Merging these early is exactly the bug this model exists to prevent.
 
+mod usefulness;
+
 use crate::ast::*;
 use crate::{EnumSymbol, ExternEnum};
+use usefulness::{Cell, ColTy};
 
 /// The typed analysis of every pattern in one source file, nested ones
 /// included, in source order. Produced by [`pattern_analyses`].
@@ -265,28 +268,41 @@ pub struct Coverage {
     /// enumerates. `None` for a *universal* position of a tuple match —
     /// every arm writes `_` there, so it constrains nothing.
     pub positions: Vec<Option<CoveredEnum>>,
-    /// Tags covered by covering arms — unguarded and nested-free, since a
-    /// guard may be false and a nested pattern may mismatch. Single matches
-    /// only: a tuple arm covers a *combination*, not a tag, so this is
-    /// empty there and [`Coverage::missing`] carries the whole answer.
+    /// Tags an arm covers outright — unguarded and nested-free, since a
+    /// guard may be false and a nested pattern reaches further in. Single
+    /// matches only. This is not what exhaustiveness is computed from (the
+    /// algorithm descends into payloads); it is the flat summary a
+    /// consumer wants when it asks "which cases are already written here?"
     pub covered: Vec<String>,
-    /// The combinations no covering arm handles, in the subject's case
-    /// order: one row per uncovered combination, one entry per position
-    /// (`None` at a universal position). Empty when the match is
-    /// exhaustive.
-    pub missing: Vec<Vec<Option<String>>>,
+    /// **Witnesses**: the values the arms leave unhandled, each rendered as
+    /// the rl pattern that would cover it (`Wrap(inner: Yes)`, `"_"` at a
+    /// universal position of a tuple match). One row per uncovered value,
+    /// one entry per scrutinee position. Empty when the match is
+    /// exhaustive; bounded, so a wide product does not build a list nobody
+    /// can read.
+    pub missing: Vec<Vec<String>>,
+    /// Indices of arms that match nothing an earlier arm has not already
+    /// matched — dead code, in source order.
+    ///
+    /// Nothing reports these yet: an unreachable arm is a *lint* in Rust,
+    /// and rl has only errors, so turning it into one would reject
+    /// programs that compile today. It is computed here because the same
+    /// recursion answers it, and because the editor is where a hint
+    /// belongs (TASK-101 §P3). The narrower duplicate-arm rule sema
+    /// enforces is unchanged.
+    pub unreachable: Vec<usize>,
 }
 
 impl Coverage {
-    /// The arity-1 view of [`Coverage::missing`] — the tags a single match
-    /// leaves uncovered. Empty for a tuple match's coverage.
+    /// The arity-1 view of [`Coverage::missing`] — the patterns a single
+    /// match leaves uncovered. Empty for a tuple match's coverage.
     pub fn missing_tags(&self) -> Vec<&str> {
         if self.positions.len() != 1 {
             return Vec::new();
         }
         self.missing
             .iter()
-            .filter_map(|row| row.first().and_then(Option::as_deref))
+            .filter_map(|row| row.first().map(String::as_str))
             .collect()
     }
 }
@@ -586,37 +602,6 @@ impl Table {
                     .all(|t| e.constructors.iter().any(|c| c.tag == *t))
             })
             .collect()
-    }
-
-    /// The exhaustiveness answer for one tag set: the candidate the covering
-    /// arms satisfy if there is one, otherwise the candidate they leave
-    /// fewest cases of — the rule sema has always reported, now with one
-    /// implementation. `None` when no candidate fits the tags at all: rlc
-    /// has no type information for such a match, so it is not checked.
-    fn resolve_coverage(
-        &self,
-        tags: &[&str],
-        covered: &[String],
-    ) -> Option<(CoveredEnum, Vec<String>)> {
-        if tags.is_empty() {
-            return None;
-        }
-        let mut best: Option<(&Entry, Vec<String>)> = None;
-        for entry in self.candidates(tags) {
-            let missing: Vec<String> = entry
-                .constructors
-                .iter()
-                .filter(|c| !covered.contains(&c.tag))
-                .map(|c| c.tag.clone())
-                .collect();
-            if missing.is_empty() {
-                return Some((entry.covered_enum(), Vec::new()));
-            }
-            if best.as_ref().is_none_or(|(_, m)| missing.len() < m.len()) {
-                best = Some((entry, missing));
-            }
-        }
-        best.map(|(entry, missing)| (entry.covered_enum(), missing))
     }
 
     /// The enum a pattern's names are *resolved against* — the resolution
@@ -1505,6 +1490,12 @@ fn covers(guard: &Option<GuardExpr>, alts: &[TagPattern]) -> bool {
 
 /// [`Coverage`] of a single match, when the question means something: a tag
 /// match with no wildcard arm whose tags identify a known enum.
+///
+/// The arms become a one-column matrix and the algorithm answers
+/// ([`usefulness`]). Guarded arms stay out of it — a guard may be false —
+/// but arms carrying nested patterns are now *in*: the recursion descends
+/// into the payload, so such an arm covers exactly what it covers instead
+/// of being written off.
 fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
     if expr
         .arms
@@ -1513,11 +1504,12 @@ fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
     {
         return None;
     }
-    // Identification uses every arm's tags; covering uses only the arms
-    // that cannot fall through.
+    // Identification uses every arm's tags, guarded ones included.
     let mut tags: Vec<&str> = Vec::new();
     let mut covered: Vec<String> = Vec::new();
-    for arm in &expr.arms {
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
+    let mut arm_rows: Vec<(usize, Vec<Vec<Cell>>)> = Vec::new();
+    for (index, arm) in expr.arms.iter().enumerate() {
         let Pattern::Tags(alts) = &arm.pattern else {
             continue;
         };
@@ -1526,28 +1518,54 @@ fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
                 tags.push(&alt.tag);
             }
         }
-        if !covers(&arm.guard, alts) {
+        if arm.guard.is_some() {
             continue;
         }
-        for alt in alts {
-            if !covered.contains(&alt.tag) {
-                covered.push(alt.tag.clone());
+        // An or-pattern is several rows: each alternative stands alone.
+        let this: Vec<Vec<Cell>> = alts.iter().map(|alt| vec![Cell::Tag(alt)]).collect();
+        arm_rows.push((index, this.clone()));
+        rows.extend(this);
+        if covers(&arm.guard, alts) {
+            for alt in alts {
+                if !covered.contains(&alt.tag) {
+                    covered.push(alt.tag.clone());
+                }
             }
         }
     }
-    let (subject, missing) = table.resolve_coverage(&tags, &covered)?;
+    if tags.is_empty() {
+        return None;
+    }
+
+    // Several enums can hold every tag. The one the arms *satisfy* is the
+    // subject if there is one; otherwise the one they leave least of —
+    // the rule sema has always reported, now measured in witnesses.
+    let mut best: Option<(&Entry, Vec<Vec<String>>)> = None;
+    for entry in table.candidates(&tags) {
+        let types = [ColTy::Enum(entry)];
+        let missing = render_witnesses(&usefulness::missing(&rows, &types, table));
+        if missing.is_empty() {
+            best = Some((entry, missing));
+            break;
+        }
+        if best.as_ref().is_none_or(|(_, m)| missing.len() < m.len()) {
+            best = Some((entry, missing));
+        }
+    }
+    let (entry, missing) = best?;
+
     Some(Coverage {
-        positions: vec![Some(subject)],
+        positions: vec![Some(entry.covered_enum())],
         covered,
-        missing: missing.into_iter().map(|tag| vec![Some(tag)]).collect(),
+        missing,
+        unreachable: unreachable_arms(&arm_rows, &[ColTy::Enum(entry)], table),
     })
 }
 
-/// [`Coverage`] of a tuple match: the cartesian product of its positions'
-/// case sets, minus every combination a covering arm handles. `None` when
-/// a bare `_` arm covers everything, when any tagged position resolves to
-/// no known enum, or when no position is tagged at all (nothing to
-/// enumerate).
+/// [`Coverage`] of a tuple match: the same algorithm over as many columns
+/// as there are scrutinees. `None` when a bare `_` arm covers everything,
+/// when a tagged position resolves to no known enum, or when no position
+/// is tagged at all (nothing to enumerate).
 fn tuple_coverage_of(expr: &TupleMatchExpr, table: &Table) -> Option<Coverage> {
     let arity = expr.scrutinees.len();
     if expr
@@ -1558,100 +1576,122 @@ fn tuple_coverage_of(expr: &TupleMatchExpr, table: &Table) -> Option<Coverage> {
         return None;
     }
 
-    // Per position, the tags any arm uses there (identification); per
-    // covering arm, what it covers at each position (`None` = `_`).
-    let mut position_tags: Vec<Vec<String>> = vec![Vec::new(); arity];
-    let mut rows: Vec<Vec<Option<Vec<String>>>> = Vec::new();
+    // Per position, the tags any arm writes there — identification, as in
+    // a single match but one column at a time.
+    let mut position_tags: Vec<Vec<&str>> = vec![Vec::new(); arity];
     for arm in &expr.arms {
         let TuplePattern::Elems(elems) = &arm.pattern else {
             continue;
         };
         if elems.len() != arity {
-            continue; // sema reports the arity mismatch; nothing to enumerate here
+            continue; // sema reports the arity mismatch
         }
-        let mut row: Vec<Option<Vec<String>>> = Vec::with_capacity(arity);
-        let mut nested = false;
-        for (p, elem) in elems.iter().enumerate() {
-            match elem {
-                Pattern::Wildcard => row.push(None),
-                // A literal element covers no tag combination.
-                Pattern::Literals(_) => row.push(Some(Vec::new())),
-                Pattern::Tags(alts) => {
-                    nested |= alts.iter().any(has_nested);
-                    let tags: Vec<String> = alts.iter().map(|t| t.tag.clone()).collect();
-                    for tag in &tags {
-                        if !position_tags[p].contains(tag) {
-                            position_tags[p].push(tag.clone());
-                        }
+        for (position, elem) in elems.iter().enumerate() {
+            if let Pattern::Tags(alts) = elem {
+                for alt in alts {
+                    if !position_tags[position].contains(&alt.tag.as_str()) {
+                        position_tags[position].push(&alt.tag);
                     }
-                    row.push(Some(tags));
                 }
             }
         }
-        if arm.guard.is_none() && !nested {
-            rows.push(row);
-        }
     }
 
-    // Each position resolves independently, to the first candidate whose
-    // cases contain every tag used there.
     let mut positions: Vec<Option<CoveredEnum>> = Vec::with_capacity(arity);
-    let mut cases: Vec<Vec<String>> = Vec::with_capacity(arity);
+    let mut types: Vec<ColTy> = Vec::with_capacity(arity);
     for tags in &position_tags {
         if tags.is_empty() {
-            positions.push(None); // universal position: only `_` written here
-            cases.push(Vec::new());
+            // Universal position: only `_` was written here.
+            positions.push(None);
+            types.push(ColTy::Opaque);
             continue;
         }
-        let refs: Vec<&str> = tags.iter().map(String::as_str).collect();
-        let entry = *table.candidates(&refs).first()?;
+        // A position whose tags name no enum makes the whole question
+        // unanswerable — the same conservatism as before.
+        let entry = *table.candidates(tags).first()?;
         positions.push(Some(entry.covered_enum()));
-        cases.push(entry.constructors.iter().map(|c| c.tag.clone()).collect());
+        types.push(ColTy::Enum(entry));
     }
-
-    let tagged: Vec<usize> = (0..arity).filter(|&p| !cases[p].is_empty()).collect();
-    if tagged.is_empty() {
+    if positions.iter().all(Option::is_none) {
         return None;
     }
 
-    // Odometer over the tagged positions, rightmost fastest.
-    let mut missing: Vec<Vec<Option<String>>> = Vec::new();
-    let mut idx = vec![0usize; tagged.len()];
-    loop {
-        let handled = rows.iter().any(|row| {
-            tagged.iter().enumerate().all(|(ti, &p)| match &row[p] {
-                None => true,
-                Some(tags) => tags.iter().any(|t| *t == cases[p][idx[ti]]),
-            })
-        });
-        if !handled {
-            let mut combination: Vec<Option<String>> = vec![None; arity];
-            for (ti, &p) in tagged.iter().enumerate() {
-                combination[p] = Some(cases[p][idx[ti]].clone());
-            }
-            missing.push(combination);
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
+    let mut arm_rows: Vec<(usize, Vec<Vec<Cell>>)> = Vec::new();
+    for (index, arm) in expr.arms.iter().enumerate() {
+        let TuplePattern::Elems(elems) = &arm.pattern else {
+            continue;
+        };
+        if elems.len() != arity || arm.guard.is_some() {
+            continue;
         }
-        let mut ti = tagged.len();
-        let mut wrapped = true;
-        while ti > 0 {
-            ti -= 1;
-            idx[ti] += 1;
-            if idx[ti] < cases[tagged[ti]].len() {
-                wrapped = false;
-                break;
-            }
-            idx[ti] = 0;
-        }
-        if wrapped {
-            break;
-        }
+        let Some(this) = tuple_rows(elems) else {
+            continue;
+        };
+        arm_rows.push((index, this.clone()));
+        rows.extend(this);
     }
 
     Some(Coverage {
         positions,
         covered: Vec::new(),
-        missing,
+        missing: render_witnesses(&usefulness::missing(&rows, &types, table)),
+        unreachable: unreachable_arms(&arm_rows, &types, table),
     })
+}
+
+/// One tuple arm as rows: the cartesian product of its elements'
+/// alternatives, since `(A | B, C)` matches two combinations. `None` when
+/// the arm can match no combination of tags at all (a literal element),
+/// which is the same as contributing no row.
+fn tuple_rows<'a>(elems: &'a [Pattern]) -> Option<Vec<Vec<Cell<'a>>>> {
+    let mut rows: Vec<Vec<Cell>> = vec![Vec::new()];
+    for elem in elems {
+        let cells: Vec<Cell> = match elem {
+            Pattern::Wildcard => vec![Cell::Wild],
+            Pattern::Literals(_) => return None,
+            Pattern::Tags(alts) => alts.iter().map(Cell::Tag).collect(),
+        };
+        rows = rows
+            .into_iter()
+            .flat_map(|row| {
+                cells.iter().map(move |cell| {
+                    let mut next = row.clone();
+                    next.push(*cell);
+                    next
+                })
+            })
+            .collect();
+    }
+    Some(rows)
+}
+
+/// The arms that match nothing an earlier arm has not: each arm's rows
+/// against every row before it.
+fn unreachable_arms(
+    arm_rows: &[(usize, Vec<Vec<Cell<'_>>>)],
+    types: &[ColTy<'_>],
+    table: &Table,
+) -> Vec<usize> {
+    let mut seen: Vec<Vec<Cell>> = Vec::new();
+    let mut out = Vec::new();
+    for (index, rows) in arm_rows {
+        let useful = rows
+            .iter()
+            .any(|row| usefulness::is_useful(&seen, row, types, table));
+        if !useful {
+            out.push(*index);
+        }
+        seen.extend(rows.iter().cloned());
+    }
+    out
+}
+
+fn render_witnesses(found: &[Vec<usefulness::Witness>]) -> Vec<Vec<String>> {
+    found
+        .iter()
+        .map(|row| row.iter().map(usefulness::Witness::render).collect())
+        .collect()
 }
 
 /// The identifier span containing `offset`, byte-based like the scanner:
@@ -1933,10 +1973,7 @@ mod tests {
             .collect();
         assert_eq!(names, ["A", "B"]);
         // (X, Q) is the only combination no arm handles.
-        assert_eq!(
-            coverage.missing,
-            [vec![Some("X".to_string()), Some("Q".to_string())]]
-        );
+        assert_eq!(coverage.missing, [vec!["X".to_string(), "Q".to_string()]]);
         // A tuple arm covers a combination, not a tag.
         assert!(coverage.covered.is_empty());
         assert!(coverage.missing_tags().is_empty());
@@ -1951,7 +1988,7 @@ mod tests {
             .clone()
             .expect("resolved");
         assert_eq!(coverage.positions[1], None);
-        assert_eq!(coverage.missing, [vec![Some("Y".to_string()), None]]);
+        assert_eq!(coverage.missing, [vec!["Y".to_string(), "_".to_string()]]);
 
         // A bare `_` arm covers everything; there is nothing to enumerate.
         let bare = "enum A { X(v: number), Y }\nconst v = match (a, b) { (X, _) => 0, _ => 1 };\n";
@@ -2067,6 +2104,42 @@ mod tests {
         assert_eq!(edit_distance("Cyrcla", "Circle"), 2);
         assert_eq!(typo_distance("Ok", "Er"), None, "short names stay apart");
         assert_eq!(typo_distance("circle", "Circle"), Some(1), "case alone");
+    }
+
+    #[test]
+    fn unreachable_arms_are_computed_but_not_an_error() {
+        // `A` is already covered, so the third arm matches nothing new.
+        let src = "enum E { A(x: string), B(y: number) }\n\
+                   const v = match (e) { A(x) => x, B(y) => y, A(x: z) => z };\n";
+        let coverage = pattern_analyses(src, &[]).matches[0]
+            .coverage
+            .clone()
+            .expect("resolved");
+        assert_eq!(coverage.unreachable, [2]);
+        assert!(coverage.missing.is_empty());
+    }
+
+    #[test]
+    fn a_guarded_arm_leaves_its_case_uncovered() {
+        let src = "enum E { A(x: string), B(y: number) }\n\
+                   const v = match (e) { A(x) if ok => x, B(y) => y };\n";
+        let coverage = pattern_analyses(src, &[]).matches[0]
+            .coverage
+            .clone()
+            .expect("resolved");
+        assert_eq!(coverage.missing, [vec!["A".to_string()]]);
+    }
+
+    #[test]
+    fn a_nested_pattern_is_a_column_of_its_own() {
+        let src = "enum I { Y(n: number), N }\n\
+                   enum O { W(i: I), B }\n\
+                   const v = match (o) { W(i: Y(n)) => n, B => 0 };\n";
+        let coverage = pattern_analyses(src, &[]).matches[0]
+            .coverage
+            .clone()
+            .expect("resolved");
+        assert_eq!(coverage.missing, [vec!["W(i: N)".to_string()]]);
     }
 
     #[test]

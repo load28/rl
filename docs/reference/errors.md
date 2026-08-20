@@ -128,10 +128,17 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 | import한 exported enum | `match on enum <이름> (imported from "<지정자>") is not exhaustive: ...` |
 | 내장 `Option`/`Result` | `match on built-in enum <이름> is not exhaustive: ...` |
 
-**가드 암과 중첩 패턴 암은 케이스를 커버하지 못합니다** — 그 태그를 덮으려면
-무가드·무중첩 암이 따로 필요합니다. 손으로 쓴 유니언이나 해석되지 않는
-import의 enum은 이 검사를 받지 않고 런타임 가드만 남습니다
-([`language.md` §3.6](./language.md#36-소진성-검사)).
+**가드 암은 케이스를 커버하지 못합니다** — 조건이 거짓일 수 있으므로 그 태그를
+덮으려면 무가드 암이 따로 필요합니다. **중첩 패턴은 안쪽까지 검사되고**, 빠진
+것은 태그가 아니라 **패턴으로** 지목됩니다 — 그대로 암으로 옮겨 쓸 수 있습니다:
+
+```
+rlc: r.rl:3:11: match on built-in enum Result is not exhaustive: missing "Ok(value: None)"
+     (add the missing arms or a final `_` arm)
+```
+
+손으로 쓴 유니언이나 해석되지 않는 import의 enum은 이 검사를 받지 않고 런타임
+가드만 남습니다 ([`language.md` §3.6](./language.md#36-소진성-검사)).
 
 튜플 match는 곱집합으로 검사하고 빠진 **조합**을 보고합니다 (5개 이상이면
 앞의 셋과 총 개수만):
