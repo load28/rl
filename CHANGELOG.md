@@ -8,6 +8,21 @@
 
 ### Added
 
+- **rl 이름의 semantic 표면이 엔진에 생겼다** (TASK-105). enum 이름·케이스
+  태그·페이로드 필드는 방출 TypeScript에 존재하지 않아(선언은 매핑 없는 합성
+  텍스트, 태그는 문자열 리터럴, 필드는 구조 분해 키) 체커에게 물을 수 없다.
+  이제 rl이 직접 답한다 — `rlc --server`의 `rlSymbol`, 라이브러리의
+  `engine::rl_symbol_at`.
+
+  - hover 서명과 정의 위치를 `match`뿐 아니라 **let-else·`if let`·중첩 패턴**
+    에서도 답한다(에디터의 기존 구현은 match 본문만 알았다).
+  - **체커에게 물을 수 있는 자리에는 답하지 않는다.** `Shape.Circle(1)` 같은
+    사용처나 타입 주석은 평범한 TypeScript이므로 서비스가 답한다 — 케이스와
+    이름이 같은 지역 변수가 enum 케이스로 hover되던 오탐이 사라진다.
+  - 툴체인도 프로젝트도 필요 없다(`semanticTokens`와 같은 가용성).
+  - 공개 API: `FieldSymbol::offset`, `PatternAnalyses::resolved`,
+    `PatternAnalyses::declarations`.
+
 - **생성된 코드에서 난 타입 에러를 rl의 말로 옮긴다** (TASK-104). 사용자 코드가
   잘못돼 tsc가 rlc의 글루에서 에러를 내면, 이제 그 구문의 위치에서 rl의 문안으로
   보고한다.

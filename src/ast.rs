@@ -321,6 +321,9 @@ pub(crate) struct EnumCase {
 #[derive(Debug)]
 pub(crate) struct Field {
     pub name: String,
+    /// Byte offset of the field name, for error reporting and for the
+    /// symbol API (an editor navigates to the declaration by it).
+    pub name_off: usize,
     pub optional: bool,
     /// The verbatim type annotation text.
     pub ty: String,

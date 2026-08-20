@@ -40,6 +40,7 @@
 //! ```
 
 mod language;
+mod names;
 mod project;
 mod projection;
 mod semantics;
@@ -51,6 +52,7 @@ pub use language::{
     RENAME_PLACEHOLDER, Range, Reference, RenameEdit, ServiceDiagnostic, Signature, SignatureHelp,
     SignatureParameter,
 };
+pub use names::{RlSymbol, RlSymbolKind, rl_symbol_at};
 pub use project::{Blocked, CheckRequest, Project, collect_sources};
 pub use projection::ProjectedDocument;
 pub use semantics::{Checked, Declarations, Diagnostic, ModuleDeclaration};

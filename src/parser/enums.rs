@@ -108,7 +108,7 @@ fn parse_fields(mut cur: Cursor) -> Option<Vec<Field>> {
         if cur.peek().is_none() {
             break;
         }
-        let (name, _) = cur.eat_ident()?;
+        let (name, name_span) = cur.eat_ident()?;
         if is_reserved(name) {
             return None;
         }
@@ -132,6 +132,7 @@ fn parse_fields(mut cur: Cursor) -> Option<Vec<Field>> {
         let ty_off = ty_start + (raw.len() - raw.trim_start().len());
         fields.push(Field {
             name: name.to_string(),
+            name_off: name_span.start,
             optional,
             ty: ty.to_string(),
             ty_off,

@@ -112,7 +112,8 @@
 | TASK-102 | 패턴 사이트 일반화와 이름 해석 진단 (P1+P2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-102](./TASK-102-pattern-sites-and-resolution.md) |
 | TASK-103 | 소진성을 usefulness 알고리즘으로 (P5) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-103](./TASK-103-usefulness-exhaustiveness.md) |
 | TASK-104 | 진단 앵커와 진단 번역 (P4 계층 1·3) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-104](./TASK-104-diagnostic-anchors-and-translation.md) |
+| TASK-105 | rl 이름의 semantic 표면을 엔진으로 (P3 1/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-105](./TASK-105-rl-name-surface.md) |
 
 ## 다음 태스크 번호
 
-**TASK-105**
+**TASK-106**

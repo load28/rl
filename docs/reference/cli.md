@@ -56,7 +56,7 @@ GitHub Release 업로드까지 수행합니다.
 | `--sidecar <dir>` | 선언을 받아 사이드카만 씁니다 ([아래](#에디터-사이드카---sidecar-저수준)) |
 | `--symbols` | rl enum 선언과 `.rl` import를 JSON으로 ([아래](#심볼-출력---symbols)) |
 | `--emit-map` | 방출 TypeScript와 원본↔출력 바이트 매핑을 JSON으로 ([아래](#방출-매핑---emit-map)) |
-| `--server` | 엔진을 살려 두고 stdin/stdout의 JSON 라인으로 `check`/`emitMap`/`typedCheck` 요청에 답합니다 ([아래](#엔진-서버---server)) |
+| `--server` | 엔진을 살려 두고 stdin/stdout의 JSON 라인으로 `check`/`emitMap`/`typedCheck`와 에디터 semantic 요청에 답합니다 ([아래](#엔진-서버---server)) |
 
 옵션과 입력은 순서 무관하게 섞을 수 있습니다. `-`로 시작하는 알 수 없는 인자는
 에러이고, `--`(옵션 종료)와 짧은 옵션 병합(`-po`)은 지원하지 않습니다.
@@ -462,6 +462,26 @@ signatureHelp { "path", "position" } → null | { "signatures", ... }
 tsDiagnostics { "path" }
   → { "diagnostics": [{ "range", "message", "code", "warning" }] }
 ```
+
+**rl 이름 전용 표면**은 프로젝트도 툴체인도 필요 없습니다 — enum 이름·케이스
+태그·페이로드 필드는 방출 TypeScript에 존재하지 않아 체커에게 물을 수 없고,
+rl이 직접 답합니다. `semanticTokens`처럼 텍스트만으로 답하되, 파일의 상대
+`.rl` import를 해석하려고 `path`를 함께 받습니다.
+
+```
+rlSymbol { "path", "text", "position" }
+  → null | { "kind": "enum" | "case" | "field", "range", "name", "enumName",
+             "signature", "detail", "definition": null | { "path", "range" } }
+```
+
+- 답하는 자리는 **체커에게 물을 수 없는 자리뿐**입니다: enum 선언 안(이름·
+  케이스 태그·필드 이름)과 패턴 안(태그·필드 이름 — `match`·let-else·`if let`·
+  중첩 패턴 모두). `Shape.Circle(1)` 같은 사용처나 타입 주석은 평범한
+  TypeScript로 낮춰지므로 `null`을 답하고 `hover`/`definition`에 맡깁니다.
+- `definition`은 내장 enum(`Option`/`Result`)에서는 `null`입니다 — 선언이
+  컴파일러 자신의 것이라 열 파일이 없습니다.
+- import된 enum의 선언은 **디스크에서** 읽습니다(저장되지 않은 편집은 보이지
+  않습니다).
 
 - `completion`의 `member`(요청)는 커서가 멤버 접근 자리인지 — 그 자리에서
   일반 답이 불가능하면 엔진이 **프로브**(`$rl_probe` 삽입 임시 projection)

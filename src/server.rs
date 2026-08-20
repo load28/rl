@@ -25,6 +25,10 @@
 //! → { "id": 4, "method": "semanticTokens", "params": { "text" } }
 //! ← { "id": 4, "result": { "tokens": [{ "range", "kind" }] } }
 //!
+//! → { "id": 5, "method": "rlSymbol", "params": { "path", "text", "position" } }
+//! ← { "id": 5, "result": { "kind", "range", "name", "enumName",
+//!                          "signature", "detail", "definition" } | null }
+//!
 //! ← { "id": N, "error": "sentence" }   // the request failed; the session lives
 //! ```
 //!
@@ -200,6 +204,7 @@ fn respond(sessions: &mut Sessions, line: &str) -> serde_json::Value {
             })
         }),
         "semanticTokens" => semantic_tokens(params),
+        "rlSymbol" => rl_symbol(params),
         "tsDiagnostics" => semantic(sessions, params, |project, path, _position| {
             let diagnostics: Vec<_> = project
                 .service_diagnostics(path)?
@@ -339,6 +344,43 @@ fn check(params: &serde_json::Value) -> Result<serde_json::Value, String> {
 /// ambiguous surface, in the buffer's coordinates. Like `check`, this is
 /// stateless and parse-only — it needs no project and no TypeScript
 /// toolchain, so the editor's colors stay exact in every environment.
+/// The rl name at a position — an enum, a case tag, a payload field.
+///
+/// Text-only like `semanticTokens`: the answer needs no project and no
+/// toolchain, because these names exist nowhere in the emitted TypeScript
+/// and are rl's to answer (`engine::names`). `path` is still required, to
+/// resolve the file's relative `.rl` imports.
+fn rl_symbol(params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?;
+    let position = Position {
+        line: params["position"]["line"].as_u64().unwrap_or(0) as u32,
+        character: params["position"]["character"].as_u64().unwrap_or(0) as u32,
+    };
+    let Some(symbol) = rlc::engine::rl_symbol_at(Path::new(path), text_param(params)?, position)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    Ok(json!({
+        "kind": match symbol.kind {
+            rlc::engine::RlSymbolKind::Enum => "enum",
+            rlc::engine::RlSymbolKind::Case => "case",
+            rlc::engine::RlSymbolKind::Field => "field",
+        },
+        "range": range_json(symbol.range),
+        "name": symbol.name,
+        "enumName": symbol.enum_name,
+        "signature": symbol.signature,
+        "detail": symbol.detail,
+        "definition": symbol.definition.map(|location| json!({
+            "path": location.path.to_string_lossy(),
+            "range": range_json(location.range),
+        })),
+    }))
+}
+
 fn semantic_tokens(params: &serde_json::Value) -> Result<serde_json::Value, String> {
     use serde_json::json;
     let tokens: Vec<_> = rlc::engine::semantic_tokens(text_param(params)?)

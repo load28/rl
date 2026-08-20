@@ -287,6 +287,8 @@ pub struct CaseSymbol {
 pub struct FieldSymbol {
     /// The field name.
     pub name: String,
+    /// Byte offset of the name in the source (see [`line_col`]).
+    pub offset: usize,
     /// Whether the field is optional (`name?: T`).
     pub optional: bool,
     /// The verbatim type annotation text.
@@ -327,6 +329,7 @@ pub fn enum_symbols(source: &str) -> Vec<EnumSymbol> {
                                 .iter()
                                 .map(|f| FieldSymbol {
                                     name: f.name.clone(),
+                                    offset: f.name_off,
                                     optional: f.optional,
                                     ty: f.ty.clone(),
                                 })

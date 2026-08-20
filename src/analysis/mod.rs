@@ -62,6 +62,52 @@ pub struct PatternAnalyses {
     /// phase's answer, sorted by position. Reported by [`crate::sema`],
     /// exactly as [`Coverage`] is: one rule, one implementation.
     pub unresolved: Vec<UnresolvedName>,
+    /// Every name in a pattern that **did** resolve, with the span it was
+    /// written at — the other half of the resolution phase's answer.
+    ///
+    /// This is what an editor asks for: a case tag and a payload field name
+    /// exist nowhere in the emitted TypeScript (a tag becomes a string
+    /// literal, a field a destructuring key), so the checker cannot be
+    /// asked about them and rl has to answer. Sorted by position.
+    pub resolved: Vec<ResolvedName>,
+    /// The declaration table the analysis resolved against — local enums
+    /// first, then imported ones, then the built-ins, each name once.
+    ///
+    /// Exposed because the same table answers questions no single pattern
+    /// does: what a case's payload looks like (hover), which cases exist
+    /// (completion).
+    pub declarations: Vec<DeclaredEnum>,
+}
+
+/// One enum of the analysis' declaration table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredEnum {
+    /// The enum's name in the analyzed file's scope (an import alias, or
+    /// `ns.Name` for a namespace import).
+    pub name: String,
+    /// Where the declaration came from.
+    pub origin: Origin,
+    /// The constructors, in declaration order.
+    pub constructors: Vec<MatchConstructor>,
+}
+
+/// One name in a pattern that resolved to a declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedName {
+    /// Whether it was written in tag position or as a field.
+    pub kind: NameKind,
+    /// The name as written.
+    pub name: String,
+    /// Byte span of the name as written.
+    pub start: usize,
+    /// End of the name's span.
+    pub end: usize,
+    /// The enum it resolved in.
+    pub enum_name: String,
+    /// Where that enum was declared.
+    pub origin: Origin,
+    /// For a field, the case whose payload it belongs to.
+    pub tag: Option<String>,
 }
 
 /// Which construct a pattern was written in — the wording an error uses.
@@ -466,12 +512,58 @@ enum Depth {
     CoverageOnly,
 }
 
+/// The two halves of the resolution phase's answer, borrowed together —
+/// every name a pattern writes lands in one of them.
+/// The two vectors of `analyses`, borrowed as one carrier.
+fn names_of(analyses: &mut PatternAnalyses) -> Names<'_> {
+    Names {
+        unresolved: &mut analyses.unresolved,
+        resolved: &mut analyses.resolved,
+    }
+}
+
+struct Names<'a> {
+    unresolved: &'a mut Vec<UnresolvedName>,
+    resolved: &'a mut Vec<ResolvedName>,
+}
+
+impl Names<'_> {
+    fn resolved(
+        &mut self,
+        kind: NameKind,
+        name: &str,
+        span: (usize, usize),
+        entry: &Entry,
+        tag: Option<&str>,
+    ) {
+        self.resolved.push(ResolvedName {
+            kind,
+            name: name.to_string(),
+            start: span.0,
+            end: span.1,
+            enum_name: entry.name.clone(),
+            origin: entry.origin.clone(),
+            tag: tag.map(str::to_string),
+        });
+    }
+}
+
 fn analyze(program: &Program, table: &Table, depth: Depth) -> PatternAnalyses {
     let mut analyses = PatternAnalyses::default();
     walk(program, table, depth, &mut analyses);
     // Source order, so the error a file reports does not depend on which
     // construct the walk happened to reach first.
     analyses.unresolved.sort_by_key(|u| u.start);
+    analyses.resolved.sort_by_key(|r| r.start);
+    analyses.declarations = table
+        .entries
+        .iter()
+        .map(|e| DeclaredEnum {
+            name: e.name.clone(),
+            origin: e.origin.clone(),
+            constructors: e.constructors.clone(),
+        })
+        .collect();
     analyses
 }
 
@@ -779,7 +871,7 @@ fn walk(program: &Program, table: &Table, depth: Depth, out: &mut PatternAnalyse
             | Segment::Enum(_)
             | Segment::ValModifier(_) => {}
             Segment::Match(expr) => {
-                let analysis = analyze_match(expr, table, depth, &mut out.unresolved);
+                let analysis = analyze_match(expr, table, depth, &mut names_of(out));
                 out.matches.push(analysis);
                 walk(&expr.scrutinee, table, depth, out);
                 for arm in &expr.arms {
@@ -790,7 +882,7 @@ fn walk(program: &Program, table: &Table, depth: Depth, out: &mut PatternAnalyse
                 }
             }
             Segment::TupleMatch(expr) => {
-                let analysis = analyze_tuple_match(expr, table, depth, &mut out.unresolved);
+                let analysis = analyze_tuple_match(expr, table, depth, &mut names_of(out));
                 out.matches.push(analysis);
                 for (_, scrutinee) in &expr.scrutinees {
                     walk(scrutinee, table, depth, out);
@@ -804,7 +896,7 @@ fn walk(program: &Program, table: &Table, depth: Depth, out: &mut PatternAnalyse
             }
             Segment::Try(stmt) => walk(&stmt.expr, table, depth, out),
             Segment::LetElse(stmt) => {
-                let site = analyze_let_else(stmt, table, depth, &mut out.unresolved);
+                let site = analyze_let_else(stmt, table, depth, &mut names_of(out));
                 out.sites.push(site);
                 walk(&stmt.expr, table, depth, out);
                 walk(&stmt.else_body, table, depth, out);
@@ -839,7 +931,7 @@ fn walk(program: &Program, table: &Table, depth: Depth, out: &mut PatternAnalyse
 }
 
 fn walk_if_let(stmt: &IfLetStmt, table: &Table, depth: Depth, out: &mut PatternAnalyses) {
-    let site = analyze_if_let(stmt, table, depth, &mut out.unresolved);
+    let site = analyze_if_let(stmt, table, depth, &mut names_of(out));
     out.sites.push(site);
     walk(&stmt.expr, table, depth, out);
     walk(&stmt.body, table, depth, out);
@@ -854,7 +946,7 @@ fn analyze_match(
     expr: &MatchExpr,
     table: &Table,
     depth: Depth,
-    unresolved: &mut Vec<UnresolvedName>,
+    names: &mut Names,
 ) -> MatchAnalysis {
     // The subject is identified from *every* arm's tags, guarded or not —
     // the same identification sema uses.
@@ -873,7 +965,7 @@ fn analyze_match(
     if let Some(entry) = table.identify(&tags) {
         for arm in &expr.arms {
             if let Pattern::Tags(alts) = &arm.pattern {
-                resolve_alternatives(alts, entry, table, unresolved);
+                resolve_alternatives(alts, entry, table, names);
             }
         }
     }
@@ -908,7 +1000,7 @@ fn analyze_tuple_match(
     expr: &TupleMatchExpr,
     table: &Table,
     depth: Depth,
-    unresolved: &mut Vec<UnresolvedName>,
+    names: &mut Names,
 ) -> MatchAnalysis {
     let arity = expr.scrutinees.len();
     // Each position resolves independently, from the tags every arm uses
@@ -935,7 +1027,7 @@ fn analyze_tuple_match(
                     if let TuplePattern::Elems(elems) = &arm.pattern
                         && let Some(Pattern::Tags(alts)) = elems.get(p)
                     {
-                        resolve_alternatives(alts, entry, table, unresolved);
+                        resolve_alternatives(alts, entry, table, names);
                     }
                 }
             }
@@ -994,7 +1086,7 @@ fn analyze_let_else(
     stmt: &LetElseStmt,
     table: &Table,
     depth: Depth,
-    unresolved: &mut Vec<UnresolvedName>,
+    names: &mut Names,
 ) -> PatternSite {
     let end = stmt.tag_off + stmt.tag.len();
     analyze_site(
@@ -1006,18 +1098,13 @@ fn analyze_let_else(
         &stmt.bindings,
         table,
         depth,
-        unresolved,
+        names,
     )
 }
 
 /// Analyzes one `if let` link as a [`PatternSite`]. Chained `else if let`s
 /// are separate sites, recorded by the walk.
-fn analyze_if_let(
-    stmt: &IfLetStmt,
-    table: &Table,
-    depth: Depth,
-    unresolved: &mut Vec<UnresolvedName>,
-) -> PatternSite {
+fn analyze_if_let(stmt: &IfLetStmt, table: &Table, depth: Depth, names: &mut Names) -> PatternSite {
     let pattern = &stmt.pattern;
     analyze_site(
         SiteKind::IfLet,
@@ -1028,7 +1115,7 @@ fn analyze_if_let(
         pattern.bindings.as_deref().unwrap_or_default(),
         table,
         depth,
-        unresolved,
+        names,
     )
 }
 
@@ -1045,7 +1132,7 @@ fn analyze_site(
     bindings: &[Binding],
     table: &Table,
     depth: Depth,
-    unresolved: &mut Vec<UnresolvedName>,
+    names: &mut Names,
 ) -> PatternSite {
     let subject = table.resolve(&[tag]);
     match table.identify(&[tag]).and_then(|entry| {
@@ -1057,7 +1144,14 @@ fn analyze_site(
     }) {
         // The tag resolved: its field set is as knowable as a match arm's.
         Some((entry, constructor)) => {
-            resolve_bindings(bindings, entry, constructor, table, unresolved)
+            names.resolved(
+                NameKind::Case,
+                tag,
+                (tag_off, tag_off + tag.len()),
+                entry,
+                None,
+            );
+            resolve_bindings(bindings, entry, constructor, table, names);
         }
         // It did not. One tag is thin evidence — no other tag in the site
         // says which enum this is — so the licence is tightened to a
@@ -1066,7 +1160,7 @@ fn analyze_site(
         // other arms can give.
         None => {
             if let Some((entry, suggestion)) = unique_near_case(table, tag) {
-                unresolved.push(UnresolvedName {
+                names.unresolved.push(UnresolvedName {
                     kind: NameKind::Case,
                     name: tag.to_string(),
                     start: tag_off,
@@ -1109,26 +1203,30 @@ fn analyze_site(
 
 /// The resolution phase over one alternative list: every tag against the
 /// identified enum's cases, then every binding against the case's fields.
-fn resolve_alternatives(
-    alts: &[TagPattern],
-    entry: &Entry,
-    table: &Table,
-    out: &mut Vec<UnresolvedName>,
-) {
+fn resolve_alternatives(alts: &[TagPattern], entry: &Entry, table: &Table, names: &mut Names) {
     for alt in alts {
         match entry.constructors.iter().find(|c| c.tag == alt.tag) {
-            Some(constructor) => resolve_bindings(
-                alt.bindings.as_deref().unwrap_or_default(),
-                entry,
-                constructor,
-                table,
-                out,
-            ),
+            Some(constructor) => {
+                names.resolved(
+                    NameKind::Case,
+                    &alt.tag,
+                    (alt.tag_off, alt.tag_off + alt.tag.len()),
+                    entry,
+                    None,
+                );
+                resolve_bindings(
+                    alt.bindings.as_deref().unwrap_or_default(),
+                    entry,
+                    constructor,
+                    table,
+                    names,
+                );
+            }
             None => {
                 if let Some(suggestion) =
                     nearest(&alt.tag, entry.constructors.iter().map(|c| c.tag.as_str()))
                 {
-                    out.push(UnresolvedName {
+                    names.unresolved.push(UnresolvedName {
                         kind: NameKind::Case,
                         name: alt.tag.clone(),
                         start: alt.tag_off,
@@ -1156,7 +1254,7 @@ fn resolve_bindings(
     entry: &Entry,
     constructor: &MatchConstructor,
     table: &Table,
-    out: &mut Vec<UnresolvedName>,
+    names: &mut Names,
 ) {
     let Some(fields) = constructor.fields.as_deref() else {
         return;
@@ -1164,6 +1262,13 @@ fn resolve_bindings(
     for b in bindings {
         match fields.iter().find(|f| f.name == b.name) {
             Some(field) => {
+                names.resolved(
+                    NameKind::Field,
+                    &b.name,
+                    (b.name_span.start, b.name_span.end),
+                    entry,
+                    Some(&constructor.tag),
+                );
                 // A nested pattern is resolved against the field's own
                 // declared type, when that type names an enum.
                 if let Some(inner) = &b.nested
@@ -1174,19 +1279,28 @@ fn resolve_bindings(
                         .iter()
                         .find(|c| c.tag == inner.tag)
                     {
-                        Some(nested_constructor) => resolve_bindings(
-                            inner.bindings.as_deref().unwrap_or_default(),
-                            nested_entry,
-                            nested_constructor,
-                            table,
-                            out,
-                        ),
+                        Some(nested_constructor) => {
+                            names.resolved(
+                                NameKind::Case,
+                                &inner.tag,
+                                (inner.tag_off, inner.tag_off + inner.tag.len()),
+                                nested_entry,
+                                None,
+                            );
+                            resolve_bindings(
+                                inner.bindings.as_deref().unwrap_or_default(),
+                                nested_entry,
+                                nested_constructor,
+                                table,
+                                names,
+                            );
+                        }
                         None => {
                             if let Some(suggestion) = nearest(
                                 &inner.tag,
                                 nested_entry.constructors.iter().map(|c| c.tag.as_str()),
                             ) {
-                                out.push(UnresolvedName {
+                                names.unresolved.push(UnresolvedName {
                                     kind: NameKind::Case,
                                     name: inner.tag.clone(),
                                     start: inner.tag_off,
@@ -1203,7 +1317,7 @@ fn resolve_bindings(
             }
             None => {
                 if let Some(suggestion) = nearest(&b.name, fields.iter().map(|f| f.name.as_str())) {
-                    out.push(UnresolvedName {
+                    names.unresolved.push(UnresolvedName {
                         kind: NameKind::Field,
                         name: b.name.clone(),
                         start: b.name_span.start,
@@ -1863,6 +1977,7 @@ mod tests {
                     offset: 0,
                     fields: Some(vec![crate::FieldSymbol {
                         name: "value".to_string(),
+                        offset: 0,
                         optional: false,
                         ty: "number".to_string(),
                     }]),

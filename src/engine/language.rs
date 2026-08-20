@@ -990,7 +990,7 @@ fn ts_completions(
 
 /// The source byte a position names — the analysis speaks bytes, the
 /// protocol UTF-16.
-fn source_byte(source: &str, position: Position) -> usize {
+pub(super) fn source_byte(source: &str, position: Position) -> usize {
     mapper::from_utf16(source, u16_offset(source, position))
 }
 
@@ -1000,6 +1000,23 @@ fn source_byte(source: &str, position: Position) -> usize {
 /// from the overlays first, as everywhere in the engine. Carried as
 /// [`crate::EnumSymbol`]s because the analysis wants field types, not just
 /// tags.
+/// The analysis of one file as a stand-alone question: imported
+/// declarations come from disk, since no project session is involved.
+/// This is what the parse-only surfaces ([`super::names`]) ask.
+pub(super) fn analyses_for(path: &Path, source: &str) -> crate::PatternAnalyses {
+    analyses_of(&HashMap::new(), path, source)
+}
+
+/// A byte span of `text` as a [`Range`] — the byte↔UTF-16 conversion every
+/// answer crosses on its way out.
+pub(super) fn span_range(text: &str, start: usize, end: usize) -> Range {
+    source_range(
+        text,
+        mapper::to_utf16(text, start),
+        mapper::to_utf16(text, end),
+    )
+}
+
 fn analyses_of(
     overlays: &HashMap<PathBuf, String>,
     path: &Path,
