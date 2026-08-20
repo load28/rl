@@ -883,3 +883,46 @@ fn typed_exhaustiveness_resolves_a_payload_declared_in_another_module() {
         "the imported payload enum is resolved: {out}"
     );
 }
+
+#[test]
+fn typed_exhaustiveness_covers_tuple_matches_too() {
+    let root = require_tsgo!();
+    // A tuple match asks one question per position. Before, it asked none:
+    // the typed path skipped tuple matches entirely, so the product was
+    // checked only by the default path's declaration table (TASK-111).
+    let dir = project(&[(
+        "src/tuple.rl",
+        "enum Dir { North(dx: number), South }\n\
+         enum Speed { Fast(v: number), Slow }\n\
+         declare const d: Dir;\n\
+         declare const s: Speed;\n\
+         export const n = match (d, s) { (North(dx), Fast(v)) => dx + v, (South, _) => 0 };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("match is not exhaustive: missing (North, Slow)"),
+        "the missing combination is named: {out}"
+    );
+}
+
+#[test]
+fn a_tuple_position_the_checker_narrowed_is_not_demanded_back() {
+    let root = require_tsgo!();
+    // The reason to ask at all: `South` is impossible at the match, so the
+    // combinations that need it are not missing. The default path, which
+    // knows only the declaration, does report them.
+    let dir = project(&[(
+        "src/narrowed_tuple.rl",
+        "enum Dir { North(dx: number), South }\n\
+         enum Speed { Fast(v: number), Slow }\n\
+         export function f(d: Dir, s: Speed): number {\n\
+         \x20 if (d.kind === \"South\") return 0;\n\
+         \x20 return match (d, s) { (North(dx), Fast(v)) => dx + v, (North(dx), Slow) => dx };\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        !out.contains("not exhaustive"),
+        "South is impossible: {out}"
+    );
+}

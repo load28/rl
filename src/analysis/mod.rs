@@ -1696,16 +1696,20 @@ fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
 pub(crate) fn checked_coverage(
     source: &str,
     externs: &[EnumSymbol],
-    members: &[(usize, Vec<String>)],
+    members: &[(usize, Vec<Vec<String>>)],
     payloads: &[PayloadAlphabet],
 ) -> Vec<(usize, Coverage)> {
     let program = crate::parser::parse(source);
     let table = Table::build(&program, externs);
     let mut found = Vec::new();
     let mut matches = Vec::new();
-    collect_matches(&program, &mut matches);
+    let mut tuples = Vec::new();
+    collect_matches(&program, &mut matches, &mut tuples);
     for expr in matches {
-        let Some((_, tags)) = members.iter().find(|(at, _)| *at == expr.keyword_off) else {
+        let Some((_, positions)) = members.iter().find(|(at, _)| *at == expr.keyword_off) else {
+            continue;
+        };
+        let Some(tags) = positions.first() else {
             continue;
         };
         let entry = table.entry_of_members(tags);
@@ -1736,62 +1740,158 @@ pub(crate) fn checked_coverage(
             },
         ));
     }
+
+    // A tuple match asks one question per position and enumerates the
+    // product, exactly as the default path does — the only difference is
+    // where each column's alphabet came from.
+    for expr in tuples {
+        let Some((_, positions)) = members.iter().find(|(at, _)| *at == expr.keyword_off) else {
+            continue;
+        };
+        let arity = expr.scrutinees.len();
+        if positions.len() != arity {
+            continue;
+        }
+        let written = tuple_position_tags(expr, arity);
+        let entries: Vec<Option<Entry>> = positions
+            .iter()
+            .enumerate()
+            .map(|(index, tags)| {
+                // A position no arm writes a tag at constrains nothing, and
+                // saying `_` there is a shorter true answer than
+                // enumerating a column nobody asked about.
+                (!written[index].is_empty()).then(|| table.entry_of_members(tags))
+            })
+            .collect();
+        let types: Vec<ColTy> = entries
+            .iter()
+            .map(|entry| match entry {
+                Some(entry) => ColTy::Enum(entry),
+                None => ColTy::Unconstrained,
+            })
+            .collect();
+        let mut rows: Vec<Vec<Cell>> = Vec::new();
+        let mut arm_rows: Vec<(usize, Vec<Vec<Cell>>)> = Vec::new();
+        for (index, arm) in expr.arms.iter().enumerate() {
+            let TuplePattern::Elems(elems) = &arm.pattern else {
+                continue;
+            };
+            if elems.len() != arity || arm.guard.is_some() {
+                continue;
+            }
+            let Some(this) = tuple_rows(elems) else {
+                continue;
+            };
+            arm_rows.push((index, this.clone()));
+            rows.extend(this);
+        }
+        let cx = Alphabets {
+            table: &table,
+            payloads: payloads
+                .iter()
+                .map(|((tag, field), members)| {
+                    (
+                        (tag.clone(), field.clone()),
+                        table.entry_of_members(members),
+                    )
+                })
+                .collect(),
+        };
+        found.push((
+            expr.keyword_off,
+            Coverage {
+                positions: vec![None; arity],
+                covered: Vec::new(),
+                missing: render_witnesses(&usefulness::missing(&rows, &types, &cx)),
+                unreachable: unreachable_arms(&arm_rows, &types, &cx),
+            },
+        ));
+    }
     found
+}
+
+/// The tags any arm writes at each position — what says whether a position
+/// constrains anything at all.
+fn tuple_position_tags(expr: &TupleMatchExpr, arity: usize) -> Vec<Vec<&str>> {
+    let mut out: Vec<Vec<&str>> = vec![Vec::new(); arity];
+    for arm in &expr.arms {
+        let TuplePattern::Elems(elems) = &arm.pattern else {
+            continue;
+        };
+        if elems.len() != arity {
+            continue;
+        }
+        for (position, elem) in elems.iter().enumerate() {
+            if let Pattern::Tags(alts) = elem {
+                for alt in alts {
+                    if !out[position].contains(&alt.tag.as_str()) {
+                        out[position].push(&alt.tag);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Every single `match` of a program, nested ones included, in source
 /// order.
-fn collect_matches<'a>(program: &'a Program, out: &mut Vec<&'a MatchExpr>) {
+fn collect_matches<'a>(
+    program: &'a Program,
+    out: &mut Vec<&'a MatchExpr>,
+    tuples: &mut Vec<&'a TupleMatchExpr>,
+) {
     for segment in &program.segments {
         match segment {
             Segment::Match(expr) => {
                 out.push(expr);
-                collect_matches(&expr.scrutinee, out);
+                collect_matches(&expr.scrutinee, out, tuples);
                 for arm in &expr.arms {
                     if let Some(guard) = &arm.guard {
-                        collect_matches(&guard.expr, out);
+                        collect_matches(&guard.expr, out, tuples);
                     }
-                    collect_matches(&arm.body, out);
+                    collect_matches(&arm.body, out, tuples);
                 }
             }
             Segment::TupleMatch(expr) => {
+                tuples.push(expr);
                 for (_, scrutinee) in &expr.scrutinees {
-                    collect_matches(scrutinee, out);
+                    collect_matches(scrutinee, out, tuples);
                 }
                 for arm in &expr.arms {
                     if let Some(guard) = &arm.guard {
-                        collect_matches(&guard.expr, out);
+                        collect_matches(&guard.expr, out, tuples);
                     }
-                    collect_matches(&arm.body, out);
+                    collect_matches(&arm.body, out, tuples);
                 }
             }
-            Segment::Try(stmt) => collect_matches(&stmt.expr, out),
+            Segment::Try(stmt) => collect_matches(&stmt.expr, out, tuples),
             Segment::LetElse(stmt) => {
-                collect_matches(&stmt.expr, out);
-                collect_matches(&stmt.else_body, out);
+                collect_matches(&stmt.expr, out, tuples);
+                collect_matches(&stmt.else_body, out, tuples);
             }
-            Segment::IfLet(stmt) => collect_if_let_matches(stmt, out),
+            Segment::IfLet(stmt) => collect_if_let_matches(stmt, out, tuples),
             Segment::Pipe(pipe) => {
                 if let Some(head) = &pipe.head {
-                    collect_matches(head, out);
+                    collect_matches(head, out, tuples);
                 }
                 for step in &pipe.steps {
-                    collect_matches(&step.body, out);
+                    collect_matches(&step.body, out, tuples);
                 }
             }
             Segment::ResultBlock(block) => {
                 for item in &block.items {
                     match item {
-                        ResultItem::Stmts(stmts) => collect_matches(stmts, out),
-                        ResultItem::Bind(bind) => collect_matches(&bind.expr, out),
+                        ResultItem::Stmts(stmts) => collect_matches(stmts, out, tuples),
+                        ResultItem::Bind(bind) => collect_matches(&bind.expr, out, tuples),
                     }
                 }
-                collect_matches(&block.value, out);
+                collect_matches(&block.value, out, tuples);
             }
             Segment::Template(template) => {
                 for chunk in &template.chunks {
                     if let TemplateChunk::Interp(interp) = chunk {
-                        collect_matches(interp, out);
+                        collect_matches(interp, out, tuples);
                     }
                 }
             }
@@ -1803,12 +1903,16 @@ fn collect_matches<'a>(program: &'a Program, out: &mut Vec<&'a MatchExpr>) {
     }
 }
 
-fn collect_if_let_matches<'a>(stmt: &'a IfLetStmt, out: &mut Vec<&'a MatchExpr>) {
-    collect_matches(&stmt.expr, out);
-    collect_matches(&stmt.body, out);
+fn collect_if_let_matches<'a>(
+    stmt: &'a IfLetStmt,
+    out: &mut Vec<&'a MatchExpr>,
+    tuples: &mut Vec<&'a TupleMatchExpr>,
+) {
+    collect_matches(&stmt.expr, out, tuples);
+    collect_matches(&stmt.body, out, tuples);
     match &stmt.else_part {
-        Some(IfLetElse::Block(block)) => collect_matches(block, out),
-        Some(IfLetElse::IfLet(inner)) => collect_if_let_matches(inner, out),
+        Some(IfLetElse::Block(block)) => collect_matches(block, out, tuples),
+        Some(IfLetElse::IfLet(inner)) => collect_if_let_matches(inner, out, tuples),
         None => {}
     }
 }

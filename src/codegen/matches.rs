@@ -446,7 +446,12 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
 
     let mut header = Rope::new();
     for (i, (_, scrutinee)) in expr.scrutinees.iter().enumerate() {
-        header.push_lit(format!("\n  const $rl_m{i} = ("));
+        header.push_lit("\n  const ");
+        // One mark per position, in order: a tuple match's positions are
+        // told apart by where their temporaries landed, since they all
+        // stand for the same `match` keyword.
+        header.push_mark(expr.keyword_off);
+        header.push_lit(format!("$rl_m{i} = ("));
         header.append(e.emit_program(scrutinee).trim());
         header.push_lit(");");
     }

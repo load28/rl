@@ -65,6 +65,11 @@ pub struct ModuleDeclaration {
     pub text: String,
 }
 
+/// One match's alphabets as the checker named them: where the `match`
+/// keyword is, and each scrutinee position's constituents in position
+/// order (a single match has one).
+type MatchAlphabets = (usize, Vec<Vec<String>>);
+
 /// Turns a TypeScript diagnostic that landed on rlc's own glue into an rl
 /// one — said in rl's words, about rl's construct.
 ///
@@ -222,17 +227,20 @@ pub(crate) fn report(
     // reports those because it has nothing better, but on this path the
     // honest answer for an unidentifiable column is to ask the checker,
     // and that question is not asked yet.
-    let mut by_file: HashMap<PathBuf, Vec<(usize, Vec<String>)>> = HashMap::new();
+    // Per file, per match: the alphabet of each scrutinee position, in
+    // position order (a single match has one).
+    let mut by_file: HashMap<PathBuf, Vec<MatchAlphabets>> = HashMap::new();
     // The payload answers ride in the same list, after the match ones —
     // they name the alphabet of a `(constructor, field)` column, which is
     // the one thing rl cannot work out from declarations alone.
     let mut payloads: HashMap<PathBuf, Vec<PayloadAlphabet>> = HashMap::new();
     for members in &answers.tag_members {
         if let Some(anchor) = probes.tags.get(members.index) {
-            by_file
-                .entry(anchor.source_path.clone())
-                .or_default()
-                .push((anchor.offset, members.tags.clone()));
+            let per_match = by_file.entry(anchor.source_path.clone()).or_default();
+            match per_match.iter_mut().find(|(at, _)| *at == anchor.offset) {
+                Some((_, positions)) => positions.push(members.tags.clone()),
+                None => per_match.push((anchor.offset, vec![members.tags.clone()])),
+            }
             continue;
         }
         let Some(anchor) = probes
@@ -270,27 +278,49 @@ pub(crate) fn report(
         for (offset, coverage) in
             crate::analysis::checked_coverage(&file.source, &externs, asked, asked_payloads)
         {
+            // A single match's witness is one pattern, quoted the way the
+            // default path quotes one; a tuple match's is a combination of
+            // positions, written as one `(a, b)` and left unquoted — the
+            // quotes would read as part of the pattern.
             let uncovered: Vec<String> = coverage
                 .missing
                 .iter()
                 .filter(|m| m.certain)
-                .filter_map(|m| m.pattern.first().cloned())
+                .map(|m| {
+                    if m.pattern.len() > 1 {
+                        format!("({})", m.pattern.join(", "))
+                    } else {
+                        format!("{:?}", m.pattern.first().cloned().unwrap_or_default())
+                    }
+                })
                 .collect();
             if uncovered.is_empty() {
                 continue;
             }
+            // A product of positions gets long fast; the default path
+            // truncates it the same way, with the same wording.
+            let tuple = coverage.positions.len() > 1;
+            let shown = if uncovered.len() > 4 {
+                let unit = if tuple {
+                    "combinations in total"
+                } else {
+                    "in total"
+                };
+                format!(
+                    "{}, … ({} {unit})",
+                    uncovered[..3].join(", "),
+                    uncovered.len()
+                )
+            } else {
+                uncovered.join(", ")
+            };
             let (line, col) = crate::line_col(&file.source, offset);
             out.push(Diagnostic {
                 path: file.source_path.clone(),
                 position: Some((line, col)),
                 message: format!(
-                    "match is not exhaustive: missing {} \
-                     (add the missing arms or a final `_` arm)",
-                    uncovered
-                        .iter()
-                        .map(|t| format!("{t:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    "match is not exhaustive: missing {shown} \
+                     (add the missing arms or a final `_` arm)"
                 ),
             });
         }

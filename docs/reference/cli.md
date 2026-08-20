@@ -218,7 +218,9 @@ rlc: src/main.rl:2:1: cannot call mutating method `set` through val binding `map
   이 모드는 *타입*에서 답하므로 이름 없이 `match is not exhaustive`라고
   합니다. 대신 좁혀진 타입을 쓰므로 더 정확합니다. 계산 자체는 두 경로가
   **같은 알고리즘**이고(체커는 구성원 목록을 답하는 오라클), 알파벳을 알아내지
-  못한 자리의 witness는 이 모드에서 보고하지 않습니다
+  못한 자리의 witness는 이 모드에서 보고하지 않습니다. 튜플 match는 위치마다
+  한 번씩 물어 곱집합을 판정합니다 — 조합은 `missing (North, Slow)`처럼
+  따옴표 없이 보고합니다
   ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)). 리터럴 유니언은 어느
   선언 표에도 없으므로 이 모드만 검사합니다
   ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)).

@@ -118,7 +118,8 @@
 | TASK-108 | typed 소진성도 usefulness 위로 (P4 계층 2, 1/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-108](./TASK-108-typed-coverage-on-usefulness.md) |
 | TASK-109 | 중첩 열의 알파벳을 체커에게 묻는다 (P4 계층 2, 2/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-109](./TASK-109-payload-alphabet-query.md) |
 | TASK-110 | witness를 붙여 넣을 수 있는 패턴으로 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-110](./TASK-110-pasteable-witnesses.md) |
+| TASK-111 | 튜플 match의 typed 소진성 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-111](./TASK-111-typed-tuple-coverage.md) |
 
 ## 다음 태스크 번호
 
-**TASK-111**
+**TASK-112**

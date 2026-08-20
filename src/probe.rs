@@ -62,6 +62,10 @@ pub struct TagMatch {
     /// Byte offset of the `match` keyword — where a missing-case diagnostic
     /// is reported (see [`crate::line_col`]).
     pub offset: usize,
+    /// How many scrutinees the match has: `1` for a single match, one per
+    /// position for a tuple match. A tuple match asks one question per
+    /// position, in the order its temporaries were emitted.
+    pub arity: usize,
     /// Byte offset of the scrutinee's first non-whitespace byte.
     pub scrutinee: usize,
     /// Byte offset just past the scrutinee's last non-whitespace byte.
@@ -292,6 +296,7 @@ fn walk(program: &Program, src: &str, out: &mut Probes) {
                 }
             }
             Segment::TupleMatch(expr) => {
+                collect_tuple(expr, out);
                 for (_, scrutinee) in &expr.scrutinees {
                     walk(scrutinee, src, out);
                 }
@@ -397,12 +402,52 @@ fn collect(expr: &MatchExpr, src: &str, out: &mut Probes) {
         }),
         Kind::Tag => out.tags.push(TagMatch {
             offset: expr.keyword_off,
+            arity: 1,
             scrutinee,
             scrutinee_end,
             covered: tags,
         }),
         Kind::None => {}
     }
+}
+
+/// A tuple match as a typed question — one per position, asked at the
+/// temporaries the emitted code binds the scrutinees to.
+///
+/// `covered` stays empty: what the arms cover is a question about
+/// *combinations*, which the exhaustiveness algorithm answers from the
+/// arms themselves. All the checker is asked for is each position's
+/// alphabet.
+fn collect_tuple(expr: &TupleMatchExpr, out: &mut Probes) {
+    if expr
+        .arms
+        .iter()
+        .any(|a| matches!(a.pattern, TuplePattern::Wildcard))
+    {
+        return;
+    }
+    // A tuple match with no tag pattern anywhere has nothing to enumerate.
+    let tagged = expr.arms.iter().any(|arm| match &arm.pattern {
+        TuplePattern::Elems(elems) => elems.iter().any(|e| matches!(e, Pattern::Tags(_))),
+        TuplePattern::Wildcard => false,
+    });
+    if !tagged {
+        return;
+    }
+    let (first, last) = (
+        expr.scrutinees.first().map(|(span, _)| span.start),
+        expr.scrutinees.last().map(|(span, _)| span.end),
+    );
+    let (Some(scrutinee), Some(scrutinee_end)) = (first, last) else {
+        return;
+    };
+    out.tags.push(TagMatch {
+        offset: expr.keyword_off,
+        arity: expr.scrutinees.len(),
+        scrutinee,
+        scrutinee_end,
+        covered: Vec::new(),
+    });
 }
 
 /// The scrutinee span with surrounding whitespace trimmed, or `None` when it

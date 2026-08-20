@@ -166,18 +166,30 @@ pub(crate) fn assemble(
         }
 
         for probe in &file.tag_probes {
-            let Some(position) = scrutinee_position(&file.emit, probe.offset) else {
+            // One question per scrutinee position, in the order the
+            // temporaries were emitted — which is the order of the
+            // positions themselves.
+            let temps: Vec<usize> = file
+                .emit
+                .scrutinee_temps
+                .iter()
+                .filter(|t| t.src == probe.offset)
+                .map(|t| mapper::to_utf16(&file.emit.code, t.out))
+                .collect();
+            if temps.len() != probe.arity {
                 continue;
-            };
-            query.tags.push(TagQuery {
-                module: file.module_path.clone(),
-                position,
-                covered: probe.covered.clone(),
-            });
-            probes.tags.push(SourceAnchor {
-                source_path: file.source_path.clone(),
-                offset: probe.offset,
-            });
+            }
+            for position in temps {
+                query.tags.push(TagQuery {
+                    module: file.module_path.clone(),
+                    position,
+                    covered: probe.covered.clone(),
+                });
+                probes.tags.push(SourceAnchor {
+                    source_path: file.source_path.clone(),
+                    offset: probe.offset,
+                });
+            }
         }
 
         // `val`: rlc finds the bindings and the mutations; which mutation

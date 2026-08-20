@@ -333,6 +333,11 @@ rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Man
 enum으로 해석되지 않으면 그 match는 검사 없이 컴파일됩니다 (단일 match의
 미지 유니언과 동일).
 
+`--check-types`/`--types`에서는 각 위치의 알파벳을 **체커가** 답합니다
+([§3.9](#39-리터럴-유니언-소진성---types)) — 좁혀진 타입이 그대로 반영되고,
+enum 이름을 댈 수 없으므로 메시지가 `match is not exhaustive: missing
+(North, Slow)` 형태입니다.
+
 ### 3.8 리터럴 패턴
 
 패턴 자리에 **문자열·숫자·불리언 리터럴**을 쓰면 스크루티니 값 자체를 `===`로
@@ -439,6 +444,19 @@ rlc: nest.rl:4:18: match is not exhaustive: missing "Wrap(inner: No)"
 조건(`$rl_m.inner.kind === "Yes"`)의 필드 이름 자리를 물으면 그 페이로드 타입의
 구성원이 나오므로, 페이로드 타입이 rl 선언과 무관해도(손으로 쓴 유니언, 제네릭
 인자) 안쪽까지 검사됩니다.
+
+**튜플 match도 같은 방식으로 검사합니다** ([§3.7](#37-튜플-match--다중-스크루티니)).
+위치마다 한 번씩 물어 알파벳을 얻고, 곱집합 판정은 기본 경로와 같은
+알고리즘이 합니다. 조합 witness는 따옴표 없이 그대로 암으로 붙여 넣을 수 있는
+형태입니다.
+
+```
+rlc: nav.rl:4:15: match is not exhaustive: missing (North, Slow)
+     (add the missing arms or a final `_` arm)
+```
+
+어떤 암도 태그를 쓰지 않은 위치는 `_`로 남습니다 — 체커가 그 위치의 구성원을
+답해 주더라도, 사용자가 하지 않은 구분으로 조합을 늘리지 않습니다.
 
 체커도 확정된 답을 주지 못하는 타입(유한한 리터럴 유니언이 아닌 것)에서는
 기본 경로가 보수적으로 보고하는 반면 이 경로는 **보고하지 않습니다** — 여기서는

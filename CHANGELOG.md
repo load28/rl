@@ -19,6 +19,28 @@
 
 ### Added
 
+- **튜플 match의 소진성도 타입 기준으로 판정된다** (TASK-111). `--check-types`가
+  튜플 match의 **위치마다** 체커에게 그 자리의 구성원을 묻고, 단일 match와 같은
+  usefulness 알고리즘으로 곱집합을 판정한다.
+
+  ```rl
+  enum Dir { North(deg: number), South(deg: number) }
+  enum Speed { Slow(v: number), Fast(v: number) }
+  const label = match (d, s) {
+    (North, Slow) => "ns",
+    (North, Fast) => "nf",
+    (South, Fast) => "sf",
+  };
+  // rlc --check-types → missing (North, Slow) 형태의 조합으로 보고
+  ```
+
+  - 좁혀진 타입은 되묻지 않는다: 앞에서 `if (d.kind === "South") return 0;`으로
+    한 위치를 좁혀 두면 그 조합은 더는 요구되지 않는다.
+  - 어떤 암도 태그를 쓰지 않은 위치는 `_`로 남는다 — 사용자가 하지도 않은
+    구분으로 조합이 폭발하지 않는다.
+  - 조합 witness는 따옴표 없이 `(North, Slow)`로 렌더돼 그대로 암으로 붙여 넣을
+    수 있다(TASK-110의 계약과 같다).
+
 - **중첩 열의 알파벳도 체커가 답한다** (TASK-109). 페이로드의 타입이 rl 선언과
   무관해도(손으로 쓴 유니언 등) 안쪽 소진성이 검사된다.
 
