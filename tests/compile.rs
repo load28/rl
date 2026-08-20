@@ -601,6 +601,26 @@ fn local_enum_shadows_builtin() {
 }
 
 #[test]
+fn a_candidate_the_arms_satisfy_makes_the_match_exhaustive() {
+    // Two enums contain every arm tag. The arms cover `Small` completely,
+    // so nothing is missing — the check names an enum only when *no*
+    // candidate is satisfied, and then the one left fewest cases.
+    ok(
+        "enum Big { A(s: string), B, C }\nenum Small { A(s: string), B }\nconst f = (v: Small) => match (v) { A(s) => s, B => \"b\" };\n",
+    );
+
+    let e = err(
+        "enum Big { A(s: string), B, C, D }\nenum Small { A(s: string), B, C }\nconst f = (v: Small) => match (v) { A(s) => s, B => \"b\" };\n",
+    );
+    assert!(
+        e.message
+            .contains("match on enum Small is not exhaustive: missing \"C\""),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
 fn missing_cases_are_all_listed() {
     let e = err(r#"enum Dir { North, South, East, West(deg: number) }
 const f = (d: Dir) => match (d) { North => 1 };

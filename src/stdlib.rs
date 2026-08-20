@@ -28,8 +28,7 @@ pub const STD_SOURCE: &str = include_str!("stdlib/rl_std.ts");
 /// as a virtual module instead.
 pub const STD_SPECIFIER: &str = "@rl/std";
 
-/// Enums the exhaustiveness check knows about without a declaration in the
-/// file: name → case tags. A file-local rl enum with the same name shadows
-/// the built-in one (see [`crate::sema`]).
-pub(crate) const BUILTIN_ENUMS: &[(&str, &[&str])] =
-    &[("Option", &["Some", "None"]), ("Result", &["Ok", "Err"])];
+// The built-in enums a file gets without declaring them (`Option`,
+// `Result`) live in [`crate::analysis`], with their payload fields: one
+// declaration table serves both exhaustiveness and the editor's types, so
+// there is no tag-only copy of them here.

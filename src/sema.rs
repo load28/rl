@@ -8,9 +8,11 @@
 //!
 //! Error layering (see `docs/reference/errors.md`): every rule here is an
 //! rl-level rule, reported by rlc itself with an exact position. Nothing is
-//! delegated to tsc — in particular exhaustiveness, which is resolved from
-//! the enum registry collected during the walk, *after* the walk (so a match
-//! may precede the enum it matches on).
+//! delegated to tsc — in particular exhaustiveness, which this module
+//! *reports* but no longer computes: [`crate::analysis`] owns the subject
+//! table and the coverage rule, and sema turns its answer into positioned
+//! errors after the walk (so a match may precede the enum it matches on).
+//! One rule, one implementation — see `docs/design/match-analysis.md` §5.
 //!
 //! Checks performed:
 //! - `enum`: no duplicate case tags; with verification enabled, every field
@@ -36,48 +38,21 @@
 //! - exhaustiveness: a wildcard-free match whose arm tags all belong to an
 //!   enum declared in this file, an imported declaration
 //!   ([`crate::Options::extern_enums`], collected by the CLI from direct
-//!   relative `.rl` imports), or a built-in enum (`Option`, `Result`; see
-//!   [`crate::stdlib::BUILTIN_ENUMS`]) — must cover every case of that
+//!   relative `.rl` imports), or a built-in enum (`Option`, `Result`; the
+//!   analysis' declaration table) — must cover every case of that
 //!   enum with unguarded arms (a guard may be false, so guarded arms
-//!   identify the enum but cover nothing). Same-name shadowing runs
+//!   identify the enum but cover nothing). A tuple match must cover the
+//!   cartesian product of its positions. Same-name shadowing runs
 //!   local > imported > built-in. Matches whose tags belong to no known
 //!   enum (hand-written unions, unresolved imports) are not checked — rlc
-//!   has no type information for them.
-
-use std::collections::BTreeMap;
+//!   has no type information for them. The whole computation lives in
+//!   [`crate::analysis`]; what is here is the reporting.
 
 use crate::ExternEnum;
+use crate::analysis::{Coverage, CoveredEnum, Origin, has_nested};
 use crate::ast::*;
 use crate::error::RlError;
 use crate::verify;
-
-/// A deferred exhaustiveness check for one wildcard-free `match`, resolved
-/// once the whole file has been walked (so declaration order doesn't matter).
-struct MatchCheck {
-    /// Offset of the `match` keyword, for error reporting.
-    offset: usize,
-    /// Every non-wildcard arm tag, guarded or not — used to identify which
-    /// enum the match is over.
-    tags: Vec<String>,
-    /// Tags of unguarded arms only — a guard may be false, so only these
-    /// count as covering a case.
-    covered: Vec<String>,
-}
-
-/// A deferred product-exhaustiveness check for one tuple match without a
-/// bare `_` arm. Each scrutinee position resolves to an enum independently
-/// (same shadowing order as single matches); the check then walks the
-/// cartesian product of the case sets.
-struct TupleMatchCheck {
-    /// Offset of the `match` keyword, for error reporting.
-    offset: usize,
-    /// Per position: every tag any arm (guarded or not) uses there — the
-    /// identification set. Empty when every arm has `_` at that position.
-    position_tags: Vec<Vec<String>>,
-    /// Per unguarded arm, per position: `None` for `_` (covers the whole
-    /// position), `Some(tags)` for the or-alternative tags it covers.
-    covered: Vec<Vec<Option<Vec<String>>>>,
-}
 
 /// Checks a whole program; `verify` enables swc validation of field types;
 /// `externs` are enum declarations collected from imported modules
@@ -92,31 +67,16 @@ pub(crate) fn check(
     externs: &[ExternEnum],
     defer_to_checker: bool,
 ) -> Result<(), RlError> {
-    let mut checker = Checker {
-        verify,
-        enums: BTreeMap::new(),
-        externs,
-        match_checks: Vec::new(),
-        tuple_checks: Vec::new(),
-    };
+    let mut checker = Checker { verify };
     checker.visit_program(program, Ctx::Top)?;
     if defer_to_checker {
         return Ok(());
     }
-    checker.check_exhaustiveness()?;
-    checker.check_tuple_exhaustiveness()
+    report_coverage(program, externs)
 }
 
-struct Checker<'a> {
+struct Checker {
     verify: bool,
-    /// rl enums declared in this file: name → case tags.
-    enums: BTreeMap<String, Vec<String>>,
-    /// Enum declarations imported from other modules.
-    externs: &'a [ExternEnum],
-    /// Wildcard-free matches to exhaustiveness-check after the walk.
-    match_checks: Vec<MatchCheck>,
-    /// Tuple matches without a bare `_` arm, checked after the walk.
-    tuple_checks: Vec<TupleMatchCheck>,
 }
 
 /// The (field, bound name) pairs a tag alternative destructures, sorted so
@@ -174,16 +134,6 @@ fn binding_mismatch(first: &TagPattern, other: &TagPattern) -> String {
     "the alternatives bind different sets".to_string()
 }
 
-/// True when the alternative carries a nested pattern (any depth starts
-/// with one at the first binding level).
-fn has_nested(alt: &TagPattern) -> bool {
-    alt.bindings
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .any(|b| b.nested.is_some())
-}
-
 /// Collects every variable name the alternative binds, nested patterns
 /// included, in source order.
 fn leaf_bindings<'a>(alt: &'a TagPattern, out: &mut Vec<&'a str>) {
@@ -209,7 +159,7 @@ enum Ctx {
     Expr,
 }
 
-impl Checker<'_> {
+impl Checker {
     fn visit_program(&mut self, program: &Program, ctx: Ctx) -> Result<(), RlError> {
         // A stray `|>` or `if let` cannot be passed through: neither is
         // valid TypeScript, so the output self-check would fail without a
@@ -387,10 +337,6 @@ impl Checker<'_> {
             }
         }
 
-        self.enums.insert(
-            decl.name.clone(),
-            decl.cases.iter().map(|c| c.tag.clone()).collect(),
-        );
         Ok(())
     }
 
@@ -525,39 +471,8 @@ impl Checker<'_> {
             }
         }
 
-        if !expr
-            .arms
-            .iter()
-            .any(|a| matches!(a.pattern, Pattern::Wildcard))
-        {
-            let arm_tags = |covering_only: bool| {
-                expr.arms
-                    .iter()
-                    .filter(|a| {
-                        !covering_only
-                            || (a.guard.is_none()
-                                && !matches!(&a.pattern, Pattern::Tags(alts) if alts.iter().any(has_nested)))
-                    })
-                    .flat_map(|a| match &a.pattern {
-                        Pattern::Tags(alts) => {
-                            alts.iter().map(|t| t.tag.clone()).collect::<Vec<_>>()
-                        }
-                        Pattern::Wildcard | Pattern::Literals(_) => Vec::new(),
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let tags = arm_tags(false);
-            // A literal match has no tags to resolve an enum from; its
-            // exhaustiveness needs the scrutinee's TypeScript type, which
-            // only the `--types` path has (`docs/reference/cli.md` §types).
-            if !tags.is_empty() {
-                self.match_checks.push(MatchCheck {
-                    offset: expr.keyword_off,
-                    tags,
-                    covered: arm_tags(true),
-                });
-            }
-        }
+        // Exhaustiveness is not recorded here: the analysis walks the same
+        // program and answers for every match at once (`report_coverage`).
 
         // children, in source order: scrutinee first, then guards and bodies
         self.visit_program(&expr.scrutinee, Ctx::Expr)?;
@@ -573,7 +488,6 @@ impl Checker<'_> {
 
     fn check_tuple_match(&mut self, expr: &TupleMatchExpr) -> Result<(), RlError> {
         let arity = expr.scrutinees.len();
-        let mut has_bare_wildcard = false;
         for (idx, arm) in expr.arms.iter().enumerate() {
             match &arm.pattern {
                 TuplePattern::Wildcard => {
@@ -583,7 +497,6 @@ impl Checker<'_> {
                             "match: the wildcard arm `_` must be the last arm".to_string(),
                         ));
                     }
-                    has_bare_wildcard = true;
                 }
                 TuplePattern::Elems(elems) => {
                     if elems.len() != arity {
@@ -640,48 +553,6 @@ impl Checker<'_> {
             }
         }
 
-        if !has_bare_wildcard {
-            let mut position_tags: Vec<Vec<String>> = vec![Vec::new(); arity];
-            let mut covered: Vec<Vec<Option<Vec<String>>>> = Vec::new();
-            for arm in &expr.arms {
-                let TuplePattern::Elems(elems) = &arm.pattern else {
-                    continue;
-                };
-                let mut row: Vec<Option<Vec<String>>> = Vec::with_capacity(arity);
-                for (p, elem) in elems.iter().enumerate() {
-                    match elem {
-                        Pattern::Wildcard => row.push(None),
-                        // Tuple elements are tag patterns or `_` (the
-                        // parser accepts nothing else there); a literal
-                        // element would cover no combination.
-                        Pattern::Literals(_) => row.push(Some(Vec::new())),
-                        Pattern::Tags(alts) => {
-                            let tags: Vec<String> = alts.iter().map(|t| t.tag.clone()).collect();
-                            for tag in &tags {
-                                if !position_tags[p].contains(tag) {
-                                    position_tags[p].push(tag.clone());
-                                }
-                            }
-                            row.push(Some(tags));
-                        }
-                    }
-                }
-                // Like a guard, a nested pattern may mismatch — the arm
-                // then covers nothing.
-                let nested = elems
-                    .iter()
-                    .any(|e| matches!(e, Pattern::Tags(alts) if alts.iter().any(has_nested)));
-                if arm.guard.is_none() && !nested {
-                    covered.push(row);
-                }
-            }
-            self.tuple_checks.push(TupleMatchCheck {
-                offset: expr.keyword_off,
-                position_tags,
-                covered,
-            });
-        }
-
         // children, in source order
         for (_, scrutinee) in &expr.scrutinees {
             self.visit_program(scrutinee, Ctx::Expr)?;
@@ -694,208 +565,89 @@ impl Checker<'_> {
         }
         Ok(())
     }
-
-    /// Resolves the deferred exhaustiveness checks against the collected
-    /// enum registry, the imported declarations, and the built-in enums
-    /// (`Option`, `Result`), in that order — so on a tie the nearer origin
-    /// wins. A local enum shadows an imported or built-in enum of the same
-    /// name entirely; an imported enum likewise shadows a built-in.
-    fn check_exhaustiveness(&self) -> Result<(), RlError> {
-        // The candidate table does not depend on the match being checked, so
-        // it is built once for the file rather than once per match — with
-        // many enums and many matches the per-pair rebuild was the dominant
-        // cost of this phase.
-        let candidates = self.candidate_enums();
-        for check in &self.match_checks {
-            // candidate with fewest missing cases: (name, origin, missing)
-            let mut best: Option<(&str, Origin, Vec<&str>)> = None;
-            let mut satisfied = false;
-            for (name, origin, cases) in candidates.iter().map(|(n, o, c)| (*n, *o, c)) {
-                if !check.tags.iter().all(|t| cases.contains(&t.as_str())) {
-                    continue; // not a candidate: some arm tag is not a case of this enum
-                }
-                // guarded arms identify the enum but do not cover its cases
-                let missing: Vec<&str> = cases
-                    .iter()
-                    .filter(|c| !check.covered.iter().any(|t| t.as_str() == **c))
-                    .copied()
-                    .collect();
-                if missing.is_empty() {
-                    satisfied = true;
-                    break;
-                }
-                if best
-                    .as_ref()
-                    .is_none_or(|(_, _, m)| missing.len() < m.len())
-                {
-                    best = Some((name, origin, missing));
-                }
-            }
-            if let (false, Some((name, origin, missing))) = (satisfied, best) {
-                let list = missing
-                    .iter()
-                    .map(|m| format!("\"{m}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let described = match origin {
-                    Origin::Local => format!("enum {name}"),
-                    Origin::Builtin => format!("built-in enum {name}"),
-                    Origin::Extern(Some(from)) => format!("enum {name} (imported from \"{from}\")"),
-                    Origin::Extern(None) => format!("imported enum {name}"),
-                };
-                return Err(RlError::at(
-                    check.offset,
-                    format!(
-                        "match on {described} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
-                    ),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Resolves a tuple-match position's tag set to an enum: local >
-    /// imported > built-in, the first whose cases contain every tag.
-    fn resolve_enum<'c>(
-        candidates: &'c [(&'c str, Origin<'c>, Vec<&'c str>)],
-        tags: &[String],
-    ) -> Option<(&'c str, &'c [&'c str])> {
-        candidates
-            .iter()
-            .find(|(_, _, cases)| tags.iter().all(|t| cases.contains(&t.as_str())))
-            .map(|(name, _, cases)| (*name, cases.as_slice()))
-    }
-
-    /// Every enum a match in this file could be over, in shadowing order:
-    /// local declarations first, then imported ones, then the built-ins —
-    /// each name appearing only once, so the nearer origin wins. Built once
-    /// per file and shared by both exhaustiveness passes.
-    fn candidate_enums(&self) -> Vec<(&str, Origin<'_>, Vec<&str>)> {
-        let mut out: Vec<(&str, Origin<'_>, Vec<&str>)> = Vec::new();
-        for (name, cases) in &self.enums {
-            out.push((
-                name.as_str(),
-                Origin::Local,
-                cases.iter().map(String::as_str).collect(),
-            ));
-        }
-        for e in self.externs {
-            if self.enums.contains_key(&e.name) {
-                continue;
-            }
-            out.push((
-                e.name.as_str(),
-                Origin::Extern(e.from.as_deref()),
-                e.tags.iter().map(String::as_str).collect(),
-            ));
-        }
-        for (name, cases) in crate::stdlib::BUILTIN_ENUMS {
-            if self.enums.contains_key(*name) || self.externs.iter().any(|e| e.name == *name) {
-                continue;
-            }
-            out.push((name, Origin::Builtin, cases.to_vec()));
-        }
-        out
-    }
-
-    /// Walks the cartesian product of each tuple match's per-position case
-    /// sets and reports uncovered combinations. A position where every arm
-    /// has `_` is universal — it constrains nothing and shows as `_` in the
-    /// message. A match with a tagged position that resolves to no known
-    /// enum is not checked (same as single matches over unknown unions).
-    fn check_tuple_exhaustiveness(&self) -> Result<(), RlError> {
-        let candidates = self.candidate_enums();
-        'checks: for check in &self.tuple_checks {
-            let arity = check.position_tags.len();
-            let mut names: Vec<&str> = Vec::with_capacity(arity);
-            let mut cases: Vec<Vec<&str>> = Vec::with_capacity(arity);
-            for tags in &check.position_tags {
-                if tags.is_empty() {
-                    names.push("_");
-                    cases.push(Vec::new()); // universal position
-                    continue;
-                }
-                match Self::resolve_enum(&candidates, tags) {
-                    Some((name, cs)) => {
-                        names.push(name);
-                        cases.push(cs.to_vec());
-                    }
-                    None => continue 'checks,
-                }
-            }
-
-            let tagged: Vec<usize> = (0..arity).filter(|&p| !cases[p].is_empty()).collect();
-            if tagged.is_empty() {
-                continue; // every position universal — nothing enumerable
-            }
-
-            let mut missing: Vec<String> = Vec::new();
-            let mut idx = vec![0usize; tagged.len()];
-            loop {
-                let covered = check.covered.iter().any(|row| {
-                    tagged.iter().enumerate().all(|(ti, &p)| match &row[p] {
-                        None => true,
-                        Some(tags) => tags.iter().any(|t| t == cases[p][idx[ti]]),
-                    })
-                });
-                if !covered {
-                    let mut parts = vec!["_"; arity];
-                    for (ti, &p) in tagged.iter().enumerate() {
-                        parts[p] = cases[p][idx[ti]];
-                    }
-                    missing.push(format!("({})", parts.join(", ")));
-                }
-                // odometer over the tagged positions
-                let mut ti = tagged.len();
-                loop {
-                    if ti == 0 {
-                        break;
-                    }
-                    ti -= 1;
-                    idx[ti] += 1;
-                    if idx[ti] < cases[tagged[ti]].len() {
-                        break;
-                    }
-                    idx[ti] = 0;
-                    if ti == 0 {
-                        ti = usize::MAX;
-                        break;
-                    }
-                }
-                if ti == usize::MAX {
-                    break;
-                }
-            }
-
-            if !missing.is_empty() {
-                let shown = if missing.len() > 4 {
-                    format!(
-                        "{}, … ({} combinations in total)",
-                        missing[..3].join(", "),
-                        missing.len()
-                    )
-                } else {
-                    missing.join(", ")
-                };
-                return Err(RlError::at(
-                    check.offset,
-                    format!(
-                        "match on ({}) is not exhaustive: missing {} (add the missing arms or a final `_` arm)",
-                        names.join(", "),
-                        shown
-                    ),
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
-/// Where an exhaustiveness candidate was declared, for error messages and
-/// resolution order.
-#[derive(Clone, Copy)]
-enum Origin<'a> {
-    Local,
-    Extern(Option<&'a str>),
-    Builtin,
+/// Turns [`crate::analysis`]'s coverage into positioned rl errors.
+///
+/// Reporting order is the order these checks have always run in: every
+/// single match first, in source order, then every tuple match — so the
+/// message a file produces does not depend on how the two kinds interleave.
+/// A tuple match always has at least two scrutinees (the parser requires
+/// the comma), so one position means a single match.
+fn report_coverage(program: &Program, externs: &[ExternEnum]) -> Result<(), RlError> {
+    let analyses = crate::analysis::coverage_analyses(program, externs);
+    let uncovered: Vec<(usize, &Coverage)> = analyses
+        .matches
+        .iter()
+        .filter_map(|m| m.coverage.as_ref().map(|c| (m.keyword_off, c)))
+        .filter(|(_, c)| !c.missing.is_empty())
+        .collect();
+
+    // The first uncovered match decides the error; each `find` is that
+    // match, not a loop over several.
+    if let Some((offset, coverage)) = uncovered.iter().find(|(_, c)| c.positions.len() == 1)
+        // A single match's one position always resolved — that is what
+        // makes it a coverage answer at all.
+        && let Some(subject) = coverage.positions[0].as_ref()
+    {
+        let list = coverage
+            .missing_tags()
+            .iter()
+            .map(|m| format!("\"{m}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let described = describe(subject);
+        return Err(RlError::at(
+            *offset,
+            format!(
+                "match on {described} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
+            ),
+        ));
+    }
+
+    if let Some((offset, coverage)) = uncovered.iter().find(|(_, c)| c.positions.len() > 1) {
+        let names = coverage
+            .positions
+            .iter()
+            .map(|p| p.as_ref().map_or("_", |e| e.name.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let combinations: Vec<String> = coverage
+            .missing
+            .iter()
+            .map(|row| {
+                let parts: Vec<&str> = row.iter().map(|t| t.as_deref().unwrap_or("_")).collect();
+                format!("({})", parts.join(", "))
+            })
+            .collect();
+        let shown = if combinations.len() > 4 {
+            format!(
+                "{}, … ({} combinations in total)",
+                combinations[..3].join(", "),
+                combinations.len()
+            )
+        } else {
+            combinations.join(", ")
+        };
+        return Err(RlError::at(
+            *offset,
+            format!(
+                "match on ({names}) is not exhaustive: missing {shown} (add the missing arms or a final `_` arm)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// How an error names the enum a match is over — the declaration's origin,
+/// so "which `Token`?" is answerable from the message alone.
+fn describe(subject: &CoveredEnum) -> String {
+    match &subject.origin {
+        Origin::Local => format!("enum {}", subject.name),
+        Origin::Builtin => format!("built-in enum {}", subject.name),
+        Origin::Imported { from: Some(from) } => {
+            format!("enum {} (imported from \"{from}\")", subject.name)
+        }
+        Origin::Imported { from: None } => format!("imported enum {}", subject.name),
+    }
 }

@@ -55,6 +55,7 @@ src/analysis.rs            ← 순수 단계 (probe.rs·sema.rs와 같은 층위
    · match마다: subjects(위치별) / arms / coverage
    · arm마다: patternBindings(span-키) / bodyBindings(이름-키, 병합)
 
+sema.rs                    ← 소비자 (컴파일 에러): Coverage → 위치 있는 RlError
 engine/language.rs         ← 소비자 (에디터 semantic 표면)
    hover:      TS 서비스 → (없으면) 대안 격리 프로브 → 선언 타입 폴백
    definition: TS 서비스 → (비면) body 참조 → 패턴 binding span들
@@ -141,16 +142,49 @@ definition은 같은 재료의 자연스러운 확장이다: or-arm body의 bind
 필드-이름 불일치를 구분해 알려준다(`errors.md`). 에러 계층 계약(모든
 rl 수준 에러는 rlc가 위치와 함께 직접 보고)은 그대로다.
 
-## 5. coverage와 sema — 단계적 통합
+## 5. coverage — 소진성의 단일 원천
 
-요구사항의 최종 그림은 소진성 검사도 같은 MatchAnalysis를 입력으로
-쓰는 것이다. 이번 작업은 비목표("exhaustive 알고리즘을 한 번에 갈아엎지
-않는다")에 따라 **모델에 coverage를 파생 데이터로 노출**하는 데까지만
-갔다: 단일 tag match에 대해 sema와 같은 규칙(무가드·비중첩 arm만 커버,
-로컬 > import > 내장 subject 해석)으로 covered/missing을 계산한다.
-보고 주체는 여전히 sema다. sema의 소진성 패스를 이 모델 위로 옮기는
-것(그리고 튜플 product coverage)은 후속 태스크다 — 두 구현이 어긋나면
-버그로 취급한다.
+TASK-096은 모델에 `coverage`를 파생 데이터로 노출하는 데까지만 갔고, 보고
+주체인 sema는 자기 구현을 따로 갖고 있었다. TASK-097이 그 중복을 없앴다.
+지금은 **계산은 `analysis.rs`, 보고는 `sema.rs`** 다.
+
+```
+analysis.rs   후보 표(로컬 > 임포트 > 내장) · subject 해석 · 커버 규칙 ·
+              튜플 곱집합(odometer)  →  Coverage
+sema.rs       Coverage → 위치 있는 RlError (문안·오프셋·보고 순서)
+```
+
+`Coverage`는 arity로 단일/튜플을 함께 표현한다:
+
+```
+Coverage
+  positions: Vec<Option<CoveredEnum>>   // 위치별 subject, None = 보편 위치(`_`만 쓰인 자리)
+  covered:   Vec<String>                // 단일 match 전용 (튜플 arm은 태그가 아니라 조합을 커버)
+  missing:   Vec<Vec<Option<String>>>   // 커버되지 않은 조합들 (행 = 조합, 칸 = 위치)
+CoveredEnum { name, origin: Local | Imported { from } | Builtin }
+```
+
+`origin`이 모델에 있는 이유는 에러 문안이 그것을 부르기 때문이다 —
+"enum E" / "built-in enum Option" / "enum T (imported from \"./token.rl\")".
+sema는 이제 자기 후보 표를 갖지 않는다.
+
+규칙 두 가지가 여기서 규범이 된다:
+
+- **커버 판정**: 가드가 붙은 arm과 중첩 패턴이 있는 arm은 subject를
+  식별하되 아무것도 커버하지 않는다(둘 다 런타임에 어긋날 수 있다).
+- **후보 선택**: 소진성은 arm 태그를 모두 포함하는 후보들 중 ① 커버 arm이
+  **만족시키는** 후보가 있으면 소진, ② 없으면 **결손이 가장 적은** 후보를
+  이름으로 부른다. 타입 질문(패턴 binding이 필드 타입을 읽는 자리)은 다른
+  질문이라 계속 **첫 후보**를 쓴다 — 두 질문에 두 해석이 있는 것이 아니라,
+  같은 표에 두 질의가 있는 것이다.
+
+내장 enum(`Option`/`Result`)의 선언도 이 표 하나뿐이다. sema가 태그만 담긴
+사본(`stdlib::BUILTIN_ENUMS`)을 따로 보던 것은 함께 없앴다.
+
+extern 입력의 모양이 둘인 것(컴파일러의 `ExternEnum` — 태그와 지정자,
+에디터의 `EnumSymbol` — 필드 타입까지)은 표 빌더가 흡수한다. 컴파일러
+경로는 필드 타입이 필요 없으므로 binding 분석을 아예 건너뛴다
+(`Depth::CoverageOnly`) — 소진성 답은 그대로 완전하다.
 
 ## 6. 한계 (알고 유지하는 것)
 
@@ -163,3 +197,6 @@ rl 수준 에러는 rlc가 위치와 함께 직접 보고)은 그대로다.
 - 대안 격리 프로브는 tsgo 통합 환경에서의 e2e 테스트가 아직 없다
   (순수 부분 — 합성 소스·매핑 — 은 단위 테스트로 고정). vscode
   `engine.test.ts` 계층에 추가하는 것이 후속이다.
+- 튜플 match의 위치별 후보 해석은 **첫 후보**를 쓴다(단일 match의 소진성
+  후보 선택과 다르다). 이것은 이관 전 sema의 동작을 그대로 옮긴 것이고,
+  위치마다 "만족시키는 후보"를 따지는 규칙으로 바꿀지는 열려 있다.
