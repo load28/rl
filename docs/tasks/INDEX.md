@@ -80,7 +80,7 @@
 | TASK-070 | `val` — 변경 금지 바인딩 수식자 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-070](./TASK-070-val-binding-modifier.md) |
 | TASK-071 | `val` 변경 메서드 판정을 타입 기반으로 — 이름 기준 오탐 제거 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-071](./TASK-071-val-typed-mutation.md) |
 | TASK-072 | 에디터에 타입 기반 `val` 진단 노출 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-072](./TASK-072-val-typed-diagnostics-in-editor.md) |
-| TASK-073 | TypeScript 네이티브 백엔드 — 단일 프로젝트 그래프 | 진행 중 | 2026-08-19 | — | [TASK-073](./TASK-073-typescript-native-backend.md) |
+| TASK-073 | TypeScript 네이티브 백엔드 — 단일 프로젝트 그래프 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-073](./TASK-073-typescript-native-backend.md) |
 | TASK-074 | 에디터를 네이티브 백엔드로 — 사이드카 규약 통일 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-074](./TASK-074-editor-native-backend.md) |
 | TASK-075 | `types_host.mjs` 제거 — 타입 경로 단일화 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-075](./TASK-075-retire-types-host.md) |
 | TASK-076 | 증분 검사 — 서버를 살려 두고 스냅샷만 갱신 | 완료 | 2026-08-19 | 2026-08-19 | [TASK-076](./TASK-076-incremental-native-check.md) |
@@ -102,9 +102,13 @@
 | TASK-092 | VS Code 하이라이팅 재구축 — TS 문법 전체 확장 생성 파이프라인 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-092](./TASK-092-vscode-grammar-full-extension.md) |
 | TASK-093 | 엔진 semantic tokens — 파서 소유 분류를 LSP 표준으로 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-093](./TASK-093-semantic-tokens.md) |
 | TASK-094 | 마크다운 코드 펜스 rl 하이라이팅 — injection 문법 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-094](./TASK-094-markdown-fence-highlighting.md) |
-| TASK-095 | 펜스 injection을 MDX로 확장 — Svelte 확장과 동등하게 | 진행 중 | 2026-08-20 | — | [TASK-095](./TASK-095-mdx-fence-injection.md) |
+| TASK-095 | 펜스 injection을 MDX로 확장 — Svelte 확장과 동등하게 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-095](./TASK-095-mdx-fence-injection.md) |
 | TASK-096 | match 구조 개선 — typed pattern analysis (MatchAnalysis) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-096](./TASK-096-match-typed-pattern-analysis.md) |
+| TASK-097 | sema 소진성을 MatchAnalysis 위로 — coverage 단일 원천 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-097](./TASK-097-exhaustiveness-on-match-analysis.md) |
+| TASK-098 | 폴백 타입의 한계 실측 — nested·tuple·제네릭 인스턴스화 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-098](./TASK-098-fallback-type-instantiation-survey.md) |
+| TASK-099 | 기록 위생 — INDEX 상태 정합성과 미등록 후속 등록 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-099](./TASK-099-records-hygiene.md) |
+| TASK-100 | TS enum을 scrutinee로 쓴 `match`를 rl 진단으로 | 대기 | — | — | [TASK-100](./TASK-100-ts-enum-match-diagnostic.md) |
 
 ## 다음 태스크 번호
 
-**TASK-097**
+**TASK-101**
