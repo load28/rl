@@ -35,8 +35,15 @@ fn toolchain() -> Option<Toolchain> {
         Some(root) if !root.is_empty() => PathBuf::from(root),
         _ => PathBuf::from("../typescript-go"),
     };
-    (root.join(BIN_IN_TREE).exists() && root.join(API_IN_TREE).exists())
-        .then_some(Toolchain::Tree(root))
+    if !(root.join(BIN_IN_TREE).exists() && root.join(API_IN_TREE).exists()) {
+        return None;
+    }
+    // Absolute, always: every case runs rlc with its working directory in
+    // a temporary project, where the sibling-checkout default would point
+    // somewhere else entirely. A relative root that resolves here and not
+    // there fails the case rather than skipping it, which is the one thing
+    // this guard exists to prevent.
+    Some(Toolchain::Tree(root.canonicalize().unwrap_or(root)))
 }
 
 /// Any resolvable compiler — enough to check.
@@ -812,12 +819,12 @@ fn typed_exhaustiveness_still_answers_from_the_narrowed_type() {
 }
 
 #[test]
-fn a_witness_rl_is_not_certain_of_is_not_reported_on_the_typed_path() {
+fn a_hand_written_payload_union_is_named_by_the_checker() {
     let root = require_tsgo!();
-    // The payload's declared type is a hand-written union, so rl cannot
-    // name that column's alphabet. The default path guesses (it has
-    // nothing better); this path stays quiet, because the honest answer is
-    // to ask the checker — a question rl does not ask yet.
+    // The payload's declared type is a hand-written union, so no rl
+    // declaration describes it — the one thing the declaration table can
+    // never answer. The emitted condition tests that payload at exactly
+    // its type, and asking there names the column's alphabet (TASK-109).
     let dir = project(&[(
         "src/opaque.rl",
         "type Inner = { kind: \"Yes\"; n: number } | { kind: \"No\" };\n\
@@ -827,9 +834,31 @@ fn a_witness_rl_is_not_certain_of_is_not_reported_on_the_typed_path() {
     )]);
     let out = check(&dir, &root);
     assert!(
-        !out.contains("not exhaustive"),
-        "an unidentifiable column is not guessed at here: {out}"
+        out.contains("match is not exhaustive: missing \"Wrap(inner: No)\""),
+        "the checker names the payload's constituents: {out}"
     );
+}
+
+#[test]
+fn a_hand_written_payload_union_fully_covered_is_exhaustive() {
+    let root = require_tsgo!();
+    // The other half of the same answer: covering the payload's cases
+    // makes the match exhaustive, and nothing is reported. Before the
+    // payload question existed this stayed quiet too — but only because rl
+    // refused to guess, which is a different thing from knowing.
+    let dir = project(&[(
+        "src/opaque_full.rl",
+        "type Inner = { kind: \"Yes\"; n: number } | { kind: \"No\" };\n\
+         enum Outer { Wrap(inner: Inner), Bare }\n\
+         declare const o: Outer;\n\
+         export const a = match (o) {\n\
+         \x20 Wrap(inner: Yes(n)) => n,\n\
+         \x20 Wrap(inner: No()) => 0,\n\
+         \x20 Bare => -1,\n\
+         };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(!out.contains("not exhaustive"), "covered: {out}");
 }
 
 #[test]

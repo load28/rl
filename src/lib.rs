@@ -72,7 +72,9 @@ pub use analysis::{
     UnresolvedName, pattern_analyses,
 };
 pub use error::CompileError;
-pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};
+pub use probe::{
+    Literal, LiteralMatch, PayloadProbe, TagMatch, literal_matches, payload_probes, tag_matches,
+};
 pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
 pub use val::{Mutation, ValBinding, ValFn, ValParam, ValPass, ValProbes, is_builtin_mutator_name};
@@ -433,6 +435,24 @@ pub struct EmitAnchor {
     pub kind: AnchorKind,
 }
 
+/// Where a nested pattern's **receiver** landed in the emitted output.
+///
+/// `Ok(value: Some(v))` lowers to a condition chain whose second link
+/// reads `$rl_m.value.kind === "Some"`. That `$rl_m.value` is the only
+/// place a type checker can be asked what the *payload* admits — rlc knows
+/// the field's declared type text, but a text is not a type, and a type
+/// parameter or a hand-written union names no declaration rlc holds. The
+/// emitter records where it wrote the receiver, and the typed
+/// exhaustiveness pass asks there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayloadTemp {
+    /// Byte offset of the nested pattern's tag in the source — the
+    /// occurrence this receiver was written for.
+    pub src: usize,
+    /// Byte offset of the receiver expression in the emitted output.
+    pub out: usize,
+}
+
 /// The result of [`emit_mapped`]: the emitted TypeScript and the
 /// source↔output mappings of every verbatim-copied chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +463,9 @@ pub struct MappedEmit {
     pub mappings: Vec<EmitMapping>,
     /// Where each `match` bound its scrutinee, ordered by output offset.
     pub scrutinee_temps: Vec<ScrutineeTemp>,
+    /// Where each nested pattern's receiver was written, ordered by output
+    /// offset.
+    pub payload_temps: Vec<PayloadTemp>,
     /// The glue each construct wrote, innermost first — the origin of a
     /// diagnostic that lands where no mapping reaches.
     pub anchors: Vec<EmitAnchor>,
@@ -476,13 +499,13 @@ impl MappedEmit {
 /// ```
 pub fn emit_mapped(source: &str) -> MappedEmit {
     let program = parser::parse(source);
-    let (code, mappings, scrutinee_temps, anchors) =
-        codegen::emit_with_map(&program, source, ImportRewrite::Off, None);
+    let flat = codegen::emit_with_map(&program, source, ImportRewrite::Off, None);
     MappedEmit {
-        code,
-        mappings,
-        scrutinee_temps,
-        anchors,
+        code: flat.code,
+        mappings: flat.mappings,
+        scrutinee_temps: flat.scrutinee_temps,
+        payload_temps: flat.payload_temps,
+        anchors: flat.anchors,
     }
 }
 
@@ -679,12 +702,13 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
     if !options.defer_to_checker {
         val::check(source, &tokens).map_err(to_compile_error)?;
     }
-    let (code, mappings, scrutinee_temps, anchors) = codegen::emit_with_map(
+    let flat = codegen::emit_with_map(
         &program,
         source,
         options.rewrite_imports,
         options.std_import,
     );
+    let code = flat.code;
 
     if options.verify
         && let Err(message) = verify::verify_output(&code)
@@ -698,8 +722,9 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
     }
     Ok(MappedEmit {
         code,
-        mappings,
-        scrutinee_temps,
-        anchors,
+        mappings: flat.mappings,
+        scrutinee_temps: flat.scrutinee_temps,
+        payload_temps: flat.payload_temps,
+        anchors: flat.anchors,
     })
 }

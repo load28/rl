@@ -36,6 +36,9 @@ pub struct ProjectedDocument {
     pub(crate) literal_probes: Vec<LiteralMatch>,
     /// The tag-match exhaustiveness probes of this file.
     pub(crate) tag_probes: Vec<TagMatch>,
+    /// The nested patterns of this file — the payload positions the
+    /// checker is asked to name the alphabet of.
+    pub(crate) payload_probes: Vec<crate::PayloadProbe>,
     /// The `val` bindings, mutations, declarations and passes of this file,
     /// unpaired — pairing is symbol identity, the checker's answer.
     pub(crate) val: ValProbes,
@@ -68,6 +71,7 @@ impl ProjectedDocument {
             imports_std: crate::imports_std(&source),
             literal_probes: crate::literal_matches(&source),
             tag_probes: crate::tag_matches(&source),
+            payload_probes: crate::payload_probes(&source),
             val: crate::val_probes(&source),
             source_path: source_path.to_path_buf(),
             source,
@@ -281,6 +285,42 @@ pub(crate) fn assemble(
             });
         }
     }
+    // A nested pattern narrows over the *payload*, whose type rlc may not
+    // know — a type parameter, a hand-written union. The emitted condition
+    // tests a receiver expression at exactly that type, and the emitter
+    // recorded where; asking there names that column's alphabet for the
+    // exhaustiveness algorithm.
+    //
+    // These ride in the same `tags` list (the question is the same: "which
+    // `kind` values does this type allow?") with nothing covered, so the
+    // answer is the whole alphabet. They are asked in a pass of their own,
+    // **after** every file's match questions, so an answer's index splits
+    // cleanly: below `probes.tags.len()` it is a match, at or above it a
+    // payload. Interleaving them per file would misattribute every answer
+    // from the second file on.
+    for file in files {
+        for probe in &file.payload_probes {
+            let Some(temp) = file
+                .emit
+                .payload_temps
+                .iter()
+                .find(|t| t.src == probe.offset)
+            else {
+                continue;
+            };
+            query.tags.push(TagQuery {
+                module: file.module_path.clone(),
+                position: mapper::to_utf16(&file.emit.code, temp.out),
+                covered: Vec::new(),
+            });
+            probes.payloads.push(PayloadAnchor {
+                source_path: file.source_path.clone(),
+                tag: probe.tag.clone(),
+                field: probe.field.clone(),
+            });
+        }
+    }
+
     (query, probes)
 }
 
@@ -342,12 +382,25 @@ pub(crate) struct PassAnchor {
 pub(crate) struct Probes {
     pub literals: Vec<SourceAnchor>,
     pub tags: Vec<SourceAnchor>,
+    /// One per nested pattern asked about, in the order the query lists
+    /// them after [`Probes::tags`]: which file, and which
+    /// `(constructor, field)` column the answer names the alphabet of.
+    pub payloads: Vec<PayloadAnchor>,
     /// Indices into [`Query::symbols`] for every `val` binding's identifier.
     pub val_bindings: Vec<usize>,
     pub mutations: Vec<MutationAnchor>,
     /// The declarations a pass's callee may resolve to, project-wide.
     pub functions: Vec<FnAnchor>,
     pub passes: Vec<PassAnchor>,
+}
+
+/// A payload column asked about: where it was written, and which
+/// `(constructor, field)` it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayloadAnchor {
+    pub source_path: PathBuf,
+    pub tag: String,
+    pub field: String,
 }
 
 /// The UTF-16 offset in the emitted module a source byte landed at, or

@@ -25,8 +25,7 @@ use std::cell::Cell;
 
 use crate::ast::*;
 use crate::scanner::contains_await;
-use crate::{AnchorKind, EmitAnchor, ImportRewrite};
-use crate::{EmitMapping, ScrutineeTemp};
+use crate::{AnchorKind, ImportRewrite};
 use rope::Rope;
 
 /// A trailing line comment would swallow whatever codegen appends on the
@@ -47,12 +46,7 @@ pub(crate) fn emit_with_map(
     src: &str,
     rewrite_imports: ImportRewrite,
     std_import: Option<&str>,
-) -> (
-    String,
-    Vec<EmitMapping>,
-    Vec<ScrutineeTemp>,
-    Vec<EmitAnchor>,
-) {
+) -> rope::Flat {
     let emitter = Emitter {
         src,
         bytes: src.as_bytes(),
@@ -62,7 +56,8 @@ pub(crate) fn emit_with_map(
         used_pipe: Cell::new(false),
         used_flow: Cell::new(false),
     };
-    let (mut code, mappings, scrutinee_temps, anchors) = emitter.emit_program(program).flatten();
+    let mut flat = emitter.emit_program(program).flatten();
+    let code = &mut flat.code;
     // The pipeline apply helper, once per file. A function declaration
     // hoists, so appending at the end keeps every original line in place
     // while top-level pipelines still evaluate correctly at module init.
@@ -82,7 +77,7 @@ pub(crate) fn emit_with_map(
             "function $rl_fl<A extends unknown[], B, C>(f: (...a: A) => B, g: (b: B) => C): (...a: A) => C { return (...a: A) => g(f(...a)); }\n",
         );
     }
-    (code, mappings, scrutinee_temps, anchors)
+    flat
 }
 
 pub(super) struct Emitter<'a> {
@@ -232,7 +227,9 @@ impl<'a> Emitter<'a> {
         let mut code = Rope::new();
         code.push_lit(format!("{{ const {tmp} = ("));
         code.append(expr);
-        code.push_lit(format!("); if ({cond}) {{ "));
+        code.push_lit("); if (");
+        code.append(cond);
+        code.push_lit(") { ");
         code.append(binds);
         code.append(body);
         code.push_lit(" }");

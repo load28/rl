@@ -15,7 +15,18 @@
 
 use std::borrow::Cow;
 
-use crate::{AnchorKind, EmitAnchor, EmitMapping, ScrutineeTemp};
+use crate::{AnchorKind, EmitAnchor, EmitMapping, PayloadTemp, ScrutineeTemp};
+
+/// What a [`Piece::Mark`] marks — the two things codegen writes that a
+/// type checker can be *asked about*, each paired with the source
+/// construct it stands for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarkKind {
+    /// A `match`'s scrutinee temporary ([`crate::ScrutineeTemp`]).
+    Scrutinee,
+    /// The receiver a nested pattern tests ([`crate::PayloadTemp`]).
+    Payload,
+}
 
 enum Piece<'a> {
     /// Compiler-written glue (IIFE scaffolding, destructurings, labels).
@@ -25,7 +36,7 @@ enum Piece<'a> {
     /// A zero-length note about the *next* byte the rope emits: the name
     /// codegen is about to write stands for the construct at source offset
     /// `src`. Carries no text, so it changes nothing about the output.
-    Mark { src: usize },
+    Mark { src: usize, kind: MarkKind },
     /// A zero-length note that everything up to the matching [`Piece::Close`]
     /// is glue one construct wrote ([`EmitAnchor`]). Nests.
     Open { src: usize, kind: AnchorKind },
@@ -89,7 +100,20 @@ impl<'a> Rope<'a> {
     /// Notes that the next thing pushed is the name codegen writes for the
     /// construct at source offset `src`. See [`crate::ScrutineeTemp`].
     pub(crate) fn push_mark(&mut self, src: usize) {
-        self.pieces.push(Piece::Mark { src });
+        self.pieces.push(Piece::Mark {
+            src,
+            kind: MarkKind::Scrutinee,
+        });
+    }
+
+    /// Notes that the next thing pushed is the receiver expression of the
+    /// nested pattern whose tag starts at `src` — the one place a checker
+    /// can be asked what that payload's type admits.
+    pub(crate) fn push_payload_mark(&mut self, src: usize) {
+        self.pieces.push(Piece::Mark {
+            src,
+            kind: MarkKind::Payload,
+        });
     }
 
     /// Appends `inner` as one construct's glue: everything it emits belongs
@@ -197,17 +221,11 @@ impl<'a> Rope<'a> {
     /// Flattens into the output string, the source↔output mappings, and the
     /// marks codegen left. Adjacent pieces that continue each other in both
     /// coordinate spaces merge into one mapping.
-    pub(crate) fn flatten(
-        self,
-    ) -> (
-        String,
-        Vec<EmitMapping>,
-        Vec<ScrutineeTemp>,
-        Vec<EmitAnchor>,
-    ) {
+    pub(crate) fn flatten(self) -> Flat {
         let mut out = String::with_capacity(self.len);
         let mut mappings: Vec<EmitMapping> = Vec::new();
         let mut marks: Vec<ScrutineeTemp> = Vec::new();
+        let mut payloads: Vec<PayloadTemp> = Vec::new();
         let mut anchors: Vec<EmitAnchor> = Vec::new();
         let mut open: Vec<(usize, usize, AnchorKind)> = Vec::new();
         for piece in &self.pieces {
@@ -225,7 +243,17 @@ impl<'a> Rope<'a> {
                         });
                     }
                 }
-                Piece::Mark { src } => marks.push(ScrutineeTemp {
+                Piece::Mark {
+                    src,
+                    kind: MarkKind::Scrutinee,
+                } => marks.push(ScrutineeTemp {
+                    src: *src,
+                    out: out.len(),
+                }),
+                Piece::Mark {
+                    src,
+                    kind: MarkKind::Payload,
+                } => payloads.push(PayloadTemp {
                     src: *src,
                     out: out.len(),
                 }),
@@ -249,6 +277,23 @@ impl<'a> Rope<'a> {
             }
         }
         marks.sort_by_key(|mark| mark.out);
-        (out, mappings, marks, anchors)
+        payloads.sort_by_key(|mark| mark.out);
+        Flat {
+            code: out,
+            mappings,
+            scrutinee_temps: marks,
+            payload_temps: payloads,
+            anchors,
+        }
     }
+}
+
+/// A flattened rope: the text, and everything language tooling reads off
+/// the emission.
+pub(crate) struct Flat {
+    pub code: String,
+    pub mappings: Vec<EmitMapping>,
+    pub scrutinee_temps: Vec<ScrutineeTemp>,
+    pub payload_temps: Vec<PayloadTemp>,
+    pub anchors: Vec<EmitAnchor>,
 }

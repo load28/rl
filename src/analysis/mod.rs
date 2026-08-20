@@ -44,7 +44,7 @@ mod usefulness;
 
 use crate::ast::*;
 use crate::{EnumSymbol, ExternEnum};
-use usefulness::{Cell, ColTy};
+use usefulness::{Alphabets, Cell, ColTy};
 
 /// The typed analysis of every pattern in one source file, nested ones
 /// included, in source order. Produced by [`pattern_analyses`].
@@ -78,6 +78,14 @@ pub struct PatternAnalyses {
     /// (completion).
     pub declarations: Vec<DeclaredEnum>,
 }
+
+/// One payload column's alphabet as a type checker named it: which
+/// `(constructor, field)` column, and the `kind` literals its type admits.
+///
+/// This is the one thing the declaration table cannot work out — a field's
+/// declared type text may be a type parameter, or name a union no rl
+/// declaration describes (`docs/design/rust-parity-analysis.md` §10.3).
+pub(crate) type PayloadAlphabet = ((String, String), Vec<String>);
 
 /// One enum of the analysis' declaration table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1659,10 +1667,11 @@ fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
     // Several enums can hold every tag. The one the arms *satisfy* is the
     // subject if there is one; otherwise the one they leave least of —
     // the rule sema has always reported, now measured in witnesses.
+    let cx = Alphabets::of(table);
     let mut best: Option<(&Entry, Vec<Uncovered>)> = None;
     for entry in table.candidates(&rows.tags) {
         let types = [ColTy::Enum(entry)];
-        let missing = render_witnesses(&usefulness::missing(&rows.rows, &types, table));
+        let missing = render_witnesses(&usefulness::missing(&rows.rows, &types, &cx));
         if missing.is_empty() {
             best = Some((entry, missing));
             break;
@@ -1676,7 +1685,7 @@ fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
         positions: vec![Some(entry.covered_enum())],
         covered: rows.covered,
         missing,
-        unreachable: unreachable_arms(&rows.arm_rows, &[ColTy::Enum(entry)], table),
+        unreachable: unreachable_arms(&rows.arm_rows, &[ColTy::Enum(entry)], &cx),
     })
 }
 
@@ -1688,6 +1697,7 @@ pub(crate) fn checked_coverage(
     source: &str,
     externs: &[EnumSymbol],
     members: &[(usize, Vec<String>)],
+    payloads: &[PayloadAlphabet],
 ) -> Vec<(usize, Coverage)> {
     let program = crate::parser::parse(source);
     let table = Table::build(&program, externs);
@@ -1702,15 +1712,27 @@ pub(crate) fn checked_coverage(
         let Some(rows) = match_rows(expr) else {
             continue;
         };
+        let cx = Alphabets {
+            table: &table,
+            payloads: payloads
+                .iter()
+                .map(|((tag, field), members)| {
+                    (
+                        (tag.clone(), field.clone()),
+                        table.entry_of_members(members),
+                    )
+                })
+                .collect(),
+        };
         let types = [ColTy::Enum(&entry)];
-        let missing = render_witnesses(&usefulness::missing(&rows.rows, &types, &table));
+        let missing = render_witnesses(&usefulness::missing(&rows.rows, &types, &cx));
         found.push((
             expr.keyword_off,
             Coverage {
                 positions: vec![None],
                 covered: rows.covered,
                 missing,
-                unreachable: unreachable_arms(&rows.arm_rows, &types, &table),
+                unreachable: unreachable_arms(&rows.arm_rows, &types, &cx),
             },
         ));
     }
@@ -1920,11 +1942,12 @@ fn tuple_coverage_of(expr: &TupleMatchExpr, table: &Table) -> Option<Coverage> {
         rows.extend(this);
     }
 
+    let cx = Alphabets::of(table);
     Some(Coverage {
         positions,
         covered: Vec::new(),
-        missing: render_witnesses(&usefulness::missing(&rows, &types, table)),
-        unreachable: unreachable_arms(&arm_rows, &types, table),
+        missing: render_witnesses(&usefulness::missing(&rows, &types, &cx)),
+        unreachable: unreachable_arms(&arm_rows, &types, &cx),
     })
 }
 
@@ -1956,17 +1979,17 @@ fn tuple_rows<'a>(elems: &'a [Pattern]) -> Option<Vec<Vec<Cell<'a>>>> {
 
 /// The arms that match nothing an earlier arm has not: each arm's rows
 /// against every row before it.
-fn unreachable_arms(
-    arm_rows: &[(usize, Vec<Vec<Cell<'_>>>)],
-    types: &[ColTy<'_>],
-    table: &Table,
+fn unreachable_arms<'a>(
+    arm_rows: &[(usize, Vec<Vec<Cell<'a>>>)],
+    types: &[ColTy<'a>],
+    cx: &'a Alphabets<'a>,
 ) -> Vec<usize> {
     let mut seen: Vec<Vec<Cell>> = Vec::new();
     let mut out = Vec::new();
     for (index, rows) in arm_rows {
         let useful = rows
             .iter()
-            .any(|row| usefulness::is_useful(&seen, row, types, table));
+            .any(|row| usefulness::is_useful(&seen, row, types, cx));
         if !useful {
             out.push(*index);
         }
@@ -2441,6 +2464,32 @@ mod tests {
             .clone()
             .expect("resolved");
         assert_eq!(patterns(&coverage), [["W(i: N)"]]);
+    }
+
+    #[test]
+    fn a_witness_from_an_unidentifiable_column_is_not_certain() {
+        // `Inner` names no rl enum, so the payload column's alphabet is
+        // unknown and the witness is a guess. The default path reports it
+        // anyway (nothing better is available without types); a consumer
+        // with a checker filters on this flag and asks instead.
+        let src = "enum O { W(i: Inner), B }\n\
+                   const v = match (o) { W(i: Yes(n)) => n, B => 0 };\n";
+        let coverage = pattern_analyses(src, &[]).matches[0]
+            .coverage
+            .clone()
+            .expect("resolved");
+        assert_eq!(patterns(&coverage), [["W"]]);
+        assert!(!coverage.missing[0].certain);
+
+        // A column the table *can* name is certain.
+        let src = "enum I { Y(n: number), N }\n\
+                   enum O { W(i: I), B }\n\
+                   const v = match (o) { W(i: Y(n)) => n, B => 0 };\n";
+        let coverage = pattern_analyses(src, &[]).matches[0]
+            .coverage
+            .clone()
+            .expect("resolved");
+        assert!(coverage.missing[0].certain);
     }
 
     #[test]

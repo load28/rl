@@ -8,6 +8,21 @@
 
 ### Added
 
+- **중첩 열의 알파벳도 체커가 답한다** (TASK-109). 페이로드의 타입이 rl 선언과
+  무관해도(손으로 쓴 유니언 등) 안쪽 소진성이 검사된다.
+
+  ```rl
+  type Inner = { kind: "Yes"; n: number } | { kind: "No" };
+  enum Outer { Wrap(inner: Inner), Bare }
+  const a = match (o) { Wrap(inner: Yes(n)) => n, Bare => -1 };
+  // rlc --check-types → missing "Wrap(inner: No)"
+  ```
+
+  - 중첩 패턴이 방출하는 조건(`$rl_m.inner.kind === "Yes"`)의 **필드 이름**
+    자리를 물어 그 열의 구성원을 얻는다. 방출된 바이트는 그대로다(길이 0 마크).
+  - 이것이 rl이 원리상 알 수 없는 유일한 것이었다 — 필드의 선언 타입은
+    텍스트일 뿐이고, 그 타입의 구성원은 TypeScript만 안다.
+
 - **typed 경로의 소진성이 중첩 패턴 안쪽까지 본다** (TASK-108). 체커가
   스크루티니 타입의 **구성원 목록**을 답하고, 소진성 계산은 기본 경로와 **같은
   usefulness 알고리즘**이 한다 — 한 알고리즘, 더 나은 오라클.

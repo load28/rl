@@ -32,6 +32,33 @@
 use super::{Entry, MatchConstructor, Table};
 use crate::ast::TagPattern;
 
+/// What the algorithm resolves column types against: the declaration
+/// table, plus the alphabets a type checker named for payload columns.
+///
+/// The override is keyed by `(constructor, field)` — a constructor's field
+/// has one declared type, so the pair names one column wherever it is
+/// written.
+pub(super) struct Alphabets<'a> {
+    pub table: &'a Table,
+    pub payloads: Vec<((String, String), Entry)>,
+}
+
+impl<'a> Alphabets<'a> {
+    pub(super) fn of(table: &'a Table) -> Alphabets<'a> {
+        Alphabets {
+            table,
+            payloads: Vec::new(),
+        }
+    }
+
+    fn payload(&self, tag: &str, field: &str) -> Option<&Entry> {
+        self.payloads
+            .iter()
+            .find(|((t, f), _)| t == tag && f == field)
+            .map(|(_, entry)| entry)
+    }
+}
+
 /// One cell of a pattern row: the source pattern, or a wildcard.
 ///
 /// Rows borrow the AST rather than lowering it first, because how a
@@ -121,33 +148,33 @@ const WITNESS_BUDGET: usize = 40;
 
 /// The values `rows` leaves unhandled, over columns of the given types.
 /// Empty means exhaustive.
-pub(super) fn missing(
-    rows: &[Vec<Cell<'_>>],
-    types: &[ColTy<'_>],
-    table: &Table,
+pub(super) fn missing<'a>(
+    rows: &[Vec<Cell<'a>>],
+    types: &[ColTy<'a>],
+    cx: &'a Alphabets<'a>,
 ) -> Vec<Vec<Witness>> {
     let query: Vec<Cell> = vec![Cell::Wild; types.len()];
-    usefulness(rows, &query, types, table)
+    usefulness(rows, &query, types, cx)
 }
 
 /// Whether `row` matches anything `rows` does not — reachability, asked of
 /// one arm against the arms before it.
-pub(super) fn is_useful(
-    rows: &[Vec<Cell<'_>>],
-    row: &[Cell<'_>],
-    types: &[ColTy<'_>],
-    table: &Table,
+pub(super) fn is_useful<'a>(
+    rows: &[Vec<Cell<'a>>],
+    row: &[Cell<'a>],
+    types: &[ColTy<'a>],
+    cx: &'a Alphabets<'a>,
 ) -> bool {
-    !usefulness(rows, row, types, table).is_empty()
+    !usefulness(rows, row, types, cx).is_empty()
 }
 
 /// `U(P, q)` with witnesses: the values matching `q` that no row of `rows`
 /// matches. Empty means `q` is not useful.
-fn usefulness(
-    rows: &[Vec<Cell<'_>>],
-    query: &[Cell<'_>],
-    types: &[ColTy<'_>],
-    table: &Table,
+fn usefulness<'a>(
+    rows: &[Vec<Cell<'a>>],
+    query: &[Cell<'a>],
+    types: &[ColTy<'a>],
+    cx: &'a Alphabets<'a>,
 ) -> Vec<Vec<Witness>> {
     let Some(column) = types.first() else {
         // No columns left: the query is useful exactly when nothing
@@ -174,8 +201,8 @@ fn usefulness(
             let specialized = specialize(rows, constructor);
             let mut sub_query = expand(pattern, constructor);
             sub_query.extend_from_slice(&query[1..]);
-            let sub_types = descend(&specialized, entry, constructor, types, table);
-            let found = usefulness(&specialized, &sub_query, &sub_types, table);
+            let sub_types = descend(&specialized, constructor, types, cx);
+            let found = usefulness(&specialized, &sub_query, &sub_types, cx);
             rebuild(found, constructor)
         }
         Cell::Wild => {
@@ -195,8 +222,8 @@ fn usefulness(
                     let specialized = specialize(rows, constructor);
                     let mut sub_query = vec![Cell::Wild; arity(constructor)];
                     sub_query.extend_from_slice(&query[1..]);
-                    let sub_types = descend(&specialized, entry, constructor, types, table);
-                    let found = usefulness(&specialized, &sub_query, &sub_types, table);
+                    let sub_types = descend(&specialized, constructor, types, cx);
+                    let found = usefulness(&specialized, &sub_query, &sub_types, cx);
                     out.extend(rebuild(found, constructor));
                     if out.len() >= WITNESS_BUDGET {
                         break;
@@ -208,7 +235,7 @@ fn usefulness(
                 // unknown): what the rest of the row needs is decided by
                 // the rows that say nothing about this column.
                 let defaulted = default(rows);
-                let rest = usefulness(&defaulted, &query[1..], &types[1..], table);
+                let rest = usefulness(&defaulted, &query[1..], &types[1..], cx);
                 if rest.is_empty() {
                     return Vec::new();
                 }
@@ -313,12 +340,10 @@ fn expand<'a>(pattern: &'a TagPattern, constructor: &MatchConstructor) -> Vec<Ce
 /// name `Option` just as arm tags name a match's subject.
 fn descend<'a>(
     specialized: &[Vec<Cell<'a>>],
-    entry: &'a Entry,
     constructor: &MatchConstructor,
     types: &[ColTy<'a>],
-    table: &'a Table,
+    cx: &'a Alphabets<'a>,
 ) -> Vec<ColTy<'a>> {
-    let _ = entry;
     let width = arity(constructor);
     let declared = constructor.fields.as_deref().unwrap_or_default();
     let mut out: Vec<ColTy> = Vec::with_capacity(width + types.len() - 1);
@@ -334,14 +359,21 @@ fn descend<'a>(
             out.push(ColTy::Unconstrained);
             continue;
         }
+        // A checker's answer for this column wins: it is the type, not a
+        // guess about which declaration the field's type text names.
+        let asked = declared
+            .get(index)
+            .and_then(|field| cx.payload(&constructor.tag, &field.name));
         let by_type = declared
             .get(index)
-            .and_then(|field| table.entry_of_type(&field.ty))
+            .and_then(|field| cx.table.entry_of_type(&field.ty))
             .filter(|e| {
                 tags.iter()
                     .all(|t| e.constructors.iter().any(|c| c.tag == *t))
             });
-        let resolved = by_type.or_else(|| table.candidates(&tags).first().copied());
+        let resolved = asked
+            .or(by_type)
+            .or_else(|| cx.table.candidates(&tags).first().copied());
         out.push(resolved.map_or(ColTy::Unknown, ColTy::Enum));
     }
     out.extend_from_slice(&types[1..]);

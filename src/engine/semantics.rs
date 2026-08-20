@@ -14,6 +14,7 @@ use std::sync::Arc;
 use super::projection::{self, Probes, ProjectedDocument};
 use super::snapshot::Snapshot;
 use crate::AnchorKind;
+use crate::analysis::PayloadAlphabet;
 use crate::typescript::backend::{Answers, Diagnostic as TsDiagnostic, Resolution};
 
 /// One reported problem, at a position in a file the user can open.
@@ -222,14 +223,31 @@ pub(crate) fn report(
     // honest answer for an unidentifiable column is to ask the checker,
     // and that question is not asked yet.
     let mut by_file: HashMap<PathBuf, Vec<(usize, Vec<String>)>> = HashMap::new();
+    // The payload answers ride in the same list, after the match ones —
+    // they name the alphabet of a `(constructor, field)` column, which is
+    // the one thing rl cannot work out from declarations alone.
+    let mut payloads: HashMap<PathBuf, Vec<PayloadAlphabet>> = HashMap::new();
     for members in &answers.tag_members {
-        let Some(anchor) = probes.tags.get(members.index) else {
+        if let Some(anchor) = probes.tags.get(members.index) {
+            by_file
+                .entry(anchor.source_path.clone())
+                .or_default()
+                .push((anchor.offset, members.tags.clone()));
+            continue;
+        }
+        let Some(anchor) = probes
+            .payloads
+            .get(members.index.wrapping_sub(probes.tags.len()))
+        else {
             continue;
         };
-        by_file
+        payloads
             .entry(anchor.source_path.clone())
             .or_default()
-            .push((anchor.offset, members.tags.clone()));
+            .push((
+                (anchor.tag.clone(), anchor.field.clone()),
+                members.tags.clone(),
+            ));
     }
     for file in files {
         let Some(asked) = by_file.get(&file.source_path) else {
@@ -246,7 +264,12 @@ pub(crate) fn report(
                 .map(|f| f.source.clone())
                 .or_else(|| std::fs::read_to_string(target).ok())
         });
-        for (offset, coverage) in crate::analysis::checked_coverage(&file.source, &externs, asked) {
+        let asked_payloads = payloads
+            .get(&file.source_path)
+            .map_or(&[][..], Vec::as_slice);
+        for (offset, coverage) in
+            crate::analysis::checked_coverage(&file.source, &externs, asked, asked_payloads)
+        {
             let uncovered: Vec<String> = coverage
                 .missing
                 .iter()
