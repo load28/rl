@@ -223,6 +223,14 @@ impl Checker {
                     .to_string(),
             ));
         }
+        if let Some(&off) = program.result_missing_kw.first() {
+            return Err(RlError::at(
+                off,
+                "`result` binding is missing its declaration keyword \
+                 (write `const <binding> <- <expression>;`, or `let`/`var`)"
+                    .to_string(),
+            ));
+        }
         for segment in &program.segments {
             match segment {
                 Segment::Verbatim(_) | Segment::RlImport(_) | Segment::ValModifier(_) => {}

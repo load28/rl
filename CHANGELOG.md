@@ -8,6 +8,20 @@
 
 ### Fixed
 
+- **`result` 바인딩에서 `const`를 빠뜨리면 rl 위치로 보고한다** (TASK-112).
+  `y <- g();`는 그동안 조용히 `y < -g();` 비교로 통과하거나(다른 바인딩이 있는
+  블록), 생성물 좌표를 가리키는 verify 에러가 됐다.
+
+  ```
+  rlc: file.rl:3:3: `result` binding is missing its declaration keyword
+       (write `const <binding> <- <expression>;`, or `let`/`var`)
+  ```
+
+  - 보고하는 곳은 **그 텍스트가 TypeScript일 수 없다는 것이 확정된 곳**뿐이다:
+    이미 rl로 판별된 블록 안, 또는 `result {`가 식이 시작하는 자리에 같은 줄로
+    올 때. `function f(): result { a <- b; }`처럼 유효한 TS는 그대로 통과한다.
+  - 진짜 비교를 쓰려면 `<`와 `-` 사이에 공백을 둔다.
+
 - **소진성 메시지의 witness가 그대로 붙여 넣을 수 있는 패턴이 됐다** (TASK-110).
   중첩 자리의 유닛 케이스가 괄호 없이 렌더돼(`Wrap(inner: No)`) 그대로 암으로
   옮기면 **매치가 아니라 별칭**이 되던 것을 고쳤다(`Wrap(inner: No())`).

@@ -330,6 +330,21 @@ fn identifier_statement_followed_by_a_block_passes_through() {
 }
 
 #[test]
+fn a_keyword_less_binding_shape_is_only_claimed_where_typescript_cannot_reach() {
+    // `b <- f();` is the comparison `b < -f();`, so the missing-keyword
+    // diagnostic must not fire anywhere valid TypeScript can put a block
+    // after the identifier `result`.
+    assert_passthrough(
+        "type result = { ok: boolean };\nfunction f(): result {\n  a <- readNum();\n  return { ok: true };\n}\n",
+    );
+    // `type X = result` + a block statement on the next line.
+    assert_passthrough("type X = result\n{\n  a <- readNum();\n}\n");
+    // The ASI shape, with a keyword-less run inside.
+    assert_passthrough("result\n{\n  a <- readNum();\n}\n");
+    assert_passthrough("class result {\n  a = 1;\n}\n");
+}
+
+#[test]
 fn less_than_negation_passes_through() {
     assert_passthrough("const c = a < -b;\nif (x <-1) { f(); }\nwhile (i <-n) { g(); }\n");
     assert_passthrough("const d = result.a < -1;\nconst e = (a) < (-b);\n");

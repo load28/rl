@@ -201,6 +201,8 @@ head/step 내부의 `try` 문은 위의 try 위치 제약 에러로 보고됩니
 |--------|-------------|
 | `` `result` block could not be parsed here (every binding is `const <binding> <- <expression>;`, and the block must end with an expression) `` | Result 바인딩(`const x <- 식;`)이 있는 `result` 블록이 완전하게 파싱되지 않았습니다. 선언 키워드 뒤의 `<-`는 유효한 TS에 없어 통과시킬 수 없으므로 위치와 함께 에러입니다. 흔한 원인: 바인딩의 `;` 누락, 마지막 값 식 없음(또는 값 식에 `;`를 붙임), `<-` 뒤 식 없음, 바인딩 이름 없음. 위치는 `result` ([`language.md` §8.4](./language.md#84-구조-규칙)) |
 
+| `` `result` binding is missing its declaration keyword (write `const <binding> <- <expression>;`, or `let`/`var`) `` | `b <- f();`처럼 선언 키워드 없이 바인딩을 썼습니다. 이 자리에 `const`(또는 `let`/`var`)를 붙입니다. `b < -f()` **비교**를 쓰려던 것이라면 `<`와 `-` 사이에 공백을 둡니다 — rl이 바인딩으로 보는 것은 붙여 쓴 `<-`뿐입니다. 위치는 이름 ([`language.md` §8.4](./language.md#84-구조-규칙)) |
+
 블록 안의 `try` 문·let-else는 위의 위치 제약 에러로 보고됩니다 — 그 자리의
 `return`은 둘러싼 함수가 아니라 블록에서 나가기 때문입니다. `Err` 전파는
 `<-` 바인딩으로 씁니다.
@@ -211,6 +213,16 @@ const a = result {
 };
 // rlc: file.rl:1:11: `result` block could not be parsed here (every binding is
 //      `const <binding> <- <expression>;`, and the block must end with an expression)
+```
+
+```rl
+const a = result {
+  const x <- f();
+  y <- g();
+  x + y
+};
+// rlc: file.rl:3:3: `result` binding is missing its declaration keyword
+//      (write `const <binding> <- <expression>;`, or `let`/`var`)
 ```
 
 ```rl

@@ -242,6 +242,7 @@ impl Parser<'_> {
         let mut stray_pipes: Vec<usize> = Vec::new();
         let mut stray_if_lets: Vec<usize> = Vec::new();
         let mut stray_results: Vec<usize> = Vec::new();
+        let mut result_missing_kw: Vec<usize> = Vec::new();
         let mut seg_start = start;
         let mut i = 0usize;
 
@@ -440,12 +441,13 @@ impl Parser<'_> {
                 match results::parse_result_block(Cursor::new(self, tokens, i + 1, end), tok.span) {
                     results::Attempt::Claimed(cur, byte_end, block) => {
                         flush_verbatim(&mut segments, seg_start, tok.span.start);
-                        segments.push(Segment::ResultBlock(block));
+                        segments.push(Segment::ResultBlock(*block));
                         seg_start = byte_end;
                         i = cur.idx;
                         continue;
                     }
                     results::Attempt::Malformed => stray_results.push(tok.span.start),
+                    results::Attempt::MissingKeyword(at) => result_missing_kw.push(at),
                     results::Attempt::Pass => {}
                 }
             }
@@ -479,6 +481,7 @@ impl Parser<'_> {
             stray_pipes,
             stray_if_lets,
             stray_results,
+            result_missing_kw,
         }
     }
 

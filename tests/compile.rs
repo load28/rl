@@ -2195,6 +2195,33 @@ fn result_block_without_a_trailing_expression_is_an_error() {
 }
 
 #[test]
+fn a_binding_without_a_declaration_keyword_is_a_located_error() {
+    // The block is claimed by its other binding, so the file is not
+    // TypeScript and rlc can say where the mistake is — instead of
+    // emitting the comparison `b < -readNum()` and saying nothing.
+    let e = err("const a = result {\n  const x <- f();\n  y <- g();\n  x + y\n};\n");
+    assert!(
+        e.message
+            .contains("`result` binding is missing its declaration keyword"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (3, 3));
+
+    // No binding is claimed at all, but `result {` in expression position
+    // is not TypeScript either — so this is reported here rather than by
+    // the output self-check, at generated-code coordinates.
+    let e = err("const a = result {\n  y <- g();\n  y\n};\n");
+    assert!(
+        e.message
+            .contains("`result` binding is missing its declaration keyword"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 3));
+}
+
+#[test]
 fn result_binding_without_a_semicolon_is_an_error() {
     // The binding is rl syntax whether or not the `;` is there, so this is
     // a located rl error rather than a failed output self-check.

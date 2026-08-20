@@ -37,10 +37,16 @@ use crate::lexer::TokenKind;
 pub(super) enum Attempt<'t> {
     /// A parsed block: the advanced cursor, the byte just past the closing
     /// brace, and the block.
-    Claimed(Cursor<'t>, usize, ResultBlock),
+    /// Boxed: every other variant is a word, and the block is the rare
+    /// case (one allocation per claimed block).
+    Claimed(Cursor<'t>, usize, Box<ResultBlock>),
     /// The block carries a Result binding but does not parse as a whole —
     /// recorded for the semantic phase (it cannot pass through either).
     Malformed,
+    /// A binding that forgot its declaration keyword (`b <- f();`), at the
+    /// byte offset of the name. Only reported where the text cannot be
+    /// TypeScript — see [`no_keyword_is_certain`].
+    MissingKeyword(usize),
     /// Not an rl construct: an ordinary `result` identifier and a block.
     Pass,
 }
@@ -59,6 +65,9 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
 
     let mut items: Vec<ResultItem> = Vec::new();
     let mut saw_bind = false;
+    // Runs shaped like a binding whose declaration keyword is missing.
+    // Whether they are an error is decided once the whole block is read.
+    let mut missing: Vec<usize> = Vec::new();
     // Where the next item starts, in bytes and in tokens.
     let mut cut = body_span.start;
     let mut tok_cut = open + 1;
@@ -91,6 +100,7 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
         }
         match scan_bind(&cur, run_start, k) {
             BindRun::NotBind => {} // ordinary statements — keep accumulating
+            BindRun::NoKeyword { at } => missing.push(at),
             BindRun::Malformed => return Attempt::Malformed,
             BindRun::Bind {
                 kw,
@@ -131,11 +141,27 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
 
     // The run after the last boundary is the block's value — a binding
     // there is one whose `;` is missing, which is rl syntax either way.
-    if run_start < close && !matches!(scan_bind(&cur, run_start, close), BindRun::NotBind) {
-        return Attempt::Malformed;
+    // A keyword-less run cannot reach here (it must end with a `;`).
+    if run_start < close {
+        match scan_bind(&cur, run_start, close) {
+            BindRun::NotBind | BindRun::NoKeyword { .. } => {}
+            BindRun::Bind { .. } | BindRun::Malformed => return Attempt::Malformed,
+        }
     }
     if !saw_bind {
-        return Attempt::Pass; // an ordinary identifier and a block statement
+        // An ordinary identifier and a block statement — unless the text
+        // cannot be TypeScript at all, in which case a keyword-less
+        // binding is the author's `result` block and saying so beats
+        // letting the output fail to parse.
+        return match missing.first() {
+            Some(&at) if no_keyword_is_certain(&cur, open) => Attempt::MissingKeyword(at),
+            _ => Attempt::Pass,
+        };
+    }
+    // The block is claimed, so the file is not TypeScript and a
+    // keyword-less binding here is a mistake rlc can name.
+    if let Some(&at) = missing.first() {
+        return Attempt::MissingKeyword(at);
     }
     if run_start == close {
         return Attempt::Malformed; // nothing after the last `;`
@@ -160,12 +186,12 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
     Attempt::Claimed(
         cur,
         byte_end,
-        ResultBlock {
+        Box::new(ResultBlock {
             keyword_off: kw_span.start,
             body_span,
             items,
             value,
-        },
+        }),
     )
 }
 
@@ -175,6 +201,9 @@ enum BindRun<'t> {
     NotBind,
     /// Bind-shaped (`const ... <- ...`) but not parseable as one.
     Malformed,
+    /// `<name> <- <expr>;` — a binding with no declaration keyword, at the
+    /// byte offset of the name.
+    NoKeyword { at: usize },
     Bind {
         /// The declaration keyword.
         kw: &'t str,
@@ -202,7 +231,7 @@ fn scan_bind<'t>(cur: &Cursor<'t>, from: usize, boundary: usize) -> BindRun<'t> 
     }
     let kw = cur.text(kw_tok);
     if !matches!(kw, "const" | "let" | "var") {
-        return BindRun::NotBind;
+        return scan_no_keyword(cur, from, boundary);
     }
 
     let mut depth = 0usize;
@@ -301,5 +330,89 @@ fn scan_bind<'t>(cur: &Cursor<'t>, from: usize, boundary: usize) -> BindRun<'t> 
         binding_end,
         arrow_end,
         expr_from: lt + 2,
+    }
+}
+
+/// Classifies a run that has no declaration keyword. `b <- readNum();` is
+/// the mistake this names; `b < -readNum();` is a valid TypeScript
+/// comparison, so the shape is kept deliberately narrow — a bare name, a
+/// `<-` written as two adjacent bytes, an expression, and a `;` — and the
+/// caller still decides whether the surrounding text could be TypeScript
+/// at all before reporting it.
+fn scan_no_keyword<'t>(cur: &Cursor<'t>, from: usize, boundary: usize) -> BindRun<'t> {
+    // A name, not `obj.x` and not a reserved word: the mistake is a
+    // binding, and anything richer is more likely to be a comparison.
+    if super::is_reserved(cur.text(&cur.tokens[from])) {
+        return BindRun::NotBind;
+    }
+    let (Some(lt), Some(minus)) = (cur.tokens.get(from + 1), cur.tokens.get(from + 2)) else {
+        return BindRun::NotBind;
+    };
+    if !matches!(lt.kind, TokenKind::Punct(b'<'))
+        || !matches!(minus.kind, TokenKind::Punct(b'-'))
+        || minus.span.start != lt.span.end
+    {
+        return BindRun::NotBind;
+    }
+    // The run must end with a `;` — a `<-` in the block's value run is a
+    // missing semicolon, which the caller reports as a malformed block.
+    if from + 3 >= boundary || !matches!(cur.tokens[boundary].kind, TokenKind::Punct(b';')) {
+        return BindRun::NotBind;
+    }
+    // The same two tails the keyword path rules out: a generic type
+    // argument (`x <-1>`-shaped, leaving an unopened `>`) and a run that
+    // ran past a missing `;` into the next statement.
+    let mut depth = 0usize;
+    let mut opened = false;
+    for k in from + 3..boundary {
+        match cur.tokens[k].kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            TokenKind::Punct(b'<') if depth == 0 => opened = true,
+            TokenKind::Punct(b'>') if depth == 0 && !opened => return BindRun::NotBind,
+            TokenKind::Ident
+                if depth == 0
+                    && !dotted_at(cur.tokens, from + 3, k)
+                    && super::tries::STMT_ONLY_WORDS.contains(&cur.text(&cur.tokens[k])) =>
+            {
+                return BindRun::NotBind;
+            }
+            _ => {}
+        }
+    }
+    BindRun::NoKeyword {
+        at: cur.tokens[from].span.start,
+    }
+}
+
+/// True when `result {` — the `{` is at token index `open` — cannot be
+/// TypeScript, so a keyword-less binding inside it is certainly an rl
+/// `result` block the author mis-wrote.
+///
+/// Two conditions, and both are needed:
+///
+/// - The `{` is on the **same line** as `result`. With a line break
+///   between them the two are an expression statement and a block
+///   statement (ASI), which is ordinary TypeScript — and so is
+///   `type X = result` followed by a block on the next line.
+/// - `result` sits where an **expression** starts. That rules out the
+///   shapes where an identifier legally precedes a same-line `{`:
+///   `function f(): result { ... }` (a return type), `class result { }`,
+///   `interface result { }`, and their kin.
+fn no_keyword_is_certain(cur: &Cursor<'_>, open: usize) -> bool {
+    if open < 2 {
+        return false;
+    }
+    let keyword = &cur.tokens[open - 1];
+    if cur.parser.src[keyword.span.end..cur.tokens[open].span.start].contains('\n') {
+        return false;
+    }
+    let before = &cur.tokens[open - 2];
+    match before.kind {
+        TokenKind::Punct(b'(' | b'[' | b',') => true,
+        TokenKind::Punct(b'=') => super::pipes::is_assignment_eq(cur.parser.bytes, before.span),
+        TokenKind::Arrow => true,
+        TokenKind::Ident => cur.text(before) == "return",
+        _ => false,
     }
 }

@@ -187,18 +187,18 @@ rust-analyzer는 이 자리 전부에서 변형·필드를 완성한다. 이 자
 
 ### GAP-6 — 잔여 항목
 
-- **튜플 match에는 typed 소진성 프로브가 없다.** `probe.rs::walk`는
-  `Segment::Match`에서만 `collect`를 부르고 `Segment::TupleMatch`에서는 부르지
-  않는다. 따라서 튜플 match의 소진성은 선언 표로만 판정되고, 좁혀진 타입·TS
-  유니언 스크루티니에서는 답하지 못한다.
+- ~~**튜플 match에는 typed 소진성 프로브가 없다.**~~ — TASK-111에서 해결.
+  위치마다 임시(`$rl_m0`, `$rl_m1`, …) 이름 자리를 물어 알파벳을 얻고, 곱집합
+  판정은 단일 match와 같은 usefulness 알고리즘이 한다. 어떤 암도 태그를 쓰지
+  않은 위치는 `_`로 남긴다.
 - **중첩 패턴의 내부 소진성**은 설계상 v1 보류다
   (`type-inference-gaps.md` §4.3). rustc는 중첩 공간까지 검사한다.
 - **let-else·`if let`에 or-패턴이 없다.** rustc에는 있다(언어 표면 격차).
-- **미청구(missed-claim) 진단이 없다.** `x <- readNum();`처럼 `const`를 빠뜨린
-  `result` 바인딩은 rl 구문으로 청구되지 않고 통과한 뒤, verify가
-  `generated TypeScript failed to parse: ... (line 12, col 18 of the generated
-  output)`으로 **생성물 좌표**를 들이민다. `|>`·`if let`이 받는 대접
-  (`errors.md`의 rl-전용 구문 규칙)과 일관되지 않는다.
+- ~~**미청구(missed-claim) 진단이 없다.**~~ — TASK-112에서 해결. `x <- readNum();`처럼
+  `const`를 빠뜨린 `result` 바인딩은 rl 구문으로 청구되지 않고 통과한 뒤,
+  verify가 `generated TypeScript failed to parse: ... (line 12, col 18 of the
+  generated output)`으로 **생성물 좌표**를 들이밀었다. `|>`·`if let`이 받는 대접
+  (`errors.md`의 rl-전용 구문 규칙)과 일관되지 않았다.
 - **도달 불가 arm 검사**는 `match`의 중복 태그 검사에 한정된다.
 
 ## 5. 원인 — 왜 이렇게 갈렸나
@@ -292,7 +292,9 @@ typed 경로에서 대상 식의 타입을 물어, rl 수준 판정을 rl 문안
   튜플 소진성 답의 출처가 둘이 되므로 규범 확인 필요).
 - 중첩 패턴 내부 소진성 v2(`type-inference-gaps.md` §4.3).
 - let-else·`if let`의 or-패턴(언어 표면 확장 — 별도 제안 필요).
-- 미청구 `result` 바인딩의 진단(`errors.md`의 rl-전용 구문 규칙과 일관되게).
+- ~~미청구 `result` 바인딩의 진단~~ — TASK-112. 보고 조건은 "그 텍스트가
+  TypeScript일 수 없음"이 확정된 곳뿐(이미 판별된 블록 안, 또는 식이 시작하는
+  자리의 같은 줄 `result {`).
 
 ## 7. 우선순위
 

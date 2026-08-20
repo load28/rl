@@ -39,6 +39,9 @@ pub(crate) struct Program {
     /// instead of `=` is never valid TypeScript, so the text cannot be
     /// passed through either.
     pub stray_results: Vec<usize>,
+    /// Byte offsets of `result` bindings written without a declaration
+    /// keyword (`b <- f();`), reported by the semantic phase.
+    pub result_missing_kw: Vec<usize>,
 }
 
 /// One top-level piece of a [`Program`], in source order.
