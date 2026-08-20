@@ -2463,7 +2463,7 @@ mod tests {
             .coverage
             .clone()
             .expect("resolved");
-        assert_eq!(patterns(&coverage), [["W(i: N)"]]);
+        assert_eq!(patterns(&coverage), [["W(i: N())"]]);
     }
 
     #[test]

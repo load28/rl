@@ -130,10 +130,12 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 
 **가드 암은 케이스를 커버하지 못합니다** — 조건이 거짓일 수 있으므로 그 태그를
 덮으려면 무가드 암이 따로 필요합니다. **중첩 패턴은 안쪽까지 검사되고**, 빠진
-것은 태그가 아니라 **패턴으로** 지목됩니다 — 그대로 암으로 옮겨 쓸 수 있습니다:
+것은 태그가 아니라 **패턴으로** 지목됩니다 — 그대로 암으로 **붙여 넣을 수 있는**
+형태입니다(중첩 자리의 유닛 케이스에 괄호가 붙는 이유입니다 — 패턴 안에서
+`필드: 이름`은 매치가 아니라 별칭이므로):
 
 ```
-rlc: r.rl:3:11: match on built-in enum Result is not exhaustive: missing "Ok(value: None)"
+rlc: r.rl:3:11: match on built-in enum Result is not exhaustive: missing "Ok(value: None())"
      (add the missing arms or a final `_` arm)
 ```
 

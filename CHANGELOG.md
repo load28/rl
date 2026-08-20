@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **소진성 메시지의 witness가 그대로 붙여 넣을 수 있는 패턴이 됐다** (TASK-110).
+  중첩 자리의 유닛 케이스가 괄호 없이 렌더돼(`Wrap(inner: No)`) 그대로 암으로
+  옮기면 **매치가 아니라 별칭**이 되던 것을 고쳤다(`Wrap(inner: No())`).
+
+  - VS Code의 "빠진 암 추가" quick fix가 이 문자열을 그대로 삽입하므로,
+    컴파일은 되지만 `Wrap` 전체를 잡아먹는 arm이 들어가고 있었다.
+  - 메시지가 "패턴"이라고 말하는 이상 붙여 넣어 동작해야 한다는 것을 계약
+    테스트로 고정했다(`a_witness_can_be_pasted_back_as_an_arm`).
+
 ### Added
 
 - **중첩 열의 알파벳도 체커가 답한다** (TASK-109). 페이로드의 타입이 rl 선언과
@@ -15,7 +26,7 @@
   type Inner = { kind: "Yes"; n: number } | { kind: "No" };
   enum Outer { Wrap(inner: Inner), Bare }
   const a = match (o) { Wrap(inner: Yes(n)) => n, Bare => -1 };
-  // rlc --check-types → missing "Wrap(inner: No)"
+  // rlc --check-types → missing "Wrap(inner: No())"
   ```
 
   - 중첩 패턴이 방출하는 조건(`$rl_m.inner.kind === "Yes"`)의 **필드 이름**
@@ -28,7 +39,7 @@
   usefulness 알고리즘**이 한다 — 한 알고리즘, 더 나은 오라클.
 
   ```
-  before  rlc --check       → missing "Wrap(inner: No)"
+  before  rlc --check       → missing "Wrap(inner: No())"
           rlc --check-types → (침묵)
   after   둘 다 같은 답
   ```
@@ -104,7 +115,7 @@
   - 이전에는 중첩 패턴 arm이 "아무것도 커버하지 못한다"고 취급되어 위 코드처럼
     **실제로 소진된 match가 거절**됐다(`missing "Ok"`). 이제 통과한다.
   - 빠진 것은 태그가 아니라 **패턴**으로 지목된다 — 그대로 arm으로 붙여넣을 수
-    있다: `missing "Ok(value: None)"`, `missing "Wrap(inner: No)"`.
+    있다: `missing "Ok(value: None())"`, `missing "Wrap(inner: No())"`.
   - 안쪽 위치의 enum은 필드의 선언된 타입으로, 그것이 enum을 지목하지 않으면
     (제네릭 페이로드 `T`) 그 자리에 쓰인 패턴들로 정한다 — match의 스크루티니를
     arm 태그로 정하는 것과 같은 규칙이다.

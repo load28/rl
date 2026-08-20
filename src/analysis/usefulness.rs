@@ -105,22 +105,34 @@ pub(super) enum Witness {
 }
 
 impl Witness {
-    /// The witness as an rl pattern — what a user would write to cover it.
-    /// Wildcard fields are dropped, so a constructor no field constrains
-    /// renders as the bare tag (`Wrap`), exactly as an arm would write it.
+    /// The witness as an rl pattern — **what a user can paste in as an
+    /// arm**. That is the whole contract of this rendering, and it is why
+    /// the two positions differ:
+    ///
+    /// - At the top of an arm, a constructor with nothing to constrain is
+    ///   the bare tag (`Wrap`), which matches every `Wrap`.
+    /// - Nested, the same thing must be written `Wrap(inner: No())`:
+    ///   inside a pattern, `field: Name` **binds** the field to `Name`
+    ///   rather than matching a case of that name (`language.md` §3.2), so
+    ///   dropping the parens would render a pattern that compiles and
+    ///   means something else.
     pub(super) fn render(&self) -> String {
+        self.write(false)
+    }
+
+    fn write(&self, nested: bool) -> String {
         match self {
             Witness::Wild | Witness::Unknown => "_".to_string(),
             Witness::Ctor { tag, args } => {
                 let constrained: Vec<String> = args
                     .iter()
                     .filter(|(_, w)| !matches!(w, Witness::Wild | Witness::Unknown))
-                    .map(|(name, w)| format!("{name}: {}", w.render()))
+                    .map(|(name, w)| format!("{name}: {}", w.write(true)))
                     .collect();
-                if constrained.is_empty() {
-                    tag.clone()
-                } else {
-                    format!("{tag}({})", constrained.join(", "))
+                match (constrained.is_empty(), nested) {
+                    (true, false) => tag.clone(),
+                    (true, true) => format!("{tag}()"),
+                    (false, _) => format!("{tag}({})", constrained.join(", ")),
                 }
             }
         }

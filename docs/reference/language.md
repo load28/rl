@@ -257,7 +257,7 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 
   ```
   rlc: r.rl:3:11: match on built-in enum Result is not exhaustive:
-       missing "Ok(value: None)" (add the missing arms or a final `_` arm)
+       missing "Ok(value: None())" (add the missing arms or a final `_` arm)
   ```
 
   안쪽 위치의 enum은 필드의 **선언된 타입**으로, 그것이 enum을 지목하지 않으면

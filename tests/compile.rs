@@ -1820,7 +1820,7 @@ const n = match (r) {
 "#);
     assert!(
         e.message.contains(
-            "match on built-in enum Result is not exhaustive: missing \"Ok(value: None)\""
+            "match on built-in enum Result is not exhaustive: missing \"Ok(value: None())\""
         ),
         "{}",
         e.message
@@ -3120,7 +3120,7 @@ enum Outer { Wrap(inner: Inner), Bare }
 const a = match (o) { Wrap(inner: Yes(n)) => n, Bare => -1 };
 "#);
     assert!(
-        e.message.contains("missing \"Wrap(inner: No)\""),
+        e.message.contains("missing \"Wrap(inner: No())\""),
         "{}",
         e.message
     );
@@ -3152,8 +3152,33 @@ const v = match (a) {
 };
 "#);
     assert!(
-        e.message.contains("missing \"A1(b: B1(c: C2))\""),
+        e.message.contains("missing \"A1(b: B1(c: C2()))\""),
         "{}",
         e.message
     );
+}
+
+#[test]
+fn a_witness_can_be_pasted_back_as_an_arm() {
+    // The message promises a pattern, not a description: whatever it names
+    // must compile as the arm that covers it. A nested unit case is where
+    // that promise used to break — `inner: No` *binds* the field to a name
+    // called `No`, so the arm compiled and covered every `Wrap`.
+    let base = r#"enum Inner { Yes(n: number), No }
+enum Outer { Wrap(inner: Inner), Bare }
+declare const o: Outer;
+const a = match (o) {
+  Wrap(inner: Yes(n)) => n,
+  Bare => -1,
+};
+"#;
+    let reported = err(base).message;
+    let witnesses: Vec<&str> = reported.split('"').skip(1).step_by(2).collect();
+    assert_eq!(witnesses, ["Wrap(inner: No())"], "{reported}");
+
+    let arms: String = witnesses.iter().map(|w| format!("  {w} => 0,\n")).collect();
+    let pasted = base.replace("  Bare => -1,\n", &format!("  Bare => -1,\n{arms}"));
+    let out = ok(&pasted);
+    // ...and it really is the No case, not a binding that swallows Wrap.
+    assert!(out.contains("$rl_m.inner.kind === \"No\""), "{out}");
 }
