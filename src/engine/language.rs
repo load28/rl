@@ -1022,6 +1022,27 @@ fn analyses_of(
     path: &Path,
     source: &str,
 ) -> crate::PatternAnalyses {
+    let externs = externs_of(path, source, &|target| {
+        overlays
+            .get(target)
+            .cloned()
+            .or_else(|| std::fs::read_to_string(target).ok())
+    });
+    crate::pattern_analyses(source, &externs)
+}
+
+/// The enum declarations a file's direct relative `.rl` imports bring into
+/// scope, under the names the imports give them — the same 1-hop
+/// collection the CLI does for sema.
+///
+/// `read` decides what "the imported file's text" means: an editor prefers
+/// the open buffer, a batch pass the file on disk. The rule the *names*
+/// follow is the same either way, which is why it lives here once.
+pub(super) fn externs_of(
+    path: &Path,
+    source: &str,
+    read: &dyn Fn(&Path) -> Option<String>,
+) -> Vec<crate::EnumSymbol> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut externs: Vec<crate::EnumSymbol> = Vec::new();
     for import in crate::rl_imports(source) {
@@ -1032,12 +1053,8 @@ fn analyses_of(
             Ok(target) => target,
             Err(_) => continue, // unresolvable — tsc's TS2307, not ours
         };
-        let text = match overlays.get(&target) {
-            Some(text) => text.clone(),
-            None => match std::fs::read_to_string(&target) {
-                Ok(text) => text,
-                Err(_) => continue,
-            },
+        let Some(text) = read(&target) else {
+            continue;
         };
         let decls: Vec<crate::EnumSymbol> = crate::enum_symbols(&text)
             .into_iter()
@@ -1062,7 +1079,7 @@ fn analyses_of(
             crate::RlImportNames::None => unreachable!("skipped above"),
         }
     }
-    crate::pattern_analyses(source, &externs)
+    externs
 }
 
 /// The isolated-alternative stand-in: the source with `binding`'s whole

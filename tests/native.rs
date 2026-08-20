@@ -831,3 +831,26 @@ fn a_witness_rl_is_not_certain_of_is_not_reported_on_the_typed_path() {
         "an unidentifiable column is not guessed at here: {out}"
     );
 }
+
+#[test]
+fn typed_exhaustiveness_resolves_a_payload_declared_in_another_module() {
+    let root = require_tsgo!();
+    // The nested column is resolved from declarations, so the imported
+    // ones have to be collected on this path too — the same 1-hop
+    // collection the default path does.
+    let dir = project(&[
+        ("src/token.rl", "export enum Tok { Num(n: number), Eof }\n"),
+        (
+            "src/line.rl",
+            "import { Tok } from \"./token.rl\";\n\
+             enum Line { Head(t: Tok), Blank }\n\
+             declare const l: Line;\n\
+             export const a = match (l) { Head(t: Num(n)) => n, Blank => 0 };\n",
+        ),
+    ]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("match is not exhaustive: missing \"Head(t: Eof)\""),
+        "the imported payload enum is resolved: {out}"
+    );
+}

@@ -1686,10 +1686,11 @@ fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
 /// oracle for the one column the checker can speak about.
 pub(crate) fn checked_coverage(
     source: &str,
+    externs: &[EnumSymbol],
     members: &[(usize, Vec<String>)],
 ) -> Vec<(usize, Coverage)> {
     let program = crate::parser::parse(source);
-    let table = Table::build(&program, &[]);
+    let table = Table::build(&program, externs);
     let mut found = Vec::new();
     let mut matches = Vec::new();
     collect_matches(&program, &mut matches);

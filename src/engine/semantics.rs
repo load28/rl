@@ -235,7 +235,18 @@ pub(crate) fn report(
         let Some(asked) = by_file.get(&file.source_path) else {
             continue;
         };
-        for (offset, coverage) in crate::analysis::checked_coverage(&file.source, asked) {
+        // The nested columns are resolved from declarations, so the
+        // imported ones have to be collected — otherwise a payload whose
+        // type is an imported enum reads as an unknown alphabet and its
+        // holes go unreported.
+        let externs = super::language::externs_of(&file.source_path, &file.source, &|target| {
+            files
+                .iter()
+                .find(|f| f.source_path == target)
+                .map(|f| f.source.clone())
+                .or_else(|| std::fs::read_to_string(target).ok())
+        });
+        for (offset, coverage) in crate::analysis::checked_coverage(&file.source, &externs, asked) {
             let uncovered: Vec<String> = coverage
                 .missing
                 .iter()

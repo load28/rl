@@ -96,6 +96,11 @@ rlc --check-types → (침묵)
   고정하고 있어 새 계약으로 갱신(아래 이슈 1).
 - 2026-08-20: 문서 — `language.md` §3.9, `cli.md`, `rust-parity-analysis.md`
   §10.3 상태, `CHANGELOG.md`.
+- 2026-08-20 (추가): typed 경로가 **import된 선언을 수집하지 않아** 페이로드
+  타입이 다른 모듈의 enum이면 중첩 구멍을 놓치는 것을 실측으로 발견했다
+  (아래 이슈 3). `language.rs`의 수집 로직을 `externs_of(path, source, read)`로
+  뽑아 두 경로가 같은 1-hop 규칙을 쓰게 하고, typed 경로는 스냅샷의 파일을
+  먼저 보고 없으면 디스크를 읽는다. 테스트 +1.
 
 ## 이슈 및 해결
 
@@ -110,6 +115,21 @@ rlc --check-types → (침묵)
   — 위치는 `match` 키워드, 문안은 rl의 것, 원문이 괄호 안에 동봉. **TASK-104가
   실제 체커에서 동작한다는 것이 이로써 확인됐다.**
 
+### 이슈 3: typed 경로가 import된 페이로드 enum을 못 봄
+
+- **증상**: 페이로드 타입이 다른 모듈의 enum일 때(`enum Line { Head(t: Tok) }`,
+  `Tok`은 `./token.rl`), `--check`는 `missing "Head(t: Eof)"`를 보고하는데
+  `--check-types`는 침묵했다.
+- **원인**: `checked_coverage`가 선언 표를 `externs: &[]`로 만들고 있었다.
+  최상위 열은 체커가 답하므로 문제가 없었지만, **중첩 열은 선언 표로 해석**
+  하므로 import된 enum이 미지의 알파벳이 되고, 미지의 알파벳에서 나온 witness는
+  결정 2에 따라 걸러진다. 즉 "확신하지 못해 침묵"이 맞게 동작한 결과인데,
+  확신하지 못할 이유가 없는 자리였다.
+- **해결**: 수집 로직을 `externs_of`로 공유하고 typed 경로에 넘겼다. 이제 두
+  경로가 같은 답을 한다. 남는 미지의 알파벳은 **선언 자체가 없는 것**
+  (손으로 쓴 유니언을 페이로드 타입으로 쓴 경우)뿐이고, 그것은 체커에게
+  물어야 안다.
+
 ### 이슈 2: 에디터 테스트 4개가 실패하고 있었음 (TASK-107에서 발견·수정)
 
 - 같은 원인 계열이다: `rlc`만 확인하고 tsgo는 확인하지 않는 skip 가드. 이제
@@ -119,7 +139,7 @@ rlc --check-types → (침묵)
 
 - [x] `cargo fmt --check`
 - [x] `cargo clippy --all-targets -- -D warnings`
-- [x] `cargo test` (RLC_TSGO_ROOT) — 11개 바이너리 전부 통과, native 26개 포함
+- [x] `cargo test` (RLC_TSGO_ROOT) — 11개 바이너리 전부 통과, native 27개 포함
 - [x] `npm test` (editors/vscode, RLC_TSGO_ROOT + PATH) — **78/78, skip 0**
 - [x] 수동 실측: 중첩 구멍(typed/untyped 같은 답), 좁혀진 타입(typed만 침묵),
       손으로 쓴 유니언(둘 다 침묵)
