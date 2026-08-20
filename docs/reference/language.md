@@ -427,6 +427,19 @@ rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
 메시지가 `match is not exhaustive: missing ...`입니다 (기본 경로는 자기 선언
 표에서 답하므로 이름을 댑니다 — [`errors.md`](./errors.md)).
 
+정확히는, 체커는 **스크루티니 타입의 구성원 목록**을 답하고 소진성 계산은
+기본 경로와 **같은 알고리즘**이 합니다([§3.6](#36-소진성-검사)). 그래서 이
+경로도 중첩 패턴 안쪽의 구멍을 봅니다:
+
+```
+rlc: nest.rl:4:18: match is not exhaustive: missing "Wrap(inner: No)"
+```
+
+한 가지만 다릅니다: 어떤 자리의 알파벳을 rl이 **알아내지 못한** 경우(손으로 쓴
+유니언을 페이로드 타입으로 쓴 중첩 자리 등), 기본 경로는 보수적으로 보고하지만
+이 경로는 **보고하지 않습니다** — 여기서는 체커에게 물어보는 것이 정직한 답이고,
+그 질문은 아직 하지 않습니다.
+
 | 스크루티니 타입 | 검사 |
 |-----------------|------|
 | `"a" \| "b"`, `1 \| 2 \| 3`, `boolean`, `typeof values[number]` (as const) | 검사함 |

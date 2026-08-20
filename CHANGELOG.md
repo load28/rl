@@ -8,6 +8,21 @@
 
 ### Added
 
+- **typed 경로의 소진성이 중첩 패턴 안쪽까지 본다** (TASK-108). 체커가
+  스크루티니 타입의 **구성원 목록**을 답하고, 소진성 계산은 기본 경로와 **같은
+  usefulness 알고리즘**이 한다 — 한 알고리즘, 더 나은 오라클.
+
+  ```
+  before  rlc --check       → missing "Wrap(inner: No)"
+          rlc --check-types → (침묵)
+  after   둘 다 같은 답
+  ```
+
+  - 좁혀진 타입 기준이라는 점은 그대로다(앞선 가드가 제거한 케이스는 요구하지
+    않는다).
+  - 알파벳을 알아내지 못한 자리의 witness는 typed 경로에서 **보고하지 않는다** —
+    거기서는 체커에게 묻는 것이 정직한 답이고, 그 질문은 아직 하지 않는다.
+
 - **에디터가 엔진의 rl 표면을 쓴다** (TASK-107). VS Code 서버의 hover·definition·
   rename·완성이 `rlSymbol`/`rlCompletions`를 호출하고, `analysis.ts`의 해석
   재구현(`symbolAt`·`armContextAt`·`inferEnum`·`armTags`·`matchBodyAt`·

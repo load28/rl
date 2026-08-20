@@ -115,7 +115,8 @@
 | TASK-105 | rl 이름의 semantic 표면을 엔진으로 (P3 1/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-105](./TASK-105-rl-name-surface.md) |
 | TASK-106 | 패턴 자리 자동완성 (P3 2/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-106](./TASK-106-pattern-completions.md) |
 | TASK-107 | 에디터가 엔진의 rl 표면을 쓴다 (P3 3/3) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-107](./TASK-107-editor-adopts-engine-surface.md) |
+| TASK-108 | typed 소진성도 usefulness 위로 (P4 계층 2, 1/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-108](./TASK-108-typed-coverage-on-usefulness.md) |
 
 ## 다음 태스크 번호
 
-**TASK-108**
+**TASK-109**

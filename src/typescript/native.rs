@@ -402,6 +402,19 @@ fn parse_answers(stdout: &str) -> Result<Answers, String> {
                 .unwrap_or_default(),
         });
     }
+    for m in array(&value, "tagMembers") {
+        answers.tag_members.push(TagMembers {
+            index: m["index"].as_u64().unwrap_or_default() as usize,
+            tags: m["tags"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
+    }
     for v in array(&value, "symbols") {
         answers.resolutions.push(Resolution {
             index: v["index"].as_u64().unwrap_or_default() as usize,

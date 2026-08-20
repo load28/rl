@@ -212,29 +212,54 @@ pub(crate) fn report(
         });
     }
 
-    // Tag exhaustiveness, from the same narrowed type.
-    for missing in &answers.tag_missing {
-        let Some(anchor) = probes.tags.get(missing.index) else {
+    // Tag exhaustiveness. The checker names the constituents the
+    // scrutinee's type still has — narrowing included — and rl runs its
+    // own algorithm over that alphabet, which is what sees a hole *inside*
+    // a payload as well as a missing case (TASK-108).
+    //
+    // A witness rl is not certain of is dropped here: the default path
+    // reports those because it has nothing better, but on this path the
+    // honest answer for an unidentifiable column is to ask the checker,
+    // and that question is not asked yet.
+    let mut by_file: HashMap<PathBuf, Vec<(usize, Vec<String>)>> = HashMap::new();
+    for members in &answers.tag_members {
+        let Some(anchor) = probes.tags.get(members.index) else {
             continue;
         };
-        let Some(file) = files.iter().find(|f| f.source_path == anchor.source_path) else {
+        by_file
+            .entry(anchor.source_path.clone())
+            .or_default()
+            .push((anchor.offset, members.tags.clone()));
+    }
+    for file in files {
+        let Some(asked) = by_file.get(&file.source_path) else {
             continue;
         };
-        let (line, col) = crate::line_col(&file.source, anchor.offset);
-        out.push(Diagnostic {
-            path: file.source_path.clone(),
-            position: Some((line, col)),
-            message: format!(
-                "match is not exhaustive: missing {} \
-                 (add the missing arms or a final `_` arm)",
-                missing
-                    .missing
-                    .iter()
-                    .map(|t| format!("{t:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
-        });
+        for (offset, coverage) in crate::analysis::checked_coverage(&file.source, asked) {
+            let uncovered: Vec<String> = coverage
+                .missing
+                .iter()
+                .filter(|m| m.certain)
+                .filter_map(|m| m.pattern.first().cloned())
+                .collect();
+            if uncovered.is_empty() {
+                continue;
+            }
+            let (line, col) = crate::line_col(&file.source, offset);
+            out.push(Diagnostic {
+                path: file.source_path.clone(),
+                position: Some((line, col)),
+                message: format!(
+                    "match is not exhaustive: missing {} \
+                     (add the missing arms or a final `_` arm)",
+                    uncovered
+                        .iter()
+                        .map(|t| format!("{t:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            });
+        }
     }
 
     // `val`: two resolutions decide, and rlc guesses neither of them.

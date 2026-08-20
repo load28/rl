@@ -120,6 +120,22 @@ pub(crate) struct TagMissing {
     pub missing: Vec<String>,
 }
 
+/// Every case tag a [`TagQuery`]'s scrutinee type can be, under the same
+/// certainty rule as [`LiteralMissing`] — the *members*, not what the arms
+/// left out.
+///
+/// This is the checker as an **oracle for one column**: rl runs its own
+/// exhaustiveness algorithm over the answer, which is how a hole inside a
+/// payload gets seen at all (`docs/design/rust-parity-analysis.md` §10.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TagMembers {
+    /// Index into [`Query::tags`].
+    pub index: usize,
+    /// The `kind` literals the scrutinee's type still allows, in the
+    /// order the type lists them.
+    pub tags: Vec<String>,
+}
+
 /// What a [`SymbolQuery`] resolved to. A position that resolved to nothing
 /// — an `any` receiver, an unresolved name — has no entry at all, and an
 /// unresolved question never becomes an rl error.
@@ -152,6 +168,7 @@ pub(crate) struct Answers {
     pub diagnostics: Vec<Diagnostic>,
     pub literal_missing: Vec<LiteralMissing>,
     pub tag_missing: Vec<TagMissing>,
+    pub tag_members: Vec<TagMembers>,
     pub resolutions: Vec<Resolution>,
     pub declarations: Vec<Declaration>,
 }

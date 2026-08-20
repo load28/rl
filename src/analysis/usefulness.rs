@@ -49,16 +49,26 @@ pub(super) enum ColTy<'a> {
     /// A known enum: its constructors are the column's alphabet, so the
     /// column can be *completed* and a missing constructor named.
     Enum(&'a Entry),
-    /// Anything else — a hand-written union, a type parameter, a payload
-    /// whose declared type names no enum. The alphabet is unknown and
-    /// assumed inexhaustible: only a wildcard covers it.
-    Opaque,
+    /// Nothing was written here at all — a tuple position every arm left
+    /// as `_`. It constrains nothing, and saying so (`_`) is a complete
+    /// answer, not a gap in one.
+    Unconstrained,
+    /// Constructors were written here, but which alphabet they belong to
+    /// could not be identified — a hand-written union, a payload whose
+    /// declared type names no enum. Only a wildcard covers it, and any
+    /// witness that passes through is a **guess**: rl does not know what
+    /// else the column admits.
+    Unknown,
 }
 
 /// A value the arms do not handle, in rl pattern syntax.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Witness {
+    /// Anything, and rl knows that is the whole answer.
     Wild,
+    /// Anything, but only because the column's alphabet is unknown — the
+    /// witness containing it is not certain (see [`Witness::certain`]).
+    Unknown,
     Ctor {
         tag: String,
         /// Every declared field, in order, with what the witness needs it
@@ -73,11 +83,11 @@ impl Witness {
     /// renders as the bare tag (`Wrap`), exactly as an arm would write it.
     pub(super) fn render(&self) -> String {
         match self {
-            Witness::Wild => "_".to_string(),
+            Witness::Wild | Witness::Unknown => "_".to_string(),
             Witness::Ctor { tag, args } => {
                 let constrained: Vec<String> = args
                     .iter()
-                    .filter(|(_, w)| !matches!(w, Witness::Wild))
+                    .filter(|(_, w)| !matches!(w, Witness::Wild | Witness::Unknown))
                     .map(|(name, w)| format!("{name}: {}", w.render()))
                     .collect();
                 if constrained.is_empty() {
@@ -86,6 +96,20 @@ impl Witness {
                     format!("{tag}({})", constrained.join(", "))
                 }
             }
+        }
+    }
+}
+
+impl Witness {
+    /// Whether every position of this witness was decided from a known
+    /// constructor set. A witness that is not certain names a value rl
+    /// *guessed* at, which a consumer with a real type checker refuses to
+    /// report (TASK-108).
+    pub(super) fn certain(&self) -> bool {
+        match self {
+            Witness::Unknown => false,
+            Witness::Wild => true,
+            Witness::Ctor { args, .. } => args.iter().all(|(_, w)| w.certain()),
         }
     }
 }
@@ -142,10 +166,10 @@ fn usefulness(
             let ColTy::Enum(entry) = column else {
                 // The column's alphabet is unknown, so nothing can be
                 // proven redundant here.
-                return vec![vec![Witness::Wild; types.len()]];
+                return vec![vec![Witness::Unknown; types.len()]];
             };
             let Some(constructor) = entry.constructors.iter().find(|c| c.tag == pattern.tag) else {
-                return vec![vec![Witness::Wild; types.len()]];
+                return vec![vec![Witness::Unknown; types.len()]];
             };
             let specialized = specialize(rows, constructor);
             let mut sub_query = expand(pattern, constructor);
@@ -158,7 +182,7 @@ fn usefulness(
             let used = used_tags(rows);
             let complete = match column {
                 ColTy::Enum(entry) => entry.constructors.iter().all(|c| used.contains(&c.tag)),
-                ColTy::Opaque => false,
+                ColTy::Unconstrained | ColTy::Unknown => false,
             };
             if complete {
                 let ColTy::Enum(entry) = column else {
@@ -226,7 +250,8 @@ fn missing_heads(column: &ColTy<'_>, used: &[String]) -> Vec<Witness> {
                     .collect(),
             })
             .collect(),
-        _ => vec![Witness::Wild],
+        ColTy::Unconstrained => vec![Witness::Wild],
+        ColTy::Unknown => vec![Witness::Unknown],
     }
 }
 
@@ -306,7 +331,7 @@ fn descend<'a>(
             })
             .collect();
         if tags.is_empty() {
-            out.push(ColTy::Opaque);
+            out.push(ColTy::Unconstrained);
             continue;
         }
         let by_type = declared
@@ -317,7 +342,7 @@ fn descend<'a>(
                     .all(|t| e.constructors.iter().any(|c| c.tag == *t))
             });
         let resolved = by_type.or_else(|| table.candidates(&tags).first().copied());
-        out.push(resolved.map_or(ColTy::Opaque, ColTy::Enum));
+        out.push(resolved.map_or(ColTy::Unknown, ColTy::Enum));
     }
     out.extend_from_slice(&types[1..]);
     out

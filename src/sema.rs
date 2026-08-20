@@ -647,7 +647,7 @@ fn report_coverage(analyses: &crate::analysis::PatternAnalyses) -> Result<(), Rl
         let combinations: Vec<String> = coverage
             .missing
             .iter()
-            .map(|row| format!("({})", row.join(", ")))
+            .map(|row| format!("({})", row.pattern.join(", ")))
             .collect();
         let shown = if combinations.len() > 4 {
             format!(

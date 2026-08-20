@@ -362,12 +362,13 @@ fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
 }
 
 #[test]
-fn a_diagnostic_on_generated_code_still_names_the_construct_it_came_from() {
+fn a_diagnostic_on_generated_code_is_restated_in_rls_words() {
     let root = require_tsgo!();
     // A plain TypeScript enum is not an rl enum, so matching on one lowers
     // to a `.kind` switch over a value that has no `kind`. The error is
-    // real; what matters here is that it is reported in the `.rl` file, at
-    // the construct rlc generated the code for, and labelled as generated.
+    // real and it is the user's, but the text TypeScript points at is code
+    // rlc wrote — so rlc says what the construct meant, at the construct
+    // (TASK-104), with TypeScript's own sentence alongside for checking.
     let dir = project(&[(
         "src/ts_enum.rl",
         "export enum Plain { A, B }\n\
@@ -377,12 +378,16 @@ fn a_diagnostic_on_generated_code_still_names_the_construct_it_came_from() {
     )]);
     let out = check(&dir, &root);
     assert!(
-        out.contains("src/ts_enum.rl:3:") && out.contains("ts(2339)"),
-        "reported in the .rl file: {out}"
+        out.contains("src/ts_enum.rl:3:10:"),
+        "reported at the `match` keyword in the .rl file: {out}"
     );
     assert!(
-        out.contains("(in code rlc generated for this construct)"),
-        "and labelled as generated rather than as the user's own line: {out}"
+        out.contains("match on a tag pattern needs a value with a `kind` discriminant"),
+        "in rl's words: {out}"
+    );
+    assert!(
+        out.contains("ts2339: Property 'kind' does not exist on type 'Plain'."),
+        "with the original alongside: {out}"
     );
 }
 
@@ -760,5 +765,69 @@ fn a_type_error_is_reported_at_its_position_in_the_rl_source() {
     assert!(
         out.starts_with("src/bad.rl:2:9: ts(2322):") || out.contains("bad.rl:2:9: ts(2322):"),
         "the diagnostic belongs at the declaration in the .rl file: {out}"
+    );
+}
+
+#[test]
+fn typed_exhaustiveness_sees_a_hole_inside_a_payload() {
+    let root = require_tsgo!();
+    // The checker names the scrutinee's constituents; rl runs its own
+    // exhaustiveness algorithm over that alphabet, so a nested pattern's
+    // hole is seen on this path too (TASK-108). Before, the typed path
+    // asked only "which top-level tags are missing?" and answered nothing
+    // here, while `--check` reported the hole.
+    let dir = project(&[(
+        "src/nest.rl",
+        "enum Inner { Yes(n: number), No }\n\
+         enum Outer { Wrap(inner: Inner), Bare }\n\
+         declare const o: Outer;\n\
+         export const a = match (o) { Wrap(inner: Yes(n)) => n, Bare => -1 };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("match is not exhaustive: missing \"Wrap(inner: No)\""),
+        "the typed path sees the payload hole: {out}"
+    );
+}
+
+#[test]
+fn typed_exhaustiveness_still_answers_from_the_narrowed_type() {
+    let root = require_tsgo!();
+    // The point of asking the checker at all: a case an earlier test
+    // removed is not demanded back. `--check`, which knows only the
+    // declaration, does report it.
+    let dir = project(&[(
+        "src/narrow.rl",
+        "enum Shape { Circle(radius: number), Point }\n\
+         export function f(x: Shape): number {\n\
+         \x20 if (x.kind === \"Point\") return 0;\n\
+         \x20 return match (x) { Circle(radius) => radius };\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        !out.contains("not exhaustive"),
+        "Point is already excluded here: {out}"
+    );
+}
+
+#[test]
+fn a_witness_rl_is_not_certain_of_is_not_reported_on_the_typed_path() {
+    let root = require_tsgo!();
+    // The payload's declared type is a hand-written union, so rl cannot
+    // name that column's alphabet. The default path guesses (it has
+    // nothing better); this path stays quiet, because the honest answer is
+    // to ask the checker — a question rl does not ask yet.
+    let dir = project(&[(
+        "src/opaque.rl",
+        "type Inner = { kind: \"Yes\"; n: number } | { kind: \"No\" };\n\
+         enum Outer { Wrap(inner: Inner), Bare }\n\
+         declare const o: Outer;\n\
+         export const a = match (o) { Wrap(inner: Yes(n)) => n, Bare => -1 };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        !out.contains("not exhaustive"),
+        "an unidentifiable column is not guessed at here: {out}"
     );
 }

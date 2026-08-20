@@ -216,7 +216,10 @@ rlc: src/main.rl:2:1: cannot call mutating method `set` through val binding `map
 - **소진성 메시지가 `--check`와 다릅니다.** `--check`는 자기 선언 표에서
   답하므로 enum 이름을 댈 수 있고(`match on enum Shape is not exhaustive`),
   이 모드는 *타입*에서 답하므로 이름 없이 `match is not exhaustive`라고
-  합니다. 대신 좁혀진 타입을 쓰므로 더 정확합니다. 리터럴 유니언은 어느
+  합니다. 대신 좁혀진 타입을 쓰므로 더 정확합니다. 계산 자체는 두 경로가
+  **같은 알고리즘**이고(체커는 구성원 목록을 답하는 오라클), 알파벳을 알아내지
+  못한 자리의 witness는 이 모드에서 보고하지 않습니다
+  ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)). 리터럴 유니언은 어느
   선언 표에도 없으므로 이 모드만 검사합니다
   ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)).
 - **`val` 경로의 built-in 변경 메서드도 여기서만 검사합니다.** 타입 체커에게 그

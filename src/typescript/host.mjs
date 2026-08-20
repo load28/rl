@@ -29,6 +29,7 @@
  *       →  { diagnostics: [{ file, start, end, code, message }],
  *            literalMissing: [{ index, missing }],
  *            tagMissing: [{ index, missing }],
+ *            tagMembers: [{ index, tags }],
  *            symbols: [{ index, id, name, builtin }],
  *            declarations: [{ path, text }] }
  *
@@ -201,6 +202,7 @@ async function main() {
       diagnostics: [],
       literalMissing: [],
       tagMissing: [],
+      tagMembers: [],
       symbols: [],
       declarations: [],
     };
@@ -346,6 +348,11 @@ async function main() {
         const seen = new Set(work.covered);
         const missing = tags.filter((tag) => !seen.has(tag));
         if (missing.length > 0) out.tagMissing.push({ index: work.index, missing });
+        // The whole member list, not just what the arms left out: rl runs
+        // its own exhaustiveness algorithm over it, which is what sees
+        // holes *inside* a payload (TASK-108). The `missing` above stays
+        // for the answer rl falls back to.
+        out.tagMembers.push({ index: work.index, tags });
       }
     }
 

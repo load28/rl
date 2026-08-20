@@ -320,13 +320,10 @@ pub struct Coverage {
     /// algorithm descends into payloads); it is the flat summary a
     /// consumer wants when it asks "which cases are already written here?"
     pub covered: Vec<String>,
-    /// **Witnesses**: the values the arms leave unhandled, each rendered as
-    /// the rl pattern that would cover it (`Wrap(inner: Yes)`, `"_"` at a
-    /// universal position of a tuple match). One row per uncovered value,
-    /// one entry per scrutinee position. Empty when the match is
-    /// exhaustive; bounded, so a wide product does not build a list nobody
-    /// can read.
-    pub missing: Vec<Vec<String>>,
+    /// **Witnesses**: the values the arms leave unhandled. Empty when the
+    /// match is exhaustive; bounded, so a wide product does not build a
+    /// list nobody can read.
+    pub missing: Vec<Uncovered>,
     /// Indices of arms that match nothing an earlier arm has not already
     /// matched — dead code, in source order.
     ///
@@ -339,6 +336,26 @@ pub struct Coverage {
     pub unreachable: Vec<usize>,
 }
 
+/// One value a match leaves unhandled, as the rl pattern that would cover
+/// it (`Wrap(inner: Yes)`, `_` at a universal position of a tuple match) —
+/// one entry per scrutinee position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Uncovered {
+    /// The pattern text, one entry per scrutinee position.
+    pub pattern: Vec<String>,
+    /// Whether every position was decided from a **known** constructor
+    /// set.
+    ///
+    /// `false` means some column's alphabet was not identifiable — a
+    /// hand-written union, a payload whose declared type names no enum —
+    /// so this witness is rl's best guess rather than its knowledge. The
+    /// default compile path reports it anyway (a conservative "you may
+    /// have missed something" is the only answer available without types);
+    /// the typed path does not, because there the honest move is to ask
+    /// the checker (`docs/design/rust-parity-analysis.md` §10.3).
+    pub certain: bool,
+}
+
 impl Coverage {
     /// The arity-1 view of [`Coverage::missing`] — the patterns a single
     /// match leaves uncovered. Empty for a tuple match's coverage.
@@ -348,7 +365,7 @@ impl Coverage {
         }
         self.missing
             .iter()
-            .filter_map(|row| row.first().map(String::as_str))
+            .filter_map(|row| row.pattern.first().map(String::as_str))
             .collect()
     }
 }
@@ -694,6 +711,33 @@ impl Table {
                     .all(|t| e.constructors.iter().any(|c| c.tag == *t))
             })
             .collect()
+    }
+
+    /// A subject the *checker* named: its constituents' `kind` literals,
+    /// in the type's own order.
+    ///
+    /// The payload of each tag is filled from this table when some
+    /// declaration has that tag, so a nested pattern under it still
+    /// analyzes; a tag no declaration knows becomes a constructor with no
+    /// field list, which specializes to nothing and so covers only itself.
+    /// The entry has no name — the checker answers with a *type*, not a
+    /// declaration, which is why the typed path's message names no enum.
+    fn entry_of_members(&self, tags: &[String]) -> Entry {
+        Entry {
+            name: String::new(),
+            origin: Origin::Local,
+            constructors: tags
+                .iter()
+                .map(|tag| MatchConstructor {
+                    tag: tag.clone(),
+                    fields: self
+                        .entries
+                        .iter()
+                        .find_map(|e| e.constructors.iter().find(|c| c.tag == *tag))
+                        .and_then(|c| c.fields.clone()),
+                })
+                .collect(),
+        }
     }
 
     /// The enum a pattern's names are *resolved against* — the resolution
@@ -1611,6 +1655,153 @@ fn covers(guard: &Option<GuardExpr>, alts: &[TagPattern]) -> bool {
 /// into the payload, so such an arm covers exactly what it covers instead
 /// of being written off.
 fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
+    let rows = match_rows(expr)?;
+    // Several enums can hold every tag. The one the arms *satisfy* is the
+    // subject if there is one; otherwise the one they leave least of —
+    // the rule sema has always reported, now measured in witnesses.
+    let mut best: Option<(&Entry, Vec<Uncovered>)> = None;
+    for entry in table.candidates(&rows.tags) {
+        let types = [ColTy::Enum(entry)];
+        let missing = render_witnesses(&usefulness::missing(&rows.rows, &types, table));
+        if missing.is_empty() {
+            best = Some((entry, missing));
+            break;
+        }
+        if best.as_ref().is_none_or(|(_, m)| missing.len() < m.len()) {
+            best = Some((entry, missing));
+        }
+    }
+    let (entry, missing) = best?;
+    Some(Coverage {
+        positions: vec![Some(entry.covered_enum())],
+        covered: rows.covered,
+        missing,
+        unreachable: unreachable_arms(&rows.arm_rows, &[ColTy::Enum(entry)], table),
+    })
+}
+
+/// The same answer for a subject the caller names — the typed path, where
+/// the checker says which constituents the scrutinee's type still has and
+/// rl runs its own algorithm over that alphabet. One algorithm, a better
+/// oracle for the one column the checker can speak about.
+pub(crate) fn checked_coverage(
+    source: &str,
+    members: &[(usize, Vec<String>)],
+) -> Vec<(usize, Coverage)> {
+    let program = crate::parser::parse(source);
+    let table = Table::build(&program, &[]);
+    let mut found = Vec::new();
+    let mut matches = Vec::new();
+    collect_matches(&program, &mut matches);
+    for expr in matches {
+        let Some((_, tags)) = members.iter().find(|(at, _)| *at == expr.keyword_off) else {
+            continue;
+        };
+        let entry = table.entry_of_members(tags);
+        let Some(rows) = match_rows(expr) else {
+            continue;
+        };
+        let types = [ColTy::Enum(&entry)];
+        let missing = render_witnesses(&usefulness::missing(&rows.rows, &types, &table));
+        found.push((
+            expr.keyword_off,
+            Coverage {
+                positions: vec![None],
+                covered: rows.covered,
+                missing,
+                unreachable: unreachable_arms(&rows.arm_rows, &types, &table),
+            },
+        ));
+    }
+    found
+}
+
+/// Every single `match` of a program, nested ones included, in source
+/// order.
+fn collect_matches<'a>(program: &'a Program, out: &mut Vec<&'a MatchExpr>) {
+    for segment in &program.segments {
+        match segment {
+            Segment::Match(expr) => {
+                out.push(expr);
+                collect_matches(&expr.scrutinee, out);
+                for arm in &expr.arms {
+                    if let Some(guard) = &arm.guard {
+                        collect_matches(&guard.expr, out);
+                    }
+                    collect_matches(&arm.body, out);
+                }
+            }
+            Segment::TupleMatch(expr) => {
+                for (_, scrutinee) in &expr.scrutinees {
+                    collect_matches(scrutinee, out);
+                }
+                for arm in &expr.arms {
+                    if let Some(guard) = &arm.guard {
+                        collect_matches(&guard.expr, out);
+                    }
+                    collect_matches(&arm.body, out);
+                }
+            }
+            Segment::Try(stmt) => collect_matches(&stmt.expr, out),
+            Segment::LetElse(stmt) => {
+                collect_matches(&stmt.expr, out);
+                collect_matches(&stmt.else_body, out);
+            }
+            Segment::IfLet(stmt) => collect_if_let_matches(stmt, out),
+            Segment::Pipe(pipe) => {
+                if let Some(head) = &pipe.head {
+                    collect_matches(head, out);
+                }
+                for step in &pipe.steps {
+                    collect_matches(&step.body, out);
+                }
+            }
+            Segment::ResultBlock(block) => {
+                for item in &block.items {
+                    match item {
+                        ResultItem::Stmts(stmts) => collect_matches(stmts, out),
+                        ResultItem::Bind(bind) => collect_matches(&bind.expr, out),
+                    }
+                }
+                collect_matches(&block.value, out);
+            }
+            Segment::Template(template) => {
+                for chunk in &template.chunks {
+                    if let TemplateChunk::Interp(interp) = chunk {
+                        collect_matches(interp, out);
+                    }
+                }
+            }
+            Segment::Verbatim(_)
+            | Segment::RlImport(_)
+            | Segment::Enum(_)
+            | Segment::ValModifier(_) => {}
+        }
+    }
+}
+
+fn collect_if_let_matches<'a>(stmt: &'a IfLetStmt, out: &mut Vec<&'a MatchExpr>) {
+    collect_matches(&stmt.expr, out);
+    collect_matches(&stmt.body, out);
+    match &stmt.else_part {
+        Some(IfLetElse::Block(block)) => collect_matches(block, out),
+        Some(IfLetElse::IfLet(inner)) => collect_if_let_matches(inner, out),
+        None => {}
+    }
+}
+
+/// One match's arms as the algorithm's input: the tags they name, the tags
+/// they cover outright, the matrix, and the per-arm rows reachability
+/// needs. `None` when the question does not arise — a wildcard arm covers
+/// everything, or no arm carries a tag pattern.
+struct MatchRows<'a> {
+    tags: Vec<&'a str>,
+    covered: Vec<String>,
+    rows: Vec<Vec<Cell<'a>>>,
+    arm_rows: Vec<(usize, Vec<Vec<Cell<'a>>>)>,
+}
+
+fn match_rows(expr: &MatchExpr) -> Option<MatchRows<'_>> {
     if expr
         .arms
         .iter()
@@ -1650,29 +1841,11 @@ fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
     if tags.is_empty() {
         return None;
     }
-
-    // Several enums can hold every tag. The one the arms *satisfy* is the
-    // subject if there is one; otherwise the one they leave least of —
-    // the rule sema has always reported, now measured in witnesses.
-    let mut best: Option<(&Entry, Vec<Vec<String>>)> = None;
-    for entry in table.candidates(&tags) {
-        let types = [ColTy::Enum(entry)];
-        let missing = render_witnesses(&usefulness::missing(&rows, &types, table));
-        if missing.is_empty() {
-            best = Some((entry, missing));
-            break;
-        }
-        if best.as_ref().is_none_or(|(_, m)| missing.len() < m.len()) {
-            best = Some((entry, missing));
-        }
-    }
-    let (entry, missing) = best?;
-
-    Some(Coverage {
-        positions: vec![Some(entry.covered_enum())],
+    Some(MatchRows {
+        tags,
         covered,
-        missing,
-        unreachable: unreachable_arms(&arm_rows, &[ColTy::Enum(entry)], table),
+        rows,
+        arm_rows,
     })
 }
 
@@ -1717,7 +1890,7 @@ fn tuple_coverage_of(expr: &TupleMatchExpr, table: &Table) -> Option<Coverage> {
         if tags.is_empty() {
             // Universal position: only `_` was written here.
             positions.push(None);
-            types.push(ColTy::Opaque);
+            types.push(ColTy::Unconstrained);
             continue;
         }
         // A position whose tags name no enum makes the whole question
@@ -1801,10 +1974,13 @@ fn unreachable_arms(
     out
 }
 
-fn render_witnesses(found: &[Vec<usefulness::Witness>]) -> Vec<Vec<String>> {
+fn render_witnesses(found: &[Vec<usefulness::Witness>]) -> Vec<Uncovered> {
     found
         .iter()
-        .map(|row| row.iter().map(usefulness::Witness::render).collect())
+        .map(|row| Uncovered {
+            pattern: row.iter().map(usefulness::Witness::render).collect(),
+            certain: row.iter().all(usefulness::Witness::certain),
+        })
         .collect()
 }
 
@@ -1836,6 +2012,15 @@ fn identifier_at(source: &str, offset: usize) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The witnesses of a coverage as plain rows, for comparison.
+    fn patterns(coverage: &Coverage) -> Vec<Vec<&str>> {
+        coverage
+            .missing
+            .iter()
+            .map(|m| m.pattern.iter().map(String::as_str).collect())
+            .collect()
+    }
 
     fn at(src: &str, needle: &str, delta: usize) -> usize {
         src.find(needle).expect("needle") + delta
@@ -2088,7 +2273,7 @@ mod tests {
             .collect();
         assert_eq!(names, ["A", "B"]);
         // (X, Q) is the only combination no arm handles.
-        assert_eq!(coverage.missing, [vec!["X".to_string(), "Q".to_string()]]);
+        assert_eq!(patterns(&coverage), [["X", "Q"]]);
         // A tuple arm covers a combination, not a tag.
         assert!(coverage.covered.is_empty());
         assert!(coverage.missing_tags().is_empty());
@@ -2103,7 +2288,7 @@ mod tests {
             .clone()
             .expect("resolved");
         assert_eq!(coverage.positions[1], None);
-        assert_eq!(coverage.missing, [vec!["Y".to_string(), "_".to_string()]]);
+        assert_eq!(patterns(&coverage), [["Y", "_"]]);
 
         // A bare `_` arm covers everything; there is nothing to enumerate.
         let bare = "enum A { X(v: number), Y }\nconst v = match (a, b) { (X, _) => 0, _ => 1 };\n";
@@ -2242,7 +2427,7 @@ mod tests {
             .coverage
             .clone()
             .expect("resolved");
-        assert_eq!(coverage.missing, [vec!["A".to_string()]]);
+        assert_eq!(patterns(&coverage), [["A"]]);
     }
 
     #[test]
@@ -2254,7 +2439,7 @@ mod tests {
             .coverage
             .clone()
             .expect("resolved");
-        assert_eq!(coverage.missing, [vec!["W(i: N)".to_string()]]);
+        assert_eq!(patterns(&coverage), [["W(i: N)"]]);
     }
 
     #[test]
