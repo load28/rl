@@ -23,9 +23,9 @@ mod rope;
 
 use std::cell::Cell;
 
-use crate::ImportRewrite;
 use crate::ast::*;
 use crate::scanner::contains_await;
+use crate::{AnchorKind, EmitAnchor, ImportRewrite};
 use crate::{EmitMapping, ScrutineeTemp};
 use rope::Rope;
 
@@ -47,7 +47,12 @@ pub(crate) fn emit_with_map(
     src: &str,
     rewrite_imports: ImportRewrite,
     std_import: Option<&str>,
-) -> (String, Vec<EmitMapping>, Vec<ScrutineeTemp>) {
+) -> (
+    String,
+    Vec<EmitMapping>,
+    Vec<ScrutineeTemp>,
+    Vec<EmitAnchor>,
+) {
     let emitter = Emitter {
         src,
         bytes: src.as_bytes(),
@@ -57,7 +62,7 @@ pub(crate) fn emit_with_map(
         used_pipe: Cell::new(false),
         used_flow: Cell::new(false),
     };
-    let (mut code, mappings, scrutinee_temps) = emitter.emit_program(program).flatten();
+    let (mut code, mappings, scrutinee_temps, anchors) = emitter.emit_program(program).flatten();
     // The pipeline apply helper, once per file. A function declaration
     // hoists, so appending at the end keeps every original line in place
     // while top-level pipelines still evaluate correctly at module init.
@@ -77,7 +82,7 @@ pub(crate) fn emit_with_map(
             "function $rl_fl<A extends unknown[], B, C>(f: (...a: A) => B, g: (b: B) => C): (...a: A) => C { return (...a: A) => g(f(...a)); }\n",
         );
     }
-    (code, mappings, scrutinee_temps)
+    (code, mappings, scrutinee_temps, anchors)
 }
 
 pub(super) struct Emitter<'a> {
@@ -116,12 +121,34 @@ impl<'a> Emitter<'a> {
                     out.push_src(text, at);
                 }
                 Segment::Enum(decl) => out.push_lit(enums::emit_enum(decl)),
-                Segment::Match(expr) => out.append(matches::emit_match(self, expr)),
-                Segment::TupleMatch(expr) => out.append(matches::emit_tuple_match(self, expr)),
-                Segment::Try(stmt) => out.append(self.emit_try(stmt)),
-                Segment::LetElse(stmt) => out.append(self.emit_let_else(stmt)),
-                Segment::IfLet(stmt) => out.append(self.emit_if_let(stmt)),
-                Segment::Pipe(pipe) => out.append(self.emit_pipe(pipe)),
+                // Every construct's emission is anchored: the glue inside
+                // has no source of its own, but it has an origin, and a
+                // diagnostic that lands there belongs at that keyword
+                // (`crate::EmitAnchor`).
+                Segment::Match(expr) => out.anchored(
+                    AnchorKind::Match,
+                    expr.keyword_off,
+                    matches::emit_match(self, expr),
+                ),
+                Segment::TupleMatch(expr) => out.anchored(
+                    AnchorKind::Match,
+                    expr.keyword_off,
+                    matches::emit_tuple_match(self, expr),
+                ),
+                Segment::Try(stmt) => {
+                    out.anchored(AnchorKind::Try, stmt.keyword_off, self.emit_try(stmt))
+                }
+                Segment::LetElse(stmt) => out.anchored(
+                    AnchorKind::LetElse,
+                    stmt.keyword_off,
+                    self.emit_let_else(stmt),
+                ),
+                Segment::IfLet(stmt) => {
+                    out.anchored(AnchorKind::IfLet, stmt.keyword_off, self.emit_if_let(stmt))
+                }
+                Segment::Pipe(pipe) => {
+                    out.anchored(AnchorKind::Pipe, pipe.head_span.start, self.emit_pipe(pipe))
+                }
                 Segment::ResultBlock(block) => out.append(self.emit_result_block(block)),
                 // `val` is compile-time only — the keyword leaves no trace
                 Segment::ValModifier(_) => {}
@@ -256,17 +283,19 @@ impl<'a> Emitter<'a> {
                     let n = self.try_seq.get();
                     self.try_seq.set(n + 1);
                     let tmp = format!("$rl_r{n}");
-                    code.push_lit(format!("const {tmp} = ("));
-                    code.append(guard_line_comment(self.emit_program(&bind.expr).trim()));
-                    code.push_lit(format!("); if ({tmp}.kind !== \"Ok\") return {tmp};"));
+                    let mut one = Rope::new();
+                    one.push_lit(format!("const {tmp} = ("));
+                    one.append(guard_line_comment(self.emit_program(&bind.expr).trim()));
+                    one.push_lit(format!("); if ({tmp}.kind !== \"Ok\") return {tmp};"));
                     // The binding is copied from the source, not rebuilt, so
                     // the emitted declaration carries a mapping back to the
                     // name the user wrote.
-                    code.push_lit(format!(" {} ", bind.kw));
+                    one.push_lit(format!(" {} ", bind.kw));
                     let (binding, at) =
                         self.src_slice(bind.binding_span.start, bind.binding_span.end);
-                    code.push_src(binding, at);
-                    code.push_lit(format!(" = {tmp}.value;"));
+                    one.push_src(binding, at);
+                    one.push_lit(format!(" = {tmp}.value;"));
+                    code.anchored(AnchorKind::ResultBind, bind.binding_span.start, one);
                 }
             }
         }

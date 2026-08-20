@@ -8,6 +8,24 @@
 
 ### Added
 
+- **생성된 코드에서 난 타입 에러를 rl의 말로 옮긴다** (TASK-104). 사용자 코드가
+  잘못돼 tsc가 rlc의 글루에서 에러를 내면, 이제 그 구문의 위치에서 rl의 문안으로
+  보고한다.
+
+  ```
+  before: errty.ts(7,57): error TS2322: Type 'Err<string>' is not assignable to ...
+  after:  rlc: f.rl:2:13: the `Err` this `try` propagates does not fit the enclosing
+               function's return type — ... (ts2322: Type 'Err<string>' is ...)
+  ```
+
+  - 새 emit 산출물 `EmitAnchor` — 각 구문이 쓴 글루의 출력 범위와 그 구문의
+    소스 위치. `EmitMapping`과 **분리된 단방향** 자료다: 진단만 소비하고
+    navigation·rename은 절대 글루로 들어가지 않는다.
+  - 옮기는 대상은 `(구문, TS 코드)` **화이트리스트**다. 표에 없으면 옮기지 않고
+    그대로 전달한다. 원문은 항상 괄호 안에 함께 실린다.
+  - `match`를 TS `enum` 위에 쓴 경우도 이 경로로 rl 진단이 된다
+    ([TASK-100](docs/tasks/TASK-100-ts-enum-match-diagnostic.md)).
+
 - **소진성이 중첩 패턴 안쪽까지 검사된다** (TASK-103). 계산이 태그 집합의
   곱집합에서 rustc가 쓰는 **usefulness 알고리즘**(Maranget)으로 바뀌었다.
 

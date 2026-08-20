@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use super::projection::{self, Probes, ProjectedDocument};
 use super::snapshot::Snapshot;
+use crate::AnchorKind;
 use crate::typescript::backend::{Answers, Diagnostic as TsDiagnostic, Resolution};
 
 /// One reported problem, at a position in a file the user can open.
@@ -63,6 +64,57 @@ pub struct ModuleDeclaration {
     pub text: String,
 }
 
+/// Turns a TypeScript diagnostic that landed on rlc's own glue into an rl
+/// one — said in rl's words, about rl's construct.
+///
+/// This is the third layer of `docs/design/rust-parity-analysis.md` §10 and
+/// the point of [`crate::EmitAnchor`]. The error-layer contract asks that a
+/// user never meet a TypeScript error caused by code rlc wrote; until now
+/// that state was not reached — the diagnostic simply arrived wearing the
+/// generated code's face. Translating it reaches it.
+///
+/// The pair `(construct, error code)` is the whole key. It is deliberately
+/// a **whitelist**: a diagnostic this table does not recognize is passed
+/// through unchanged rather than guessed at, because silently restating an
+/// error as something it is not is worse than an ugly message. The original
+/// text rides along in every translation for the same reason.
+pub(crate) fn translate(kind: AnchorKind, code: u32, message: &str) -> Option<String> {
+    let said = match (kind, code) {
+        // `.kind` / `.value` reached for on something that is not a Result.
+        (AnchorKind::Try, 2339 | 2551 | 2571) => {
+            "`try` needs a `Result` — this expression is not one".to_string()
+        }
+        (AnchorKind::ResultBind, 2339 | 2551 | 2571) => {
+            "`<-` needs a `Result` — this expression is not one".to_string()
+        }
+        // The propagated `Err` reaching a return type that cannot hold it.
+        (AnchorKind::Try, 2322 | 2345) => "the `Err` this `try` propagates does not fit the \
+             enclosing function's return type — rl has no automatic conversion, so widen the \
+             return type or convert the error"
+            .to_string(),
+        (AnchorKind::LetElse, 2339 | 2571) => {
+            "let-else needs a value with a `kind` discriminant — this expression has none"
+                .to_string()
+        }
+        (AnchorKind::IfLet, 2339 | 2571) => {
+            "`if let` needs a value with a `kind` discriminant — this expression has none"
+                .to_string()
+        }
+        (AnchorKind::Match, 2339 | 2571) => {
+            "match on a tag pattern needs a value with a `kind` discriminant — this scrutinee \
+             has none (a plain TypeScript `enum` is not one)"
+                .to_string()
+        }
+        // A tag compared against a type that cannot hold it. rlc reports
+        // the ones that look like misspellings itself; this is the rest.
+        (AnchorKind::Match, 2678) | (AnchorKind::LetElse | AnchorKind::IfLet, 2367) => {
+            "this pattern's case is not one the value can be".to_string()
+        }
+        _ => return None,
+    };
+    Some(format!("{said} (ts{code}: {})", message.trim()))
+}
+
 /// Builds the pass's diagnostics from the checker's answers, in the exact
 /// order and wording the report has always had.
 pub(crate) fn report(
@@ -88,6 +140,22 @@ pub(crate) fn report(
             });
             continue;
         };
+        // Glue is not the user's code. When rlc can say what the construct
+        // meant, it says that — at the construct's own keyword.
+        if let Some((offset, said)) = projection::translate_on_glue(file, diagnostic) {
+            let (line, col) = crate::line_col(&file.source, offset);
+            let entry = Diagnostic {
+                path: file.source_path.clone(),
+                position: Some((line, col)),
+                message: said,
+            };
+            // One construct's glue can draw several TypeScript errors that
+            // all mean the same rl thing (`$rl_t.kind` and `$rl_t.value`).
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+            continue;
+        }
         match projection::diagnostic_source_offset(file, diagnostic.start) {
             Some((offset, exact)) => {
                 let (line, col) = crate::line_col(&file.source, offset);
@@ -98,10 +166,10 @@ pub(crate) fn report(
                         "ts({}): {}{}",
                         diagnostic.code,
                         diagnostic.message,
-                        // Glue is not the user's code: by the error-layer
-                        // contract rlc's output must not draw type errors, so
-                        // say where it came from rather than pinning it on the
-                        // line the position landed near.
+                        // By the error-layer contract rlc's output must not
+                        // draw type errors, so say where it came from rather
+                        // than pinning it on the line the position landed
+                        // near.
                         if exact {
                             ""
                         } else {

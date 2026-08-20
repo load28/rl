@@ -558,9 +558,10 @@ const $rl_t0 = (parseNum(cfg)); if ($rl_t0.kind !== "Ok") return $rl_t0; const p
 - 임시 변수는 파일 단위로 유일합니다 (`$rl_t0`, `$rl_t1`, ...).
 - IIFE가 없으므로 식 안의 `await`가 그대로 동작합니다
   (`const data = try await fetchData();`).
-- 검사는 구조적(`kind !== "Ok"`)입니다. `Result`가 아닌 값에 쓰면 생성물에서
-  tsc 에러가 됩니다. `Option` 전파는 지원하지 않습니다 — `Option.okOr`로
-  바꾸세요.
+- 검사는 구조적(`kind !== "Ok"`)입니다. `Result`가 아닌 값에 쓰면 typed
+  경로에서 `` `try` needs a `Result` `` 로 **`try` 자리에** 보고됩니다
+  ([`errors.md`](./errors.md#생성된-코드에서-난-타입-에러)). `Option` 전파는
+  지원하지 않습니다 — `Option.okOr`로 바꾸세요.
 - 함수 반환 타입은 식의 `Err` 타입과 호환되는 `Result`여야 합니다
   (Rust의 `From` 같은 자동 변환 없음).
 - 반환 타입을 **적지 않으면** tsc가 조기 return들과 마지막 `Result.Ok(...)`의

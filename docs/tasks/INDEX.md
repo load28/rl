@@ -107,11 +107,12 @@
 | TASK-097 | sema 소진성을 MatchAnalysis 위로 — coverage 단일 원천 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-097](./TASK-097-exhaustiveness-on-match-analysis.md) |
 | TASK-098 | 폴백 타입의 한계 실측 — nested·tuple·제네릭 인스턴스화 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-098](./TASK-098-fallback-type-instantiation-survey.md) |
 | TASK-099 | 기록 위생 — INDEX 상태 정합성과 미등록 후속 등록 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-099](./TASK-099-records-hygiene.md) |
-| TASK-100 | TS enum을 scrutinee로 쓴 `match`를 rl 진단으로 | 대기 | — | — | [TASK-100](./TASK-100-ts-enum-match-diagnostic.md) |
+| TASK-100 | TS enum을 scrutinee로 쓴 `match`를 rl 진단으로 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-100](./TASK-100-ts-enum-match-diagnostic.md) |
 | TASK-101 | rl 구문의 Rust 수준 분석 격차 검토와 개선 계획 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-101](./TASK-101-rust-parity-review.md) |
 | TASK-102 | 패턴 사이트 일반화와 이름 해석 진단 (P1+P2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-102](./TASK-102-pattern-sites-and-resolution.md) |
 | TASK-103 | 소진성을 usefulness 알고리즘으로 (P5) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-103](./TASK-103-usefulness-exhaustiveness.md) |
+| TASK-104 | 진단 앵커와 진단 번역 (P4 계층 1·3) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-104](./TASK-104-diagnostic-anchors-and-translation.md) |
 
 ## 다음 태스크 번호
 
-**TASK-104**
+**TASK-105**

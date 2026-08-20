@@ -205,6 +205,9 @@ pub(crate) struct ServiceDoc {
     source: String,
     code: String,
     mappings: Vec<EmitMapping>,
+    /// The glue each construct wrote — what a diagnostic landing outside
+    /// every mapping is *about* (`crate::EmitAnchor`).
+    anchors: Vec<crate::EmitAnchor>,
 }
 
 /// A compiled completion probe: the buffer with `$rl_probe` spliced in at
@@ -801,14 +804,38 @@ impl Project {
             // render as an invisible squiggle; give it the character it
             // points at.
             let e = if e > s { e } else { s + 1 };
-            let mut message = item["message"].as_str().unwrap_or_default().to_string();
+            let raw = item["message"].as_str().unwrap_or_default().to_string();
+            let code = item["code"].as_u64().unwrap_or(0) as u32;
+            // On glue, rlc says what the construct meant, at the
+            // construct's own keyword — the same table the CLI reports
+            // through, so the two surfaces cannot drift.
+            if !exact
+                && let Some(anchor) = glue_anchor(&doc, start)
+                && let Some(said) = crate::engine::semantics::translate(anchor.kind, code, &raw)
+            {
+                let at = mapper::to_utf16(&doc.source, anchor.src);
+                let range = source_range(&doc.source, at, at + 1);
+                let entry = ServiceDiagnostic {
+                    range,
+                    message: said,
+                    code,
+                    warning: severity == 2,
+                };
+                // One construct's glue can draw several TypeScript errors
+                // that all mean the same rl thing.
+                if !out.contains(&entry) {
+                    out.push(entry);
+                }
+                continue;
+            }
+            let mut message = raw;
             if !exact {
                 message.push_str(" (in code rlc generated for this construct)");
             }
             out.push(ServiceDiagnostic {
                 range: source_range(&doc.source, s, e),
                 message,
-                code: item["code"].as_u64().unwrap_or(0) as u32,
+                code,
                 warning: severity == 2,
             });
         }
@@ -892,11 +919,17 @@ fn serve_one(
     let doc = match session.docs.get(path) {
         Some(doc) if doc.source == text => doc.clone(),
         _ => {
-            let MappedEmit { code, mappings, .. } = crate::emit_mapped(&text);
+            let MappedEmit {
+                code,
+                mappings,
+                anchors,
+                ..
+            } = crate::emit_mapped(&text);
             let doc = Arc::new(ServiceDoc {
                 source: text,
                 code,
                 mappings,
+                anchors,
             });
             session.docs.insert(path.to_path_buf(), doc.clone());
             doc
@@ -1131,11 +1164,17 @@ fn serve_doc_only(
     match session.docs.get(path) {
         Some(doc) if doc.source == text => Some(doc.clone()),
         _ => {
-            let MappedEmit { code, mappings, .. } = crate::emit_mapped(&text);
+            let MappedEmit {
+                code,
+                mappings,
+                anchors,
+                ..
+            } = crate::emit_mapped(&text);
             let doc = Arc::new(ServiceDoc {
                 source: text,
                 code,
                 mappings,
+                anchors,
             });
             session.docs.insert(path.to_path_buf(), doc.clone());
             Some(doc)
@@ -1173,6 +1212,15 @@ fn from_service_span(doc: &ServiceDoc, start: usize, end: usize) -> Option<(usiz
 /// Unlike navigation and rename, diagnostics on generated glue are still
 /// useful: the CLI reports them at the construct that produced the glue, so
 /// the language service follows the same policy.
+/// The construct whose glue a served-text UTF-16 offset falls in.
+fn glue_anchor(doc: &ServiceDoc, utf16_start: usize) -> Option<crate::EmitAnchor> {
+    let out = mapper::from_utf16(&doc.code, utf16_start);
+    doc.anchors
+        .iter()
+        .find(|a| a.out <= out && out < a.end)
+        .copied()
+}
+
 fn diagnostic_source_span(
     doc: &ServiceDoc,
     start: usize,

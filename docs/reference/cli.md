@@ -208,10 +208,11 @@ rlc: src/main.rl:2:1: cannot call mutating method `set` through val binding `map
 ```
 
 - 손으로 쓴 `.ts`의 에러는 원래 위치 그대로 나옵니다.
-- 글루(switch IIFE, `$rl_ap` 헬퍼 등)에 걸린 진단은 원본 대응이 없으므로 그
-  구문의 위치로 보고하고 `(in code rlc generated for this construct)`를 덧붙입니다.
-  애초에 방출물 때문에 tsc 에러가 나면 그건 rlc의 버그입니다
-  ([`errors.md`](./errors.md) 에러 계층).
+- 글루(switch IIFE, `$rl_ap` 헬퍼 등)에 걸린 진단은 그 구문의 위치로
+  보고합니다. rlc가 무슨 뜻인지 아는 경우에는 **자기 말로 옮겨** 보고하고
+  (원문은 괄호 안에 함께), 모르는 코드는 그대로 전달하며
+  `(in code rlc generated for this construct)`를 덧붙입니다
+  ([`errors.md`](./errors.md#생성된-코드에서-난-타입-에러)).
 - **소진성 메시지가 `--check`와 다릅니다.** `--check`는 자기 선언 표에서
   답하므로 enum 이름을 댈 수 있고(`match on enum Shape is not exhaustive`),
   이 모드는 *타입*에서 답하므로 이름 없이 `match is not exhaustive`라고

@@ -381,6 +381,25 @@ fn scrutinee_position(emit: &MappedEmit, keyword_offset: usize) -> Option<usize>
 /// position is approximate — the construct it was generated for — and the
 /// message says so. By the error-layer contract it should not happen at
 /// all: rlc's own output must not draw type errors.
+/// The rl wording for a TypeScript diagnostic that landed on glue, with
+/// the source offset to report it at — `None` when the diagnostic is not
+/// on glue, or when nothing in the whitelist covers it.
+///
+/// A diagnostic whose span *is* mapped is the user's own code and is never
+/// translated: their type error is TypeScript's to phrase.
+pub(crate) fn translate_on_glue(
+    file: &ProjectedDocument,
+    diagnostic: &crate::typescript::backend::Diagnostic,
+) -> Option<(usize, String)> {
+    let out = mapper::from_utf16(&file.emit.code, diagnostic.start);
+    if mapper::to_source_inclusive(&file.emit.mappings, out).is_some() {
+        return None;
+    }
+    let anchor = file.emit.anchor_at(out)?;
+    let said = super::semantics::translate(anchor.kind, diagnostic.code, &diagnostic.message)?;
+    Some((anchor.src, said))
+}
+
 pub(crate) fn diagnostic_source_offset(
     file: &ProjectedDocument,
     utf16_start: usize,
@@ -392,6 +411,81 @@ pub(crate) fn diagnostic_source_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typescript::backend::Diagnostic as TsDiagnostic;
+
+    /// A diagnostic as the backend hands it over, at a byte of the emitted
+    /// module found by searching for the glue in question.
+    fn ts_at(file: &ProjectedDocument, needle: &str, code: u32, message: &str) -> TsDiagnostic {
+        let at = file
+            .emit
+            .code
+            .find(needle)
+            .unwrap_or_else(|| panic!("no {needle:?} in emitted code"));
+        TsDiagnostic {
+            file: file.module_path.clone(),
+            start: at,
+            end: at + needle.len(),
+            code,
+            message: message.to_string(),
+        }
+    }
+
+    fn project(source: &str) -> ProjectedDocument {
+        ProjectedDocument::project(Path::new("/p/src/a.rl"), source.to_string()).expect("projects")
+    }
+
+    #[test]
+    fn a_type_error_on_a_constructs_glue_is_reported_in_rls_words() {
+        // `try` on a non-Result: TypeScript reaches for `.kind` on a number
+        // and says so about code the user never wrote.
+        let file = project("function f() {\n  const a = try plain();\n  return a;\n}\n");
+        let diagnostic = ts_at(
+            &file,
+            "$rl_t0.kind",
+            2339,
+            "Property 'kind' does not exist on type 'number'.",
+        );
+        let (offset, said) = translate_on_glue(&file, &diagnostic).expect("translated");
+        assert!(
+            file.source[offset..].starts_with("const a = try"),
+            "reported at the construct, not the glue"
+        );
+        assert!(said.starts_with("`try` needs a `Result`"), "{said}");
+        // The original rides along — a translation the user can check.
+        assert!(said.contains("ts2339: Property 'kind'"), "{said}");
+    }
+
+    #[test]
+    fn a_type_error_on_the_users_own_code_is_left_to_typescript() {
+        let file = project("function f() {\n  const a = try plain();\n  return a;\n}\n");
+        // `plain()` is copied from the source, so it is mapped — the user's
+        // own text, and their type error to read as TypeScript phrased it.
+        let diagnostic = ts_at(&file, "plain()", 2554, "Expected 1 arguments, but got 0.");
+        assert!(translate_on_glue(&file, &diagnostic).is_none());
+    }
+
+    #[test]
+    fn an_unrecognized_code_on_glue_is_not_guessed_at() {
+        let file = project("function f() {\n  const a = try plain();\n  return a;\n}\n");
+        let diagnostic = ts_at(&file, "$rl_t0.kind", 2739, "Type is missing properties.");
+        assert!(translate_on_glue(&file, &diagnostic).is_none());
+    }
+
+    #[test]
+    fn the_innermost_construct_owns_its_glue() {
+        let file = project(
+            "enum E { A(x: number), B }\nfunction f() {\n  const a = try wrap(match (e) { A(x) => x, B => 0 });\n}\n",
+        );
+        let diagnostic = ts_at(
+            &file,
+            "$rl_m.kind",
+            2339,
+            "Property 'kind' does not exist on type 'Plain'.",
+        );
+        let (offset, said) = translate_on_glue(&file, &diagnostic).expect("translated");
+        assert!(file.source[offset..].starts_with("match"), "at the match");
+        assert!(said.starts_with("match on a tag pattern"), "{said}");
+    }
 
     #[test]
     fn a_lowered_module_is_named_so_that_an_rl_specifier_resolves_to_it() {

@@ -5,6 +5,7 @@ rl = TypeScript + 7 constructs + 1 binding modifier; `rlc` compiles `.rl` → pl
 CONTRACTS:
 - Every valid TS file is a valid `.rl` file. rlc transforms only text parsing COMPLETELY as an rl construct; all else passes through byte-for-byte.
 - Output is plain TS (`kind`-tagged unions, switch/if chains), no runtime lib, no type tricks. rl-level errors: `rlc: file:line:col: msg`. Type errors in pass-through code: tsc's job.
+- Type errors that tsc raises *inside code rlc generated* (e.g. `try` on a non-Result, `match` on a plain TS enum) are restated by rlc in rl's words AT THE CONSTRUCT, with the original in parentheses: `` `try` needs a `Result` — this expression is not one (ts2339: ...) ``. Only a whitelist of (construct, TS code) pairs is restated; anything else passes through with `(in code rlc generated for this construct)`.
 - TRAP: a slightly-wrong rl construct (missing `;`, reserved-word tag, unparenthesized ternary) is NOT an rl error — it passes through, then tsc fails on raw `match`/`try` text in output. If output contains rl syntax verbatim → your syntax didn't fully parse. Exceptions: malformed `if let` and `|>` DO error with location (impossible in valid TS).
 - Identifiers inside rl constructs: ASCII `[A-Za-z_$][A-Za-z0-9_$]*` only. TS reserved words (new, default, if, in, of, static, class, ...) can't be tags/fields/bindings — construct silently passes through. `.tsx` unsupported.
 

@@ -351,3 +351,72 @@ const v = match (get()) {
     // The arm body still is mapped — only the binding list is not.
     assert_mapped_in(src, &m, "=> x,", "x");
 }
+
+/* ------------------------------------------------------------------ */
+/* diagnostic anchors (TASK-104)                                       */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn every_construct_anchors_the_glue_it_writes() {
+    let src = "function f() {\n  const a = try readNum();\n}\n";
+    let m = emit_mapped(src);
+    let anchor = m
+        .anchors
+        .iter()
+        .find(|a| a.kind == rlc::AnchorKind::Try)
+        .expect("the try statement is anchored");
+    // The anchor points at the construct's keyword — where a diagnostic
+    // about its glue belongs.
+    assert!(src[anchor.src..].starts_with("const a = try"), "{anchor:?}");
+    // ...and covers the glue the construct wrote.
+    assert!(m.code[anchor.out..anchor.end].contains("$rl_t0.kind !== \"Ok\""));
+}
+
+#[test]
+fn anchors_nest_innermost_first() {
+    let src = "function f() {\n  const a = try wrap(match (s) { A(x) => x, _ => other() });\n}\n";
+    let m = emit_mapped(src);
+    let kinds: Vec<rlc::AnchorKind> = m.anchors.iter().map(|a| a.kind).collect();
+    let inner = kinds
+        .iter()
+        .position(|k| *k == rlc::AnchorKind::Match)
+        .expect("match anchored");
+    let outer = kinds
+        .iter()
+        .position(|k| *k == rlc::AnchorKind::Try)
+        .expect("try anchored");
+    assert!(inner < outer, "inner anchor must come first: {kinds:?}");
+
+    // A byte inside the match resolves to the match, not the try.
+    let at = m.code.find("$rl_m.kind").expect("switch glue");
+    assert_eq!(
+        m.anchor_at(at).map(|a| a.kind),
+        Some(rlc::AnchorKind::Match)
+    );
+}
+
+#[test]
+fn anchors_do_not_change_the_emitted_bytes() {
+    // Anchors are zero-length notes; the output must be what it always was.
+    let src = r#"enum E { A(x: number), B }
+function f() {
+  const a = try readNum();
+  const A(x) = e else { return; };
+  if let B() = e { log(); }
+  const r = result { const v <- readNum(); v };
+  const p = x |> f |> g;
+  const m = match (e) { A(x) => x, B => 0 };
+}
+"#;
+    let mapped = emit_mapped(src);
+    let compiled = compile(
+        src,
+        &Options {
+            rewrite_imports: ImportRewrite::Off,
+            verify: false,
+            ..Options::default()
+        },
+    )
+    .expect("compiles");
+    assert_eq!(mapped.code, compiled);
+}
