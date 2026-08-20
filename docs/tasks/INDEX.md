@@ -108,7 +108,8 @@
 | TASK-098 | 폴백 타입의 한계 실측 — nested·tuple·제네릭 인스턴스화 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-098](./TASK-098-fallback-type-instantiation-survey.md) |
 | TASK-099 | 기록 위생 — INDEX 상태 정합성과 미등록 후속 등록 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-099](./TASK-099-records-hygiene.md) |
 | TASK-100 | TS enum을 scrutinee로 쓴 `match`를 rl 진단으로 | 대기 | — | — | [TASK-100](./TASK-100-ts-enum-match-diagnostic.md) |
+| TASK-101 | rl 구문의 Rust 수준 분석 격차 검토와 개선 계획 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-101](./TASK-101-rust-parity-review.md) |
 
 ## 다음 태스크 번호
 
-**TASK-101**
+**TASK-102**
