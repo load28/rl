@@ -317,3 +317,111 @@ P1+P2를 한 태스크로 묶는 것이 자연스럽다(분석 확장과 그 첫
   글루 위의 TS 에러로 새고 있는 rl 수준 판정을 rlc의 문안·위치로 되돌린다.
 - **"rlc는 TypeScript 타입 시스템을 기르지 않는다".** P2는 타입을 보지 않는다
   (이름과 선언 표만 본다). P4는 타입을 **직접 계산하지 않고** 체커에 묻는다.
+
+---
+
+## 9. "rustc 형태로 정확히" — 대응표와 옮길 수 없는 축
+
+§6의 제안을 **rustc의 단계 구성 그대로** 놓을 수 있는지에 대한 답이다.
+결론: **단계 구성은 그대로 옮길 수 있다. 옮길 수 없는 축은 하나뿐이고, 그
+하나가 rl의 설계 계약 그 자체다.**
+
+### 9.1 rustc의 패턴 처리 단계와 rl의 대응
+
+rustc는 패턴을 네 단계로 나눠 처리한다. 각 단계가 답하는 질문이 다르고,
+에러도 단계별로 다르다.
+
+| rustc 단계 | 답하는 질문 | rl의 현재 대응 | 상태 |
+|---|---|---|---|
+| **resolve** (경로 → 정의) | 이 태그·필드는 무엇을 가리키나? | **없음** | 신설 (GAP-1) |
+| **typeck의 `check_pat`** | 패턴이 기대 타입과 맞나, 각 바인딩의 타입은? | `MatchAnalysis` + TypeScript 체커 | 있음(match만) → P1이 일반화 |
+| **THIR typed pattern** | 타입이 붙은 정규화된 패턴 | `MatchAnalysis`(TASK-096이 이 모델을 본떴다) | 있음 |
+| **usefulness** (Maranget) | 도달 불가 arm은? 빠진 것은? 그 증거는? | `Coverage`(곱집합 odometer) | 부분 |
+
+rustc가 이 단계들에서 내는 에러는 rl이 그대로 흉내 낼 수 있는 형태다:
+
+| rustc | 언제 | rl의 현재 |
+|---|---|---|
+| `E0599` no variant named `Circel` | resolve | **침묵** (→ 글루 위 `TS2678`) |
+| `E0026` variant does not have a field named `radiuz` | resolve/typeck | **침묵** (→ `TS2339`) |
+| `E0023` this pattern has 2 fields, but the variant has 1 | resolve/typeck | **침묵** |
+| `E0408` variable `y` is not bound in all patterns | resolve | **있음** (TASK-096이 지목형으로 개선) |
+| `E0004` non-exhaustive patterns: `Circle(_)` not covered | usefulness | **있음** (증거 형태는 태그까지) |
+| `unreachable_patterns` lint | usefulness | 중복 태그 한정 |
+
+`E0408`을 이미 rustc와 같은 형태로 내고 있다는 사실이 중요하다 — **이 저장소는
+이미 rustc의 단계 구성을 부분적으로 밟고 있고**, 빠진 것은 resolve 단계 하나와
+usefulness의 나머지 절반이다.
+
+### 9.2 옮길 수 있는 것 — 세 가지 구조
+
+**(1) resolve를 별도 단계로 신설한다.** rustc가 타입을 보기 **전에** 경로를
+정의에 묶고, 실패하면 거기서 멈추는 것과 같은 자리에 둔다. rl에서는
+`analysis.rs`의 후보 표가 이미 "정의"의 역할을 하므로, 필요한 것은 그 표에
+**닿지 못한 이름을 에러로 만드는 것**뿐이다. 타입이 필요 없다.
+
+여기에 rustc의 `DefId`에 해당하는 **안정 식별자**를 붙인다. 지금 분석 결과는
+span만 들고 있어 "이 태그와 저 태그가 같은 케이스인가"를 이름 비교로만 답할 수
+있다. `EnumId`/`CaseId`/`FieldId`(모듈 경로 + 선언 순서)를 도입하면
+references·rename이 이름 문자열이 아니라 정의 동일성 위에서 성립한다 — GAP-2의
+rename 합성이 정확해지는 전제다.
+
+**(2) 소진성을 진짜 usefulness 알고리즘으로 바꾼다.** 지금의 `Coverage`는
+"태그 집합의 곱집합"이라 중첩 패턴을 다룰 수 없어 v1이 보수적으로 포기한
+것(§GAP-6)이다. rustc는 Maranget의 usefulness 한 알고리즘으로 소진성·도달
+불가·증거(witness)를 **동시에** 답하고, 중첩·or-패턴·와일드카드가 특별 케이스
+없이 처리된다. rl의 패턴 문법은 rustc의 부분집합(구조체 변형 + or + 중첩 +
+튜플)이므로 알고리즘이 그대로 성립한다.
+
+이 교체는 세 가지를 한꺼번에 준다: 중첩 내부 소진성(v2), `Circle(_)` 형태의
+증거, 그리고 도달 불가 arm 검사의 일반화.
+
+**(3) 컴파일러와 IDE가 같은 분석을 공유한다.** rustc의 usefulness 구현은
+독립 크레이트(`rustc_pattern_analysis`)이고 **rust-analyzer가 그것을 그대로
+가져다 쓴다.** 컴파일러와 IDE가 소진성에 대해 두 가지 답을 하지 않는 이유가
+그 구조다. rl은 이미 절반 와 있다 — `analysis.rs`를 rlc와 엔진이 공유한다.
+남은 절반이 GAP-3(에디터의 정규식 두 번째 구현)이고, P3은 정확히 rust-analyzer가
+택한 그 구조로 되돌리는 작업이다.
+
+### 9.3 옮길 수 없는 축 — 타입의 소유권
+
+**rustc의 `check_pat`은 기대 타입을 알고 그 타입에 대해 패턴을 검사한다.
+rlc는 타입을 모른다.** 이것이 유일하고 근본적인 차이이고, 설계 계약
+(`CLAUDE.md`)이 그렇게 정한 것이므로 "고칠" 대상이 아니다. 결과적으로 rl의
+패턴 검사는 rustc의 한 단계가 **둘로 쪼개진다**:
+
+| | 재료 | 언제나 가능한가 |
+|---|---|---|
+| **구조 검사** (이름 해석, 필드 집합, 원소 수, 태그 소진성) | rlc의 선언 표 | ✔ 툴체인 없이도 |
+| **타입 검사** (대상이 정말 그 enum인가, 좁혀진 타입, 제네릭 인스턴스화) | TypeScript 체커 | typed 경로에서만 |
+
+여기서 파생되는 정직한 한계 셋:
+
+1. **배치(untyped) 빌드에서는 절반만 답한다.** 이름 해석·필드·소진성은 답하고,
+   "이 스크루티니가 정말 그 enum인가"는 답하지 않는다. rustc는 이 구분이 없다.
+2. **세계가 닫혀 있지 않다.** rustc의 enum은 변형 목록이 닫혀 있지만, rl의
+   스크루티니는 손으로 쓴 TS 유니언이거나 여러 rl enum의 합일 수 있다. 그래서
+   resolve는 **후보를 하나도 못 찾으면 침묵**해야 한다 — 오탐은 통과 계약보다
+   비싸다. rustc에는 이 규칙이 필요 없다.
+3. **witness의 타입 표현은 선언 텍스트다.** `Circle(_)`까지는 rl이 만들 수
+   있지만, 제네릭이 인스턴스화된 형태(`Some(value: string)`)는 체커만 안다 —
+   TASK-098이 확정한 폴백의 한계 그대로다.
+
+### 9.4 그래서 계획은 이렇게 조정된다
+
+§6의 제안을 rustc 단계에 맞춰 다시 놓으면:
+
+| 제안 | rustc 대응 | 조정 내용 |
+|---|---|---|
+| **P1** | THIR typed pattern | 그대로. 단, 사이트에 **안정 식별자**(EnumId/CaseId/FieldId)를 추가한다 |
+| **P2** | resolve + `E0599`/`E0026`/`E0023` | 그대로. **독립 단계**로 두고, 해석 실패 시 그 사이트의 이후 판정(소진성)은 중단하되 다른 사이트는 계속 검사한다 (rustc의 에러 복구 방식) |
+| **P3** | rustc ↔ rust-analyzer 공유 구조 | 그대로. 안정 식별자 위에서 rename/references를 합성한다 |
+| **P4** | `check_pat`의 타입 절반 | rl 고유 — 체커에 위임하는 분업이 rustc에는 없는 층이다 |
+| **P5** | usefulness 교체 | 잔여 정리가 아니라 **독립 제안으로 승격**한다: 곱집합 odometer → Maranget usefulness. 중첩 v2·witness·도달 불가를 한 번에 얻는다 |
+
+순서는 §7과 같되 P5(usefulness)의 위치가 올라간다: **P1 → P2 → P5 → P3 → P4.**
+P5를 P3보다 먼저 두는 이유는, 에디터가 소비할 분석이 최종 형태여야 같은 표면을
+두 번 만들지 않기 때문이다.
+
+한 줄로: **rustc의 단계 구성(resolve → typed pattern → usefulness)은 그대로
+가능하고, 그중 타입을 보는 절반만 TypeScript에 위임된 형태로 남는다.**
