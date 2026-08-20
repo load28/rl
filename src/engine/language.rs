@@ -232,7 +232,7 @@ impl Project {
     /// inside an or-pattern (`A(x) | B(x)`): the emitted destructuring
     /// speaks for every alternative at once, so those spans map to nothing
     /// (mapping them to one alternative would let a rename rewrite that one
-    /// alone). For those, [`crate::match_analyses`] knows the span and the
+    /// alone). For those, [`crate::pattern_analyses`] knows the span and the
     /// alternative it belongs to, and the answer is still the checker's
     /// wherever possible: the alternative is *isolated* — the same
     /// serve-a-stand-in move as the completion probe — so the service sees
@@ -971,7 +971,7 @@ fn analyses_of(
     overlays: &HashMap<PathBuf, String>,
     path: &Path,
     source: &str,
-) -> crate::MatchAnalyses {
+) -> crate::PatternAnalyses {
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut externs: Vec<crate::EnumSymbol> = Vec::new();
     for import in crate::rl_imports(source) {
@@ -1012,7 +1012,7 @@ fn analyses_of(
             crate::RlImportNames::None => unreachable!("skipped above"),
         }
     }
-    crate::match_analyses(source, &externs)
+    crate::pattern_analyses(source, &externs)
 }
 
 /// The isolated-alternative stand-in: the source with `binding`'s whole
@@ -1444,7 +1444,7 @@ mod tests {
     fn isolating_an_alternative_maps_its_binding_into_narrowed_output() {
         let src =
             "enum E { A(x: string), B(x: number) }\nconst v = match (e) { A(x) | B(x) => x };\n";
-        let analyses = crate::match_analyses(src, &[]);
+        let analyses = crate::pattern_analyses(src, &[]);
         let b_x = src.find("B(x)").unwrap() + 2;
         let binding = analyses.binding_at(b_x).unwrap().clone();
         let (code, offset) = isolate_alternative(src, &binding, b_x).unwrap();
@@ -1469,7 +1469,7 @@ mod tests {
     fn declared_hover_names_the_constructor_and_its_type() {
         let src =
             "enum E { A(x: string), B(x: number) }\nconst v = match (e) { A(x) | B(x) => x };\n";
-        let analyses = crate::match_analyses(src, &[]);
+        let analyses = crate::pattern_analyses(src, &[]);
         let binding = analyses.binding_at(src.find("B(x)").unwrap() + 2).unwrap();
         let range = source_range(src, 0, 1);
         let info = declared_binding_hover(binding, range).unwrap();
@@ -1482,7 +1482,7 @@ mod tests {
 
         // An unresolved subject answers nothing rather than guessing.
         let unknown = "const v = match (e) { What(x) | Ever(x) => x };\n";
-        let analyses = crate::match_analyses(unknown, &[]);
+        let analyses = crate::pattern_analyses(unknown, &[]);
         let binding = analyses
             .binding_at(unknown.find("What(x)").unwrap() + 5)
             .unwrap();

@@ -2888,3 +2888,193 @@ function f(val b: Box) {
         e.message
     );
 }
+
+/* ------------------------------------------------------------------ */
+/* name resolution (TASK-102)                                          */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn misspelled_case_in_a_match_arm_names_the_case_meant() {
+    let e = err(r#"enum Shape { Circle(radius: number), Empty }
+const a = match (s) {
+  Circel(radius) => radius,
+  Empty => 0,
+};
+"#);
+    assert!(
+        e.message
+            .contains("enum Shape has no case `Circel` — did you mean `Circle`?"),
+        "{}",
+        e.message
+    );
+    // reported at the tag, not at the match
+    assert_eq!((e.line, e.col), (3, 3));
+}
+
+#[test]
+fn a_misspelled_case_is_reported_instead_of_the_exhaustiveness_it_breaks() {
+    // The typo removes Shape from the candidate table, which used to turn
+    // the exhaustiveness check off *silently* — the bug this pass fixes.
+    let e = err(r#"enum Shape { Circle(radius: number), Empty }
+const a = match (s) { Circel(radius) => radius, Empty => 0 };
+"#);
+    assert!(e.message.contains("has no case `Circel`"), "{}", e.message);
+    assert!(!e.message.contains("exhaustive"), "{}", e.message);
+}
+
+#[test]
+fn misspelled_case_in_let_else_and_if_let_is_reported() {
+    let e = err(r#"enum Shape { Circle(radius: number), Empty }
+function f(): number {
+  const Circel(radius) = s else { return 0; };
+  return radius;
+}
+"#);
+    assert!(e.message.contains("has no case `Circel`"), "{}", e.message);
+
+    let e = err(r#"enum Shape { Circle(radius: number), Empty }
+if let Circel(radius) = s { log(radius); }
+"#);
+    assert!(e.message.contains("has no case `Circel`"), "{}", e.message);
+    assert_eq!((e.line, e.col), (2, 8));
+}
+
+#[test]
+fn misspelled_field_names_the_field_meant() {
+    let e = err(r#"enum Shape { Circle(radius: number), Empty }
+const a = match (s) { Circle(radiuz) => radiuz, Empty => 0 };
+"#);
+    assert!(
+        e.message
+            .contains("enum Shape: case `Circle` has no field `radiuz` — did you mean `radius`?"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn misspelled_field_is_reported_in_let_else_too() {
+    let e = err(r#"enum Shape { Circle(radius: number), Empty }
+function f(): number {
+  const Circle(radiuz) = s else { return 0; };
+  return radiuz;
+}
+"#);
+    assert!(e.message.contains("has no field `radiuz`"), "{}", e.message);
+}
+
+#[test]
+fn misspelled_case_of_a_nested_pattern_is_resolved_through_the_field_type() {
+    let e = err(r#"enum Inner { Yes(n: number), No }
+enum Outer { Wrap(inner: Inner), Bare }
+const a = match (o) { Wrap(inner: Yess(n)) => n, Bare => 0 };
+"#);
+    assert!(
+        e.message
+            .contains("enum Inner has no case `Yess` — did you mean `Yes`?"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_misspelled_builtin_case_is_reported() {
+    let e = err("const n = match (o) { Some(value) => value, Non => 0 };\n");
+    assert!(
+        e.message
+            .contains("built-in enum Option has no case `Non` — did you mean `None`?"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_misspelled_case_of_an_imported_enum_names_its_origin() {
+    let externs = [token_extern()];
+    let opts = Options {
+        extern_enums: &externs,
+        ..Options::default()
+    };
+    let e = compile(
+        "const s = match (t) { Num(value) => value, Idnet(name) => 0, Eof => -1 };\n",
+        &opts,
+    )
+    .expect_err("expected a resolution error");
+    assert!(
+        e.message.contains(
+            "enum Token (imported from \"./token.rl\") has no case `Idnet` — did you mean `Ident`?"
+        ),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn tags_of_a_hand_written_union_are_not_resolution_errors() {
+    // A tag pattern matches any `kind`-tagged union (language.md §3.2), so
+    // names no declaration table holds are not wrong — they are the point.
+    let out = ok(
+        r#"type Msg = { kind: "Ping" } | { kind: "Pong"; n: number };
+const a = match (m) { Ping => 0, Pong(n) => n, _ => -1 };
+"#,
+    );
+    assert!(out.contains("case \"Ping\""));
+}
+
+#[test]
+fn a_shared_tag_name_does_not_drag_an_unrelated_union_into_an_enum() {
+    // `Empty` is also a Shape case, so the analysis identifies Shape — but
+    // `Full` is nobody's misspelling, so nothing is reported.
+    let out = ok(r#"enum Shape { Circle(radius: number), Empty }
+type Msg = { kind: "Empty" } | { kind: "Full"; n: number };
+const a = match (m) { Empty => 0, Full(n) => n };
+"#);
+    assert!(out.contains("case \"Full\""));
+}
+
+#[test]
+fn a_hand_written_payload_field_is_not_a_misspelling() {
+    // The tags are exactly Option's, so the analysis reads Option's
+    // declaration — but `v` is not `value` misspelled, so it stays quiet.
+    let out = ok("const n = match (o) { Some(v) => v, None => 0 };\n");
+    assert!(out.contains("const { v } = $rl_m"));
+}
+
+#[test]
+fn a_two_edit_case_typo_needs_a_match_to_corroborate_the_enum() {
+    // `Cyrcla` is two edits from `Circle`. In a match another arm names
+    // the enum, so the typo is reported...
+    let e = err(r#"enum Shape { Circle(radius: number), Empty }
+const a = match (s) { Cyrcla(radius) => radius, Empty => 0 };
+"#);
+    assert!(e.message.contains("has no case `Cyrcla`"), "{}", e.message);
+
+    // ...but a let-else has only its own tag, so two edits are not enough
+    // evidence that this is Shape at all. One edit is (`Circel` above).
+    let out = ok(r#"enum Shape { Circle(radius: number), Empty }
+function f(): number {
+  const Cyrcla(radius) = s else { return 0; };
+  return radius;
+}
+"#);
+    assert!(out.contains("\"Cyrcla\""));
+}
+
+#[test]
+fn a_misspelled_case_in_a_tuple_match_position_is_reported() {
+    // Payload cases make these rl enums rather than TypeScript ones.
+    let e = err(r#"enum Dir { North(dx: number), South }
+enum Speed { Fast(v: number), Slow }
+const n = match (d, s) {
+  (North(dx), Fast(v)) => dx + v,
+  (Nrth(dx), Slow) => dx,
+  (South, _) => 3,
+};
+"#);
+    assert!(
+        e.message
+            .contains("enum Dir has no case `Nrth` — did you mean `North`?"),
+        "{}",
+        e.message
+    );
+}

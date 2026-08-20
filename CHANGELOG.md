@@ -6,7 +6,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- **패턴의 이름 해석** (TASK-102). 패턴의 케이스 태그와 필드 이름을 선언에
+  대조하고, 오타로 보이면 rlc가 위치와 함께 보고한다 — `match`(튜플·중첩 포함),
+  let-else, `if let`이 같은 규칙을 쓴다.
+
+  ```
+  rlc: shape.rl:2:23: enum Shape has no case `Circel` — did you mean `Circle`?
+  rlc: shape.rl:5:29: enum Shape: case `Circle` has no field `radiuz` — did you mean `radius`?
+  ```
+
+  - 이전에는 이런 오타가 rlc를 그냥 통과해 **생성된 코드 위에서** tsc 에러
+    (`TS2678`/`TS2367`/`TS2339`)로 나타났고, 태그 오타의 경우 후보 표에서 enum이
+    사라져 **그 match의 소진성 검사가 조용히 꺼졌다.**
+  - 보고 조건은 "해석 실패"가 아니라 **"고칠 이름을 댈 수 있음"** 이다. 태그
+    패턴은 손으로 쓴 `kind` 유니언에도 쓸 수 있으므로(`language.md` §3.2),
+    선언 표에 없는 태그가 곧 오류는 아니다. 오타가 아닌 틀린 이름은 타입이
+    필요하므로 검사하지 않는다 ([§3.10](docs/reference/language.md)).
+
 ### Changed
+
+- **공개 API: `match_analyses` → `pattern_analyses`, `MatchAnalyses` →
+  `PatternAnalyses`** (TASK-102). 분석이 match 밖의 패턴 사이트(let-else,
+  `if let`)도 담게 되어 이름을 내용에 맞췄다. 새 필드는 `sites`(사이트별
+  subject와 바인딩 타입)와 `unresolved`(이름 해석 답)다.
 
 - **`andThen`이 에러 타입을 유니언으로 누적한다** (TASK-066). 이어 붙이는
   함수가 자기 방식으로 실패할 수 있다는 사실이 타입에 반영된다:

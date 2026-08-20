@@ -109,7 +109,8 @@
 | TASK-099 | 기록 위생 — INDEX 상태 정합성과 미등록 후속 등록 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-099](./TASK-099-records-hygiene.md) |
 | TASK-100 | TS enum을 scrutinee로 쓴 `match`를 rl 진단으로 | 대기 | — | — | [TASK-100](./TASK-100-ts-enum-match-diagnostic.md) |
 | TASK-101 | rl 구문의 Rust 수준 분석 격차 검토와 개선 계획 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-101](./TASK-101-rust-parity-review.md) |
+| TASK-102 | 패턴 사이트 일반화와 이름 해석 진단 (P1+P2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-102](./TASK-102-pattern-sites-and-resolution.md) |
 
 ## 다음 태스크 번호
 
-**TASK-102**
+**TASK-103**

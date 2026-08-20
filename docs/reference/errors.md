@@ -29,6 +29,44 @@ enum E { A(x: number]) }
 // rlc: file.rl:1:15: enum E: invalid type for field `x`: Expected ',', got ']'
 ```
 
+## 패턴의 이름 해석
+
+패턴 안의 케이스 태그와 필드 이름은 선언에 대조됩니다 — `match`(튜플·중첩
+포함), let-else, `if let` 모두 같은 규칙입니다.
+
+| 메시지 | 원인과 해결 |
+|--------|-------------|
+| ``<enum> has no case `<태그>` — did you mean `<제안>`?`` | 패턴의 태그가 그 enum의 케이스가 아니고, 어떤 케이스의 오타로 보입니다. 위치는 태그 |
+| ``<enum>: case `<태그>` has no field `<필드>` — did you mean `<제안>`?`` | 바인딩한 필드 이름이 그 케이스의 페이로드에 없고, 어떤 필드의 오타로 보입니다. 위치는 필드 이름 |
+
+```rl
+enum Shape { Circle(radius: number), Empty }
+const a = match (s) { Circel(radius) => radius, Empty => 0 };
+// rlc: file.rl:2:23: enum Shape has no case `Circel` — did you mean `Circle`?
+
+const b = match (s) { Circle(radiuz) => radiuz, Empty => 0 };
+// rlc: file.rl:5:29: enum Shape: case `Circle` has no field `radiuz` — did you mean `radius`?
+```
+
+**해석에 실패한 이름이 그 자체로 에러는 아닙니다.** 태그 패턴은 `kind` 문자열
+필드를 가진 **모든** 태그드 유니언에 쓸 수 있고([`language.md` §3.2](./language.md#32-의미)),
+손으로 쓴 유니언의 태그는 어떤 선언 표에도 없습니다. 그래서 rlc는 **고칠 이름을
+댈 수 있을 때만** 보고합니다 — 대소문자만 다르거나 편집 거리가 가까운 이름
+(글자 자리바꿈은 한 번의 편집으로 셉니다). 오타가 아닌 틀린 이름은 타입을 알아야
+판정할 수 있으므로 보고하지 않습니다.
+
+어느 enum에 대조할지는 사이트가 정합니다.
+
+- **`match`**: 암들의 태그를 가장 많이 포함하는 유일한 enum. 후보가 없거나
+  동점이면 검사하지 않습니다.
+- **let-else·`if let`**: 태그가 하나뿐이라 근거가 얇으므로 **편집 한 번** 거리의
+  케이스를 가진 enum이 유일할 때만 보고합니다. 태그가 정확히 해석되면 그
+  케이스의 필드는 match와 똑같이 검사합니다.
+- **중첩 패턴**: 바깥 필드의 **선언된 타입**이 가리키는 enum에 대조합니다.
+
+태그가 해석되지 않아 보고된 match는 **소진성을 함께 보고하지 않습니다** —
+원인(오타)을 고치면 그 답이 달라지기 때문입니다.
+
 ## match
 
 | 메시지 | 원인과 해결 |

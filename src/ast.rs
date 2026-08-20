@@ -220,6 +220,9 @@ pub(crate) struct LetElseStmt {
     pub kw: String,
     /// The pattern's case tag.
     pub tag: String,
+    /// Byte offset of the tag, for error reporting — the same role
+    /// [`TagPattern::tag_off`] plays for a match arm's pattern.
+    pub tag_off: usize,
     /// The pattern's bindings. Possibly empty — the parens are mandatory
     /// (`const Tag() = ... else ...;` checks the case without binding).
     pub bindings: Vec<Binding>,

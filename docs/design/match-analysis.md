@@ -49,13 +49,17 @@ seam(`typescript/backend.rs`·`service.rs`) 뒤에 격리. MatchAnalysis도 그
 
 ```
 src/analysis.rs            ← 순수 단계 (probe.rs·sema.rs와 같은 층위)
-   match_analyses(source, externs: &[EnumSymbol]) -> MatchAnalyses
+   pattern_analyses(source, externs: &[EnumSymbol]) -> PatternAnalyses
    · 선언 테이블: 로컬 enum > import된 enum > 내장 Option/Result
      (sema의 소진성 해석과 같은 섀도잉·후보 규칙)
    · match마다: subjects(위치별) / arms / coverage
    · arm마다: patternBindings(span-키) / bodyBindings(이름-키, 병합)
+   · sites: match 밖의 패턴 사이트(let-else, if let) — 같은 subject 해석과
+     같은 patternBindings (TASK-102)
+   · unresolved: 이름 해석의 답 (TASK-102, §7)
 
-sema.rs                    ← 소비자 (컴파일 에러): Coverage → 위치 있는 RlError
+sema.rs                    ← 소비자 (컴파일 에러): unresolved → RlError,
+                             Coverage → 위치 있는 RlError
 engine/language.rs         ← 소비자 (에디터 semantic 표면)
    hover:      TS 서비스 → (없으면) 대안 격리 프로브 → 선언 타입 폴백
    definition: TS 서비스 → (비면) body 참조 → 패턴 binding span들
@@ -205,3 +209,35 @@ extern 입력의 모양이 둘인 것(컴파일러의 `ExternEnum` — 태그와
 - 튜플 match의 위치별 후보 해석은 **첫 후보**를 쓴다(단일 match의 소진성
   후보 선택과 다르다). 이것은 이관 전 sema의 동작을 그대로 옮긴 것이고,
   위치마다 "만족시키는 후보"를 따지는 규칙으로 바꿀지는 열려 있다.
+
+## 7. 이름 해석 — 모델이 답하는 두 번째 질문 (TASK-102)
+
+TASK-096의 모델은 "이 바인딩의 타입은 무엇인가"만 답했다. 그 반대 방향 —
+**이 이름은 무엇을 가리키는가, 가리키는 것이 없으면 어떻게 되는가** — 은
+자리가 없었고, 그래서 태그 오타가 rlc를 통과해 글루 위의 tsc 에러가 됐다
+(`docs/design/rust-parity-analysis.md` §GAP-1).
+
+TASK-102이 그 질문을 같은 모델에 넣었다. rustc의 단계 구성과 같은 자리다:
+**resolve가 먼저, 그것을 전제로 하는 질문(소진성)이 나중.**
+
+```
+PatternAnalyses.unresolved: Vec<UnresolvedName>
+   { kind: Case | Field, name, span, enum_name, origin, tag, suggestion }
+```
+
+규범이 되는 규칙 둘:
+
+- **보고의 자격은 "고칠 이름을 댈 수 있음"이다.** 태그 패턴은 `kind` 필드를 가진
+  모든 태그드 유니언에 쓸 수 있으므로(`language.md` §3.2), 선언 표에 없는 태그가
+  곧 오류는 아니다. 그래서 분석은 해석 실패 자체를 내보내지 않고, **오타로
+  보이는 것만** 내보낸다(대소문자 무시 일치, 또는 편집 거리 — 자리바꿈은 한 번).
+  이 판단은 분석의 것이고, sema는 문안만 만든다 — `Coverage`와 같은 분업이다.
+- **지목(identify)은 세 번째 질의다.** 표에는 이미 두 질의가 있었다:
+  `resolve`(타입을 읽을 선언)와 `resolve_coverage`(소진성을 잴 선언). 해석은
+  "이 사이트가 말하는 enum"을 묻는다 — 모든 태그를 포함하는 후보, 없으면 가장
+  많이 포함하는 **유일한** 후보. 동점이거나 하나도 없으면 답하지 않는다.
+  단일 패턴 사이트(let-else·`if let`)는 다른 태그의 뒷받침이 없으므로 **편집
+  한 번** 거리로 면허를 좁힌다.
+
+남은 것은 타입이 있어야 아는 것들이다 — 오타가 아닌 틀린 이름, 스크루티니가
+정말 그 enum인지. 그것은 체커에 묻는 질문이고 P4의 몫이다.
