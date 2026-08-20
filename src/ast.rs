@@ -502,6 +502,11 @@ pub(crate) struct TagPattern {
     pub tag: String,
     /// Byte offset of the tag, for error reporting.
     pub tag_off: usize,
+    /// Byte just past the alternative — past the closing paren, or past the
+    /// tag for a bare one. With [`TagPattern::tag_off`] this is the span the
+    /// match analysis isolates when it asks about one alternative of an
+    /// or-pattern ([`crate::engine::analysis`]).
+    pub end: usize,
     /// `None` = no parens at all; `Some(vec)` = a (possibly empty) binding list.
     pub bindings: Option<Vec<Binding>>,
 }

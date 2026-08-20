@@ -279,7 +279,14 @@ fn or_pattern_binding_mismatch_is_error() {
     let e = err("const r = match (x) { A(v) | B(w) => v, _ => 0 };");
     assert!(
         e.message
-            .contains("or-pattern alternatives must bind the same fields"),
+            .contains("or-pattern alternatives must bind the same names"),
+        "{}",
+        e.message
+    );
+    // ... and the message names the binding that differs.
+    assert!(
+        e.message
+            .contains("`v` is bound in `A(...)` but not in `B(...)`"),
         "{}",
         e.message
     );
@@ -289,7 +296,7 @@ fn or_pattern_binding_mismatch_is_error() {
     let e = err("const r = match (x) { A(v) | B(v: w) => w, _ => 0 };");
     assert!(
         e.message
-            .contains("or-pattern alternatives must bind the same fields"),
+            .contains("`v` is bound in `A(...)` but not in `B(...)`"),
         "{}",
         e.message
     );
@@ -298,7 +305,34 @@ fn or_pattern_binding_mismatch_is_error() {
     let e = err("const r = match (x) { A | B(v) => 1, _ => 0 };");
     assert!(
         e.message
-            .contains("or-pattern alternatives must bind the same fields"),
+            .contains("`v` is bound in `B(...)` but not in `A(...)`"),
+        "{}",
+        e.message
+    );
+
+    // an arity mismatch names the extra binding
+    let e = err("const r = match (x) { A(v) | B(v, w) => v, _ => 0 };");
+    assert!(
+        e.message
+            .contains("`w` is bound in `B(...)` but not in `A(...)`"),
+        "{}",
+        e.message
+    );
+
+    // a wildcard-looking `_` is a binding like any other
+    let e = err("const r = match (x) { A(v) | B(_) => v, _ => 0 };");
+    assert!(
+        e.message
+            .contains("`v` is bound in `A(...)` but not in `B(...)`"),
+        "{}",
+        e.message
+    );
+
+    // same names, different fields: the pairing is named
+    let e = err("const r = match (x) { A(v) | B(w: v) => v, _ => 0 };");
+    assert!(
+        e.message
+            .contains("`v` is bound from field `v` in `A(...)` but from field `w` in `B(...)`"),
         "{}",
         e.message
     );
@@ -1629,7 +1663,13 @@ fn tuple_match_or_alternatives_must_bind_the_same_fields_per_element() {
     let e = err("const r = match (a, b) {\n  (Some(value) | None, _) => 1,\n  _ => 0,\n};\n");
     assert!(
         e.message
-            .contains("or-pattern alternatives must bind the same fields"),
+            .contains("or-pattern alternatives must bind the same names"),
+        "{}",
+        e.message
+    );
+    assert!(
+        e.message
+            .contains("`value` is bound in `Some(...)` but not in `None(...)`"),
         "{}",
         e.message
     );

@@ -1,0 +1,165 @@
+# Typed match analysis — MatchAnalysis 설계 기록
+
+TASK-096의 설계 기록이다. match를 "필요한 순간마다 부분 추론"에서
+**타입이 붙은 공통 분석 결과**로 정규화한 구조와, 그 결과를 에디터
+hover/definition이 소비하는 경로를 규범으로 남긴다.
+
+한 줄 원칙:
+
+> 패턴 안의 binding 위치와 arm body의 binding 참조는 **다른 질문**이다.
+> or-pattern은 대안별로 먼저 독립 분석하고, 병합은 body 쪽에서만 한다.
+
+## 1. 문제 — or-pattern binding 위치의 침묵
+
+```rl
+enum E { A(x: string), B(x: number) }
+const v = match (e) {
+  A(x) | B(x) => x
+};
+```
+
+기대 동작:
+
+- `A(x)`의 `x` hover → `string` (A의 payload)
+- `B(x)`의 `x` hover → `number` (B의 payload)
+- body의 `x` hover → `string | number` (병합)
+
+body의 `x`는 원래부터 동작한다: 방출된 `const { x } = $rl_m;`가
+`kind === "A" || kind === "B"`로 좁혀진 위치에 있으므로, verbatim으로
+매핑된 body 참조에 tsgo가 union 타입을 답한다.
+
+동작하지 않던 것은 **패턴 내부**의 두 `x`다. or-arm의 구조 분해는 모든
+대안을 한꺼번에 대표하므로 codegen이 **의도적으로 매핑 없이** 방출한다
+(TASK-080: 어느 한 대안의 span에 귀속시키면 rename이 그 대안 하나만
+고쳐 프로그램을 깨뜨린다 — `codegen/matches.rs::binding_list_lit`).
+매핑이 없으니 그 span은 TS 좌표로 번역되지 않고, 언어 서비스 질의가
+도달하지 못해 hover가 비어 있었다.
+
+즉 이것은 "매핑을 붙이면 되는 버그"가 아니다. 매핑을 붙여도 ① rename
+원자성 계약이 깨지고 ② 보이는 타입은 대안별 payload가 아니라 병합
+union이 된다. 대안별 타입은 **방출 형태 밖의 정보**다 — match를 typed
+분석 결과로 정규화해야 답할 수 있다.
+
+## 2. 구조 — 어느 계층에 무엇이 놓이나
+
+이 저장소는 tsgo의 구조를 따른다: 순수 파이프라인 단계(파서/sema/
+codegen), 그 위의 engine(Project/Snapshot/projection), TypeScript 도달은
+seam(`typescript/backend.rs`·`service.rs`) 뒤에 격리. MatchAnalysis도 그
+결을 따른다.
+
+```
+src/analysis.rs            ← 순수 단계 (probe.rs·sema.rs와 같은 층위)
+   match_analyses(source, externs: &[EnumSymbol]) -> MatchAnalyses
+   · 선언 테이블: 로컬 enum > import된 enum > 내장 Option/Result
+     (sema의 소진성 해석과 같은 섀도잉·후보 규칙)
+   · match마다: subjects(위치별) / arms / coverage
+   · arm마다: patternBindings(span-키) / bodyBindings(이름-키, 병합)
+
+engine/language.rs         ← 소비자 (에디터 semantic 표면)
+   hover:      TS 서비스 → (없으면) 대안 격리 프로브 → 선언 타입 폴백
+   definition: TS 서비스 → (비면) body 참조 → 패턴 binding span들
+   externs 수집: rl_imports + overlay/디스크 + enum_symbols
+                 (CLI가 sema에 extern_enums를 모아 주는 방식의 엔진판)
+```
+
+- **core에 두는 이유**: sema가 `extern_enums`를 입력으로 받듯 분석기도
+  소스 + 외부 선언만 받는 순수 함수다. 파일 시스템도 TypeScript도
+  모른다. 그래서 rlc(sema·CLI)와 엔진(LSP)이 **같은 모델**을 소비할 수
+  있고, 툴체인이 없는 환경에서도 항상 계산된다(semantic tokens와 같은
+  가용성 — TASK-093).
+- **engine이 소비하는 이유**: TypeScript에 묻는 행위는 엔진의 서비스
+  세션(`tsgo --lsp`) 소유다. tsgo 개념은 여전히 seam 밖으로 새지 않는다.
+
+### 모델 — 두 map을 분리한다
+
+```
+MatchAnalysis
+  subjects:  Vec<Option<MatchSubject>>   // 위치별 (튜플 match는 여러 개)
+  arms:      Vec<AnalyzedArm>
+  coverage:  Option<Coverage>            // §5
+
+MatchSubject   { enum_name, constructors: Vec<MatchConstructor> }
+MatchConstructor { tag, fields: Option<Vec<PayloadField>> }
+
+AnalyzedArm
+  pattern_bindings: Vec<PatternBinding>  // span-키: 출현마다 하나
+  body_bindings:    Vec<BodyBinding>     // 이름-키: 대안 병합
+
+PatternBinding { name, span, tag, ty, enum_name,
+                 group span, alternative span, alternatives }
+BodyBinding    { name, ty /* 병합; 하나라도 모르면 None */ }
+```
+
+`A(x) | B(x)`에서 pattern_bindings는 두 항목(각각 자기 constructor의
+payload 타입), body_bindings는 한 항목(`string | number`)이다. 이 둘을
+일찍 합치면 정확히 원래 버그가 된다 — 분리가 모델의 존재 이유다.
+
+or-pattern 분석 순서는 고정이다: ① 각 대안을 subject에 대해 **독립**
+분석해 출현별 span에 payload 타입을 기록 → ② 대안들의 binding 환경을
+**그다음에** 병합해 body 타입을 만든다.
+
+## 3. hover — 답의 우선순위
+
+요구 계약: TypeScript/tsgo가 이미 아는 타입을 중심에 두고, RL 자체
+추론은 폴백이다.
+
+```
+1. TS 서비스 (기존 경로 그대로)
+   — emit-map이 잇는 모든 위치: 단일-대안 binding, body 참조, 일반 TS.
+2. 대안 격리 프로브 (or-pattern binding span일 때)
+   — completion probe와 같은 "질의 한 번 동안만 다른 텍스트 서빙" 패턴.
+     source에서 그 or-group을 hover 대상 대안 하나로 치환해 방출하면
+     codegen이 단일-대안 경로를 타서 구조 분해가 **매핑되고** 그 tag로
+     narrowing된다. 그 위치에 hover를 물으면 제네릭 인스턴스화까지 된
+     정확한 payload 타입이 나온다. 답의 range는 사용자가 보던 원본
+     span이다(프로브는 사용자의 텍스트가 아니다). 질의 직후 실제
+     projection을 되서빙한다.
+3. 선언 테이블 폴백 (`const x: <declared>` + 출처 문서화)
+   — 프로브가 실패하거나(서비스 사망, 미완성 버퍼) 툴체인 자체가 없을
+     때. 내장/제네릭 enum은 선언 그대로 `T`를 보여준다 — 인스턴스화는
+     checker의 몫이라는 정직한 답. subject를 못 찾으면 답하지 않는다
+     (모르는 타입을 지어내지 않는다).
+```
+
+방출 코드(lowering)와 emit-map은 바꾸지 않았다. rename/references가
+or-pattern binding span에서 계속 침묵하는 것도 **의도된 유지**다:
+하나의 구조 분해를 공유하는 이상 span별 rename은 원자적으로 성립하지
+않고, 절반 rename을 거부하는 것이 기존 계약이다.
+
+definition은 같은 재료의 자연스러운 확장이다: or-arm body의 binding
+참조에 TS가 빈 답을 주면(목적지가 글루라 navigation이 버린다),
+그 arm의 대안별 패턴 binding span들을 목적지로 준다. 패턴 binding
+자신 위에서는 자기 span이 선언이다. 어느 쪽도 TS 답이 있으면 나서지
+않는다.
+
+## 4. or-pattern binding 집합 검증
+
+규칙 자체(모든 대안이 같은 (필드, 이름) 집합을 바인딩)는 sema의 기존
+에러다. TASK-096은 보고 채널을 새로 만들지 않고 **메시지를 지목형으로**
+바꿨다: `match: or-pattern alternatives must bind the same names —
+`y` is bound in `B(...)` but not in `A(...)`` 형태로, 이름 결손과
+필드-이름 불일치를 구분해 알려준다(`errors.md`). 에러 계층 계약(모든
+rl 수준 에러는 rlc가 위치와 함께 직접 보고)은 그대로다.
+
+## 5. coverage와 sema — 단계적 통합
+
+요구사항의 최종 그림은 소진성 검사도 같은 MatchAnalysis를 입력으로
+쓰는 것이다. 이번 작업은 비목표("exhaustive 알고리즘을 한 번에 갈아엎지
+않는다")에 따라 **모델에 coverage를 파생 데이터로 노출**하는 데까지만
+갔다: 단일 tag match에 대해 sema와 같은 규칙(무가드·비중첩 arm만 커버,
+로컬 > import > 내장 subject 해석)으로 covered/missing을 계산한다.
+보고 주체는 여전히 sema다. sema의 소진성 패스를 이 모델 위로 옮기는
+것(그리고 튜플 product coverage)은 후속 태스크다 — 두 구현이 어긋나면
+버그로 취급한다.
+
+## 6. 한계 (알고 유지하는 것)
+
+- 폴백 타입은 **선언 텍스트**다. narrowing·제네릭 인스턴스화·다른 rl
+  enum들의 TS-union scrutinee는 checker 경로(1·2번)만 안다. 이것이 "RL
+  타입체커를 만들지 않는다"는 계약의 형태다.
+- extern 수집은 CLI와 같은 1-hop(직접 상대 `.rl` import)이다.
+- `body_definitions`/`body_binding_at`은 body 안의 섀도잉을 모델링하지
+  않는다 — TS가 빈 답을 준 뒤에만 쓰는 폴백이라는 전제가 계약이다.
+- 대안 격리 프로브는 tsgo 통합 환경에서의 e2e 테스트가 아직 없다
+  (순수 부분 — 합성 소스·매핑 — 은 단위 테스트로 고정). vscode
+  `engine.test.ts` 계층에 추가하는 것이 후속이다.

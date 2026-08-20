@@ -76,6 +76,11 @@ src/
                  없으면 통과 — TS의 `result` 식별자 + 블록 문과의 구분)
   sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입, 소진성
                  (임포트 선언·내장 Option/Result 포함, 로컬 > 임포트 > 내장 섀도잉)
+  analysis.rs    typed match analysis — match의 공통 타입드 모델(MatchAnalysis):
+                 subject/constructor, 패턴 binding span별 payload 타입,
+                 arm body binding 병합 타입, coverage. 순수 단계(소스 +
+                 extern 선언 입력); 에디터 hover/definition의 폴백이 소비
+                 (match-analysis.md)
   val.rs         `val` 바인딩 수식자 — 수식자 인식(파서가 사용)과 토큰 스트림
                  위의 스코프·변경 경로·호출 권한 검사
   stdlib.rs      표준 라이브러리 — STD_SOURCE(공개) / BUILTIN_ENUMS(내부)

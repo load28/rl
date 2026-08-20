@@ -347,6 +347,7 @@ fn parse_tag_pattern(cur: &mut Cursor) -> Option<TagPattern> {
         return None;
     }
     let mut bindings = None;
+    let mut end = tag_span.end;
     if cur.at_punct(b'(') {
         let open = cur.idx;
         let close = cur.find_close()?;
@@ -354,11 +355,13 @@ fn parse_tag_pattern(cur: &mut Cursor) -> Option<TagPattern> {
             cur.sub(open + 1, close, cur.tokens[close].span.start),
             true,
         )?);
+        end = cur.tokens[close].span.end;
         cur.idx = close + 1;
     }
     Some(TagPattern {
         tag: tag.to_string(),
         tag_off: tag_span.start,
+        end,
         bindings,
     })
 }
@@ -396,6 +399,7 @@ pub(super) fn parse_bindings(mut cur: Cursor, allow_nested: bool) -> Option<Vec<
                 nested = Some(TagPattern {
                     tag: rhs.to_string(),
                     tag_off: rhs_span.start,
+                    end: cur.tokens[close].span.end,
                     bindings: Some(inner),
                 });
             } else {
