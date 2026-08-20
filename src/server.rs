@@ -22,6 +22,9 @@
 //! ← { "id": 3, "result": { "blocked", "diagnostics":
 //!        [{ "path", "line", "col", "message" }] } }
 //!
+//! → { "id": 4, "method": "semanticTokens", "params": { "text" } }
+//! ← { "id": 4, "result": { "tokens": [{ "range", "kind" }] } }
+//!
 //! ← { "id": N, "error": "sentence" }   // the request failed; the session lives
 //! ```
 //!
@@ -196,6 +199,7 @@ fn respond(sessions: &mut Sessions, line: &str) -> serde_json::Value {
                 }),
             })
         }),
+        "semanticTokens" => semantic_tokens(params),
         "tsDiagnostics" => semantic(sessions, params, |project, path, _position| {
             let diagnostics: Vec<_> = project
                 .service_diagnostics(path)?
@@ -329,6 +333,24 @@ fn check(params: &serde_json::Value) -> Result<serde_json::Value, String> {
         Err(e) => vec![json!({ "line": e.line, "col": e.col, "message": e.message })],
     };
     Ok(json!({ "diagnostics": diagnostics }))
+}
+
+/// Semantic tokens for a buffer: the parser's own classification of the
+/// ambiguous surface, in the buffer's coordinates. Like `check`, this is
+/// stateless and parse-only — it needs no project and no TypeScript
+/// toolchain, so the editor's colors stay exact in every environment.
+fn semantic_tokens(params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let tokens: Vec<_> = rlc::engine::semantic_tokens(text_param(params)?)
+        .into_iter()
+        .map(|token| {
+            json!({
+                "range": range_json(token.range),
+                "kind": token.kind.as_str(),
+            })
+        })
+        .collect();
+    Ok(json!({ "tokens": tokens }))
 }
 
 /// `--emit-map` for a buffer: the emitted TypeScript and its byte mappings.

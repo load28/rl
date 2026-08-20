@@ -37,6 +37,7 @@ import {
   ParameterInformation,
   ProposedFeatures,
   Range,
+  SemanticTokensBuilder,
   SignatureHelp,
   SignatureInformation,
   SymbolKind,
@@ -95,6 +96,14 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       renameProvider: true,
       documentSymbolProvider: true,
       codeActionProvider: { codeActionKinds: [CodeActionKind.QuickFix] },
+      // The parser's own classification of the ambiguous surface (a `flow`
+      // head split across lines, a plain function named `match`), layered
+      // over the TextMate grammar per the LSP semantic-tokens contract.
+      semanticTokensProvider: {
+        legend: { tokenTypes: SEMANTIC_TOKEN_TYPES, tokenModifiers: [] },
+        full: true,
+        range: false,
+      },
     },
   };
 });
@@ -1324,6 +1333,51 @@ function insertArms(
   const prefix = needsComma ? ", " : " ";
   return TextEdit.insert(closePos, `${prefix}${arms.join(" ")} `);
 }
+
+// -------------------------------------------------------- semantic tokens
+
+/** The legend, fixed at initialize: the LSP standard token types the engine
+ * reports (engine.ts `EngineSemanticToken.kind`), in the order the encoded
+ * data indexes them. */
+const SEMANTIC_TOKEN_TYPES = [
+  "keyword",
+  "enum",
+  "enumMember",
+  "variable",
+  "property",
+  "function",
+  "operator",
+];
+
+connection.languages.semanticTokens.on(async (params) => {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return { data: [] };
+  // Text-based and parse-only on the engine side: it answers for unsaved
+  // and untitled buffers alike, with or without a TypeScript toolchain.
+  const tokens = await engine.semanticTokens(
+    currentCompiler(),
+    doc.getText(),
+    logEngine,
+  );
+  // Engine unavailable: no answer beats a wrong empty one — the grammar's
+  // colors stand alone, exactly as they do for every other engine feature.
+  if (!tokens) return { data: [] };
+
+  const builder = new SemanticTokensBuilder();
+  const ordered = tokens
+    .map((token) => ({
+      line: token.range.start.line,
+      character: token.range.start.character,
+      length: token.range.end.character - token.range.start.character,
+      type: SEMANTIC_TOKEN_TYPES.indexOf(token.kind),
+    }))
+    .filter((token) => token.type >= 0 && token.length > 0)
+    .sort((a, b) => a.line - b.line || a.character - b.character);
+  for (const token of ordered) {
+    builder.push(token.line, token.character, token.length, token.type, 0);
+  }
+  return builder.build();
+});
 
 // ------------------------------------------------------------------- start
 

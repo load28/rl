@@ -120,7 +120,9 @@
     "compile": "tsc -b",
     "watch": "tsc -b -w",
     "postinstall": "cd client && npm install && cd ../server && npm install",
-    "test": "npm run compile && node --test \"server/out/test/*.test.js\""
+    "test": "npm run compile && node --test \"server/out/test/*.test.js\"",
+    "grammar": "node syntaxes/build.mjs",
+    "grammar:check": "node syntaxes/build.mjs --check"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

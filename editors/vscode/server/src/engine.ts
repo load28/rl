@@ -91,6 +91,12 @@ export interface EngineDiagnostic {
   warning: boolean;
 }
 
+export interface EngineSemanticToken {
+  range: EngineRange;
+  /** An LSP standard token-type string ("keyword", "enumMember", ...). */
+  kind: string;
+}
+
 /** How a request ended: an engine result, an engine error (the session is
  * fine, the request failed), or null — the server itself is unavailable. */
 export type EngineAnswer = { result: unknown } | { error: string } | null;
@@ -376,6 +382,25 @@ export function signatureHelp(
   onError?: (message: string) => void,
 ): Promise<EngineSignatureHelp | null> {
   return semantic(compiler, "signatureHelp", { path, position }, onError);
+}
+
+/** The parser's classification of the ambiguous surface — a `flow` head the
+ * grammar's same-line lookahead missed, a plain function named `match` the
+ * grammar over-colored. Text-based and parse-only on the engine side, so it
+ * answers even where the TypeScript toolchain is absent. `null` when the
+ * engine itself is unavailable (the grammar's colors then stand alone). */
+export async function semanticTokens(
+  compiler: string,
+  text: string,
+  onError?: (message: string) => void,
+): Promise<EngineSemanticToken[] | null> {
+  const result = await semantic<{ tokens: EngineSemanticToken[] }>(
+    compiler,
+    "semanticTokens",
+    { text },
+    onError,
+  );
+  return result?.tokens ?? null;
 }
 
 export async function tsDiagnostics(

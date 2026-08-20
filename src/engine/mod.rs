@@ -44,6 +44,7 @@ mod project;
 mod projection;
 mod semantics;
 mod snapshot;
+mod tokens;
 
 pub use language::{
     CompletionAnswer, CompletionDetail, CompletionItem, HoverInfo, Location, Position,
@@ -54,6 +55,7 @@ pub use project::{Blocked, CheckRequest, Project, collect_sources};
 pub use projection::ProjectedDocument;
 pub use semantics::{Checked, Declarations, Diagnostic, ModuleDeclaration};
 pub use snapshot::Snapshot;
+pub use tokens::{SemanticToken, SemanticTokenKind, semantic_tokens};
 
 use std::path::PathBuf;
 

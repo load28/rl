@@ -1,0 +1,340 @@
+{
+  "//": [
+    "rl 규칙 소스 — build.mjs가 vendored TypeScript 문법에 짜 넣어",
+    "syntaxes/rl.tmLanguage.json을 생성한다. 직접 rl.tmLanguage.json을",
+    "고치지 말 것 (테스트가 생성물 최신성을 검사한다).",
+    "",
+    "splices: TypeScript repository 항목 이름 -> 그 항목의 patterns 맨 앞에",
+    "끼워 넣을 include 목록. TextMate는 같은 오프셋에서 매치가 겹치면 먼저",
+    "나열된 규칙이 이기므로, 맨 앞 삽입으로 rl 규칙이 TS 규칙보다 우선한다.",
+    "",
+    "repository: rl 고유 규칙. 이름은 반드시 rl- 접두사 (TS 항목과의 충돌을",
+    "build.mjs가 검사한다). TS 유래 개념은 .ts 스코프를 재사용해 테마 호환을",
+    "지키고, rl 고유 개념만 .rl 스코프를 쓴다."
+  ],
+  "splices": {
+    "statements": ["#rl-statement"],
+    "expression": ["#rl-expression"],
+    "expression-operators": ["#rl-pipeline-operator"],
+    "function-parameters-body": ["#rl-val-parameter"],
+    "expression-inside-possibly-arrow-parens": ["#rl-val-parameter"],
+    "paren-expression": ["#rl-val-parameter"],
+    "for-loop:2": ["#rl-val-declaration-modifier"]
+  },
+  "repository": {
+    "rl-statement": {
+      "patterns": [
+        { "include": "#rl-val-declaration-modifier" },
+        { "include": "#rl-enum-declaration" },
+        { "include": "#rl-if-let" },
+        { "include": "#rl-let-else" },
+        { "include": "#rl-catch-val-parameters" }
+      ]
+    },
+    "rl-expression": {
+      "patterns": [
+        { "include": "#rl-match-expression" },
+        { "include": "#rl-result-expression" },
+        { "include": "#rl-flow-head" },
+        { "include": "#rl-try-expression" }
+      ]
+    },
+    "rl-val-declaration-modifier": {
+      "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(val)\\s+(?=(?:const|let|var)(?![_$[:alnum:]]))",
+      "captures": { "1": { "name": "storage.modifier.val.rl" } }
+    },
+    "rl-catch-val-parameters": {
+      "name": "meta.catch.parameters.rl",
+      "begin": "(?<![_$[:alnum:]])(catch)\\s*(\\()(?=[^)]*(?<![_$[:alnum:]])val\\s)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.trycatch.ts" },
+        "2": { "name": "punctuation.definition.parameters.begin.ts" }
+      },
+      "end": "\\)",
+      "endCaptures": { "0": { "name": "punctuation.definition.parameters.end.ts" } },
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#rl-val-parameter" },
+        { "include": "#parameter-name" },
+        { "include": "#parameter-type-annotation" }
+      ]
+    },
+    "rl-val-parameter": {
+      "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(val)(?=\\s+(?!as(?![_$[:alnum:]])|satisfies(?![_$[:alnum:]])|is(?![_$[:alnum:]])|in(?![_$[:alnum:]])|of(?![_$[:alnum:]])|instanceof(?![_$[:alnum:]])|keyof(?![_$[:alnum:]]))[$_[:alpha:]{\\[])",
+      "captures": { "1": { "name": "storage.modifier.val.rl" } }
+    },
+    "rl-enum-declaration": {
+      "name": "meta.enum.declaration.rl",
+      "begin": "(?<![_$[:alnum:]])(?<!const )(?<!declare )(?:\\b(export)\\s+)?\\b(enum)\\s+([$_[:alpha:]][$_[:alnum:]]*)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.export.ts" },
+        "2": { "name": "storage.type.enum.ts" },
+        "3": { "name": "entity.name.type.enum.ts" }
+      },
+      "end": "(?<=\\})|(?=[^\\s<{])",
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#type-parameters" },
+        { "include": "#rl-enum-body" }
+      ]
+    },
+    "rl-enum-body": {
+      "name": "meta.enum.body.rl",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.definition.block.ts" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.block.ts" } },
+      "patterns": [
+        { "include": "#comment" },
+        {
+          "name": "meta.enum.case.payload.rl",
+          "begin": "([$_[:alpha:]][$_[:alnum:]]*)\\s*(\\()",
+          "beginCaptures": {
+            "1": { "name": "variable.other.enummember.ts" },
+            "2": { "name": "punctuation.definition.parameters.begin.ts" }
+          },
+          "end": "\\)",
+          "endCaptures": { "0": { "name": "punctuation.definition.parameters.end.ts" } },
+          "patterns": [
+            { "include": "#comment" },
+            {
+              "begin": "([$_[:alpha:]][$_[:alnum:]]*)\\s*(\\??)\\s*(:)",
+              "beginCaptures": {
+                "1": { "name": "variable.other.property.rl" },
+                "2": { "name": "keyword.operator.optional.ts" },
+                "3": { "name": "keyword.operator.type.annotation.ts" }
+              },
+              "end": "(?=[,)])",
+              "patterns": [{ "include": "#type" }]
+            },
+            { "match": ",", "name": "punctuation.separator.comma.ts" }
+          ]
+        },
+        {
+          "begin": "=",
+          "beginCaptures": { "0": { "name": "keyword.operator.assignment.ts" } },
+          "end": "(?=[,}])",
+          "patterns": [{ "include": "#expression" }]
+        },
+        { "match": "[$_[:alpha:]][$_[:alnum:]]*", "name": "variable.other.enummember.ts" },
+        { "match": ",", "name": "punctuation.separator.comma.ts" }
+      ]
+    },
+    "rl-match-expression": {
+      "name": "meta.match.rl",
+      "begin": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(match)\\s*(?=\\()",
+      "beginCaptures": { "1": { "name": "keyword.control.match.rl" } },
+      "end": "(?<=\\})|(?=[^\\s({])",
+      "patterns": [
+        { "include": "#comment" },
+        {
+          "name": "meta.match.scrutinee.rl",
+          "begin": "\\(",
+          "end": "\\)",
+          "beginCaptures": { "0": { "name": "meta.brace.round.ts" } },
+          "endCaptures": { "0": { "name": "meta.brace.round.ts" } },
+          "patterns": [{ "include": "#expression" }]
+        },
+        { "include": "#rl-match-body" }
+      ]
+    },
+    "rl-match-body": {
+      "name": "meta.match.body.rl",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.definition.block.ts" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.block.ts" } },
+      "patterns": [
+        { "include": "#comment" },
+        { "match": ",", "name": "punctuation.separator.comma.ts" },
+        { "include": "#rl-match-arm" }
+      ]
+    },
+    "rl-match-arm": {
+      "name": "meta.match.arm.rl",
+      "begin": "(?=[^\\s,}])",
+      "end": "(?=[,}])",
+      "patterns": [
+        {
+          "name": "meta.match.arm.body.rl",
+          "begin": "=>",
+          "beginCaptures": { "0": { "name": "storage.type.function.arrow.ts" } },
+          "end": "(?=[,}])",
+          "patterns": [{ "include": "#expression" }]
+        },
+        { "include": "#rl-match-arm-pattern" }
+      ]
+    },
+    "rl-match-arm-pattern": {
+      "patterns": [
+        { "include": "#comment" },
+        {
+          "match": "(?<![_$[:alnum:]])_(?![_$[:alnum:]])",
+          "name": "keyword.control.wildcard.rl"
+        },
+        { "match": "\\|(?!\\|)", "name": "keyword.operator.or-pattern.rl" },
+        {
+          "begin": "(?<![_$[:alnum:]])if(?![_$[:alnum:]])",
+          "beginCaptures": { "0": { "name": "keyword.control.conditional.ts" } },
+          "end": "(?==>|[,}])",
+          "patterns": [{ "include": "#expression" }]
+        },
+        {
+          "match": "(?<![_$[:alnum:]])(true|false)(?![_$[:alnum:]])",
+          "name": "constant.language.boolean.ts"
+        },
+        { "include": "#rl-tag-pattern" },
+        { "include": "#string" },
+        { "include": "#numeric-literal" }
+      ]
+    },
+    "rl-tag-pattern": {
+      "patterns": [
+        {
+          "name": "meta.tag.pattern.rl",
+          "begin": "([$_[:alpha:]][$_[:alnum:]]*)\\s*(\\()",
+          "beginCaptures": {
+            "1": { "name": "variable.other.enummember.ts" },
+            "2": { "name": "punctuation.definition.parameters.begin.ts" }
+          },
+          "end": "\\)",
+          "endCaptures": { "0": { "name": "punctuation.definition.parameters.end.ts" } },
+          "patterns": [{ "include": "#rl-binding-list" }]
+        },
+        { "match": "[$_[:alpha:]][$_[:alnum:]]*", "name": "variable.other.enummember.ts" }
+      ]
+    },
+    "rl-binding-list": {
+      "patterns": [
+        { "include": "#comment" },
+        {
+          "begin": "([$_[:alpha:]][$_[:alnum:]]*)\\s*(:)\\s*",
+          "beginCaptures": {
+            "1": { "name": "variable.other.property.rl" },
+            "2": { "name": "punctuation.separator.key-value.ts" }
+          },
+          "end": "(?=[,)])",
+          "patterns": [
+            {
+              "name": "meta.tag.pattern.rl",
+              "begin": "([$_[:alpha:]][$_[:alnum:]]*)\\s*(\\()",
+              "beginCaptures": {
+                "1": { "name": "variable.other.enummember.ts" },
+                "2": { "name": "punctuation.definition.parameters.begin.ts" }
+              },
+              "end": "\\)",
+              "endCaptures": { "0": { "name": "punctuation.definition.parameters.end.ts" } },
+              "patterns": [{ "include": "#rl-binding-list" }]
+            },
+            { "match": "[$_[:alpha:]][$_[:alnum:]]*", "name": "variable.other.readwrite.ts" }
+          ]
+        },
+        { "match": "[$_[:alpha:]][$_[:alnum:]]*", "name": "variable.other.readwrite.ts" },
+        { "match": ",", "name": "punctuation.separator.comma.ts" }
+      ]
+    },
+    "rl-let-else": {
+      "name": "meta.let-else.rl",
+      "begin": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(const|let|var)\\s+(?=[$_[:alpha:]][$_[:alnum:]]*\\s*\\()",
+      "beginCaptures": { "1": { "name": "storage.type.ts" } },
+      "end": "(;)|(?=[},)])",
+      "endCaptures": { "1": { "name": "punctuation.terminator.statement.ts" } },
+      "patterns": [
+        { "include": "#comment" },
+        {
+          "begin": "=(?!=|>)",
+          "beginCaptures": { "0": { "name": "keyword.operator.assignment.ts" } },
+          "end": "(?=(?<![_$[:alnum:]])else(?![_$[:alnum:]])|;|[},)])",
+          "patterns": [{ "include": "#expression" }]
+        },
+        {
+          "match": "(?<![_$[:alnum:]])else(?![_$[:alnum:]])",
+          "name": "keyword.control.conditional.ts"
+        },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": { "0": { "name": "punctuation.definition.block.ts" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.block.ts" } },
+          "patterns": [{ "include": "#statements" }]
+        },
+        { "include": "#rl-tag-pattern" }
+      ]
+    },
+    "rl-if-let": {
+      "name": "meta.if-let.rl",
+      "begin": "(?<![_$[:alnum:]])(if)\\s+(let)(?=\\s+[$_[:alpha:]][$_[:alnum:]]*\\s*\\()",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.conditional.ts" },
+        "2": { "name": "storage.type.ts" }
+      },
+      "end": "(?=\\{)|(?=[;})])",
+      "patterns": [
+        { "include": "#comment" },
+        {
+          "begin": "=(?!=|>)",
+          "beginCaptures": { "0": { "name": "keyword.operator.assignment.ts" } },
+          "end": "(?=\\{|[;})])",
+          "patterns": [{ "include": "#expression" }]
+        },
+        { "include": "#rl-tag-pattern" }
+      ]
+    },
+    "rl-result-expression": {
+      "name": "meta.result.rl",
+      "begin": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(result)\\s*(\\{)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.result.rl" },
+        "2": { "name": "punctuation.definition.block.ts" }
+      },
+      "end": "\\}",
+      "endCaptures": { "0": { "name": "punctuation.definition.block.ts" } },
+      "patterns": [
+        { "include": "#rl-result-binding" },
+        { "include": "#statements" }
+      ]
+    },
+    "rl-result-binding": {
+      "patterns": [
+        {
+          "match": "(?<![_$[:alnum:]])(const|let|var)\\s+([$_[:alpha:]][$_[:alnum:]]*)\\s*(<-)",
+          "captures": {
+            "1": { "name": "storage.type.ts" },
+            "2": { "name": "variable.other.readwrite.ts" },
+            "3": { "name": "keyword.operator.result-bind.rl" }
+          }
+        },
+        {
+          "begin": "(?<![_$[:alnum:]])(const|let|var)(?![_$[:alnum:]])(?=[^;=]*(?<![_$[:alnum:]])<-)",
+          "beginCaptures": { "1": { "name": "storage.type.ts" } },
+          "end": "<-",
+          "endCaptures": { "0": { "name": "keyword.operator.result-bind.rl" } },
+          "patterns": [
+            { "include": "#comment" },
+            {
+              "begin": ":",
+              "beginCaptures": { "0": { "name": "keyword.operator.type.annotation.ts" } },
+              "end": "(?=<-)",
+              "patterns": [{ "include": "#type" }]
+            },
+            { "include": "#object-binding-pattern" },
+            { "include": "#array-binding-pattern" },
+            { "match": "[$_[:alpha:]][$_[:alnum:]]*", "name": "variable.other.readwrite.ts" }
+          ]
+        }
+      ]
+    },
+    "rl-pipeline-operator": {
+      "match": "\\|>",
+      "name": "keyword.operator.pipeline.rl"
+    },
+    "rl-flow-head": {
+      "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(flow)(?=\\s*\\|>)",
+      "captures": { "1": { "name": "keyword.control.flow.rl" } }
+    },
+    "rl-try-expression": {
+      "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(try)(?=\\s+[^\\s({<])",
+      "captures": { "1": { "name": "keyword.control.trycatch.ts" } }
+    }
+  }
+}

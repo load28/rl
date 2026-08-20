@@ -142,7 +142,7 @@ async function open(source: string) {
     };
   };
 
-  return { client, completion, stop: () => client.stop() };
+  return { client, uri, completion, stop: () => client.stop() };
 }
 
 const STD_SOURCE = [
@@ -257,6 +257,86 @@ test(
       for (const member of ["Ok", "Err", "mapP", "andThenP", "unwrapOrP"]) {
         assert.ok(labels.includes(member), `missing ${member} in: ${labels}`);
       }
+    } finally {
+      stop();
+    }
+  },
+);
+
+/* ---------------------------------------------------------------- semantic
+ * tokens — the parser's classification, layered over the grammar (TASK-093).
+ * Parse-only on the engine side, so unlike the completion cases these need
+ * only the compiler, never a TypeScript toolchain.
+ * -------------------------------------------------------------------------- */
+
+/** The legend the server declares — mirrored here to decode the response. */
+const TOKEN_TYPES = [
+  "keyword",
+  "enum",
+  "enumMember",
+  "variable",
+  "property",
+  "function",
+  "operator",
+];
+
+/** Decodes the LSP delta-encoded quintuples into absolute tokens. */
+function decodeTokens(
+  data: number[],
+): { line: number; character: number; length: number; type: string }[] {
+  const out = [];
+  let line = 0;
+  let character = 0;
+  for (let i = 0; i < data.length; i += 5) {
+    line += data[i];
+    character = data[i] === 0 ? character + data[i + 1] : data[i + 1];
+    out.push({
+      line,
+      character,
+      length: data[i + 2],
+      type: TOKEN_TYPES[data[i + 3]],
+    });
+  }
+  return out;
+}
+
+test(
+  "semantic tokens carry the parser's own classification",
+  { skip, timeout },
+  async () => {
+    const source = [
+      "declare function match(n: number): number;",
+      "const denied = match(1);",
+      "const composed = flow",
+      "  |> trim",
+      "  |> parse;",
+      "export function pick(shape: Shape): number {",
+      "  return match (shape) {",
+      "    Circle(r) => r,",
+      "    _ => 0,",
+      "  };",
+      "}",
+      "",
+    ].join("\n");
+    const { client, uri, stop } = await open(source);
+    try {
+      const response = await client.request("textDocument/semanticTokens/full", {
+        textDocument: { uri },
+      });
+      const tokens = decodeTokens(response.result?.data ?? []);
+      const at = (line: number, character: number) =>
+        tokens.find((t) => t.line === line && t.character === character);
+
+      // The call to a plain function named `match` is *denied* — reported
+      // as the function it is, overriding the grammar's keyword color.
+      assert.equal(at(1, 15)?.type, "function");
+      // A `flow` head whose first `|>` sits on the next line is *claimed* —
+      // the grammar's same-line lookahead cannot see it, the parser can.
+      assert.equal(at(2, 17)?.type, "keyword");
+      // The real match expression and its pattern.
+      assert.equal(at(6, 9)?.type, "keyword");
+      assert.equal(at(7, 4)?.type, "enumMember");
+      assert.equal(at(7, 11)?.type, "variable");
     } finally {
       stop();
     }

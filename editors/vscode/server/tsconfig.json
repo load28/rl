@@ -4,7 +4,10 @@
     "composite": true,
     "outDir": "out",
     "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    // vscode-oniguruma의 d.ts가 WebAssembly 네임스페이스(dom/webworker lib)를
+    // 참조한다 — 우리 lib은 es2020뿐이므로 선언 파일 검사만 건너뛴다.
+    "skipLibCheck": true
   },
   "include": ["src"]
 }
