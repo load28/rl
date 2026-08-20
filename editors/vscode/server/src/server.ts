@@ -297,9 +297,9 @@ const VALIDATION_DELAY_MS = 300;
  *
  * `rlc --check` answers from the text; what needs a *type* to decide — a
  * mutation through a `val` binding, exhaustiveness over the type a scrutinee
- * actually has — is the engine's typed pass. Fast as the engine has made it,
- * it still checks the whole project, so it runs on its own longer debounce
- * and publishes again when it lands.
+ * actually has — is the engine's typed pass. The engine keeps the compiler
+ * session alive and answers incrementally (TASK-076), so the pass runs on a
+ * debounce close to the base layer's and publishes again when it lands.
  *
  * Both layers are cached per document *version*. A typed answer computed for
  * an older version is not shown: its positions describe text that is no
@@ -307,7 +307,7 @@ const VALIDATION_DELAY_MS = 300;
  * one that arrives a moment later.
  * --------------------------------------------------------------------- */
 const pendingTypedCheck = new Map<string, NodeJS.Timeout>();
-const TYPED_CHECK_DELAY_MS = 1200;
+const TYPED_CHECK_DELAY_MS = 250;
 
 interface VersionedDiagnostics {
   version: number;
@@ -450,6 +450,12 @@ async function validate(doc: TextDocument): Promise<void> {
 
   const diagnostics = result.diagnostics.map((d) => toDiagnostic(current, d));
 
+  // The typed layer trails on its own debounce; schedule it before awaiting
+  // the TypeScript diagnostics so that wait does not push it further out.
+  // Publication order is safe either way: publish() merges the typed layer
+  // only when both layers were computed for this very version.
+  if (settings.typedChecks) scheduleTypedCheck(doc, compiler);
+
   if (settings.typeDiagnostics) {
     diagnostics.push(...(await typeDiagnostics(doc, compiler)));
     // Awaiting gave the buffer another chance to move on.
@@ -459,9 +465,6 @@ async function validate(doc: TextDocument): Promise<void> {
 
   baseDiagnostics.set(doc.uri, { version: doc.version, diagnostics });
   publish(doc.uri, doc.version, diagnostics);
-
-  // The typed layer trails on its own debounce; it republishes when it lands.
-  if (settings.typedChecks) scheduleTypedCheck(doc, compiler);
 }
 
 /** Drops every cached diagnostic layer for a document. */
