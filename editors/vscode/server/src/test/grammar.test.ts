@@ -373,6 +373,25 @@ test("markdown ```rl fences embed the rl grammar", async () => {
   }
 });
 
+test("markdown injection targets markdown and MDX hosts consistently", () => {
+  // injection 문법의 selector와 package.json의 injectTo는 같은 호스트 집합을
+  // 가리켜야 한다 — 한쪽만 고치면 에디터에서 주입이 조용히 빠진다.
+  const hosts = ["text.html.markdown", "source.mdx"];
+  const grammar = JSON.parse(
+    fs.readFileSync(path.join(syntaxesDir, "rl.markdown.tmLanguage.json"), "utf8"),
+  );
+  assert.equal(grammar.injectionSelector, hosts.map((h) => `L:${h}`).join(", "));
+  const pkg = JSON.parse(
+    fs.readFileSync(path.join(syntaxesDir, "..", "package.json"), "utf8"),
+  );
+  const entry = pkg.contributes.grammars.find(
+    (g: { scopeName: string }) => g.scopeName === grammar.scopeName,
+  );
+  assert.ok(entry, `package.json contributes no grammar for ${grammar.scopeName}`);
+  assert.deepEqual(entry.injectTo, hosts);
+  assert.deepEqual(entry.embeddedLanguages, { "meta.embedded.block.rl": "rl" });
+});
+
 test("generated grammar matches its sources (build.mjs --check)", () => {
   execFileSync(process.execPath, [path.join(syntaxesDir, "build.mjs"), "--check"], {
     stdio: "pipe",

@@ -1,8 +1,9 @@
 {
   "//": [
     "마크다운 코드 펜스 injection 문법 — ```rl / ~~~rl 펜스 안을 source.rl로",
-    "칠한다. VS Code는 각 언어 확장이 text.html.markdown에 주입하는 문법을",
-    "제공해야만 펜스 안을 그 언어로 하이라이팅한다.",
+    "칠한다. VS Code는 각 언어 확장이 호스트 문법(마크다운 text.html.markdown,",
+    "MDX source.mdx)에 주입하는 문법을 제공해야만 펜스 안을 그 언어로",
+    "하이라이팅한다. 주입 대상은 Svelte 확장(markdown.svelte.codeblock)과 같다.",
     "",
     "펜스 매칭 정규식과 스코프 이름은 VS Code 내장 마크다운 문법의",
     "fenced_code_block_* 패턴을 rl로 특수화한 사본이다 — 들여쓰기 백레퍼런스,",
@@ -11,7 +12,7 @@
     "손으로 쓴 정적 파일이다 (build.mjs 생성물 아님 — TASK-094 결정 1)."
   ],
   "scopeName": "markdown.rl.codeblock",
-  "injectionSelector": "L:text.html.markdown",
+  "injectionSelector": "L:text.html.markdown, L:source.mdx",
   "fileTypes": [],
   "patterns": [{ "include": "#rl-code-block" }],
   "repository": {

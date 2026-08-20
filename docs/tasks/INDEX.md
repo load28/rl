@@ -101,8 +101,9 @@
 | TASK-091 | 에디터 typed 진단 지연 단축 — debounce 축소와 예약 위치 이동 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-091](./TASK-091-editor-typed-check-latency.md) |
 | TASK-092 | VS Code 하이라이팅 재구축 — TS 문법 전체 확장 생성 파이프라인 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-092](./TASK-092-vscode-grammar-full-extension.md) |
 | TASK-093 | 엔진 semantic tokens — 파서 소유 분류를 LSP 표준으로 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-093](./TASK-093-semantic-tokens.md) |
-| TASK-094 | 마크다운 코드 펜스 rl 하이라이팅 — injection 문법 | 진행 중 | 2026-08-20 | — | [TASK-094](./TASK-094-markdown-fence-highlighting.md) |
+| TASK-094 | 마크다운 코드 펜스 rl 하이라이팅 — injection 문법 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-094](./TASK-094-markdown-fence-highlighting.md) |
+| TASK-095 | 펜스 injection을 MDX로 확장 — Svelte 확장과 동등하게 | 진행 중 | 2026-08-20 | — | [TASK-095](./TASK-095-mdx-fence-injection.md) |
 
 ## 다음 태스크 번호
 
-**TASK-095**
+**TASK-096**

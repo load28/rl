@@ -10,7 +10,7 @@ rl(`.rl`) 파일을 위한 VSCode 언어 서비스입니다. VSCode 공식
 | 기능 | 설명 |
 |------|------|
 | 문법 하이라이팅 | TypeScript 문법의 **완전 확장**(TSX 방식) — 업스트림 TS 문법 전체에 rl 규칙(enum·match·try·let-else·if let·`\|>`·`result`·`val`)을 짜 넣은 독립 문법이라, 함수 본문·초기화식 등 **모든 중첩 위치**에서 rl 구문이 칠해지고 순수 TS는 TS 문법과 동일하게 칠해진다. `syntaxes/rl.tmLanguage.json`은 생성물 — `syntaxes/src/`(vendored TS 문법 + rl 규칙)에서 `npm run grammar`로 재생성한다 |
-| 마크다운 코드 펜스 | 마크다운 문서의 ` ```rl `(또는 `~~~rl`) 펜스 안을 rl 문법으로 하이라이팅 — `syntaxes/rl.markdown.tmLanguage.json`이 내장 마크다운 문법(`text.html.markdown`)에 주입되어 펜스 내용을 `source.rl`로 임베드한다 |
+| 마크다운 코드 펜스 | 마크다운·MDX 문서의 ` ```rl `(또는 `~~~rl`) 펜스 안을 rl 문법으로 하이라이팅 — `syntaxes/rl.markdown.tmLanguage.json`이 내장 마크다운 문법(`text.html.markdown`)과 MDX 문법(`source.mdx`)에 주입되어 펜스 내용을 `source.rl`로 임베드한다 (Svelte 확장의 `markdown.svelte.codeblock`과 같은 구조) |
 | semantic 하이라이팅 | 문법(정규식)이 판별할 수 없는 것을 **파서의 분류**로 덮어쓴다 — LSP `semanticTokens` 표준: 파서가 청구한 `match`/`result`/`flow`/패턴 태그·바인딩은 확정 색으로, 청구하지 않은 look-alike(`match(...)`라는 이름의 함수 호출 등)는 평범한 식별자로 되돌린다. 엔진 쪽은 파스 전용·무상태라 TypeScript 툴체인 없이도 동작 |
 | 파일 아이콘 | 탐색기·탭에서 `.rl` 파일에 "RL" 배지 아이콘 표시 (라이트/다크 테마별). 언어 기본 아이콘을 지원하는 파일 아이콘 테마(기본 Seti 포함)에서 보이며, 자체 `.rl` 아이콘을 정의한 테마가 있으면 그쪽이 우선 |
 | 진단 (rl) | 편집할 때마다 **실제 컴파일러**(`rlc --check`)를 실행해 에러를 표시 — 에디터의 에러는 항상 컴파일러와 일치 |

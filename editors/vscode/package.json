@@ -46,7 +46,8 @@
         "scopeName": "markdown.rl.codeblock",
         "path": "./syntaxes/rl.markdown.tmLanguage.json",
         "injectTo": [
-          "text.html.markdown"
+          "text.html.markdown",
+          "source.mdx"
         ],
         "embeddedLanguages": {
           "meta.embedded.block.rl": "rl"
