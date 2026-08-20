@@ -1,9 +1,9 @@
 # TASK-073: TypeScript 네이티브 백엔드 — 단일 프로젝트 그래프
 
-- **상태**: 진행 중
+- **상태**: 완료
 - **시작일**: 2026-08-19
-- **완료일**: —
-- **커밋**: —
+- **완료일**: 2026-08-19
+- **커밋**: 2d1dbc1
 
 ## 목적
 
@@ -269,4 +269,16 @@ Phase 7의 일이다. `.d.ts.map`은 `rlc::build_sidecar`를 재사용해 붙일
 
 ## 결과
 
-*작업 완료 시 기록.*
+핵심 결과: `rlc`의 타입 계층이 TypeScript 7 네이티브 컴파일러의 API 서버
+위에서 돌고, `.ts`와 `.rl`이 **하나의 실제 프로젝트 그래프** 안에서 서로를
+본다 (`2d1dbc1`). 변경 파일: `src/typescript/{mod,backend,native,mapper}.rs`,
+`src/typescript/host.mjs`, `src/main.rs`, `src/lib.rs`, `tests/native.rs`(신규).
+
+범위에 있던 마지막 항목 — "기능 parity 확인 후 `types_host.mjs` 제거" — 는
+TASK-075(`0dddbdd`)에서 완료됐고, 에디터/언어 서비스 이전은 예정대로
+TASK-074·TASK-076·TASK-077이 이어받아 완료했다. 즉 이 태스크의 범위는
+전부 전달된 상태이며, 그 사이 상태 값만 `진행 중`으로 남아 있던 것을
+TASK-099에서 정정했다 (전환 완료 사실은 TASK-079 문서에도 기록돼 있다).
+
+후속 태스크: [TASK-100](./TASK-100-ts-enum-match-diagnostic.md) — 위 "이슈 3"의
+근본 해결(TS enum을 scrutinee로 쓴 `match`를 rl 진단으로 보고).

@@ -67,8 +67,8 @@ mod val;
 mod verify;
 
 pub use analysis::{
-    AnalyzedArm, BodyBinding, Coverage, MatchAnalyses, MatchAnalysis, MatchConstructor,
-    MatchSubject, PatternBinding, PayloadField, match_analyses,
+    AnalyzedArm, BodyBinding, Coverage, CoveredEnum, MatchAnalyses, MatchAnalysis,
+    MatchConstructor, MatchSubject, Origin, PatternBinding, PayloadField, match_analyses,
 };
 pub use error::CompileError;
 pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};

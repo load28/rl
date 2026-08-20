@@ -74,16 +74,17 @@ src/
                  head가 `flow` 하나면 함수 합성)
     results.rs   `result { ... }` 계산 블록 구조 파싱 (`<-` 바인딩이 하나도
                  없으면 통과 — TS의 `result` 식별자 + 블록 문과의 구분)
-  sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입, 소진성
-                 (임포트 선언·내장 Option/Result 포함, 로컬 > 임포트 > 내장 섀도잉)
+  sema.rs        의미 검사 — 중복 케이스/암, 와일드카드 위치, 필드 타입,
+                 소진성 **보고** (계산은 analysis.rs의 Coverage)
   analysis.rs    typed match analysis — match의 공통 타입드 모델(MatchAnalysis):
                  subject/constructor, 패턴 binding span별 payload 타입,
-                 arm body binding 병합 타입, coverage. 순수 단계(소스 +
-                 extern 선언 입력); 에디터 hover/definition의 폴백이 소비
-                 (match-analysis.md)
+                 arm body binding 병합 타입, 그리고 소진성의 단일 원천인
+                 Coverage(단일·튜플 곱집합, 선언 표·내장 Option/Result 포함).
+                 순수 단계(소스 + extern 선언 입력); sema(보고)와 에디터
+                 hover/definition 폴백이 함께 소비 (match-analysis.md)
   val.rs         `val` 바인딩 수식자 — 수식자 인식(파서가 사용)과 토큰 스트림
                  위의 스코프·변경 경로·호출 권한 검사
-  stdlib.rs      표준 라이브러리 — STD_SOURCE(공개) / BUILTIN_ENUMS(내부)
+  stdlib.rs      표준 라이브러리 — STD_SOURCE / STD_SPECIFIER (공개)
   stdlib/
     rl_std.ts    std 모듈 본체 (Option/Result + 콤비네이터, --emit-std로 방출)
   codegen/

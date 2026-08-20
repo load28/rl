@@ -23,9 +23,11 @@
 //!   has no emitted counterpart; the toolchain may be absent entirely).
 //!   That priority is the module's design contract, not an accident: see
 //!   `docs/design/match-analysis.md`.
-//! - Exhaustiveness stays sema's to report. [`Coverage`] here is the same
-//!   resolution (local > imported > built-in, first enum containing every
-//!   arm tag) exposed as data, so consumers share one subject model.
+//! - Exhaustiveness is *computed* here and *reported* by [`crate::sema`]:
+//!   the declaration table (local > imported > built-in), the covering
+//!   rule, and the tuple product all live in this module, and sema turns
+//!   the resulting [`Coverage`] into positioned errors. One rule, one
+//!   implementation.
 //!
 //! The two maps the analysis keeps apart are the point of the model:
 //!
@@ -38,8 +40,8 @@
 //!
 //! Merging these early is exactly the bug this model exists to prevent.
 
-use crate::EnumSymbol;
 use crate::ast::*;
+use crate::{EnumSymbol, ExternEnum};
 
 /// The typed analysis of every `match` in one source file, nested ones
 /// included, in source order. Produced by [`match_analyses`].
@@ -64,11 +66,13 @@ pub struct MatchAnalysis {
     pub subjects: Vec<Option<MatchSubject>>,
     /// The arms, in source order.
     pub arms: Vec<AnalyzedArm>,
-    /// Tag coverage, for a single wildcard-free tag match with a resolved
-    /// subject. `None` otherwise: a wildcard covers everything, a literal
-    /// match's coverage is a question about a TypeScript type
-    /// ([`crate::literal_matches`]), and tuple coverage is a product sema
-    /// still owns whole.
+    /// The exhaustiveness answer — for a single match over its subject's
+    /// tags, for a tuple match over the product of its positions. `None`
+    /// when the question does not arise: a wildcard arm covers everything,
+    /// the tags identify no known enum, or the match is a literal one
+    /// (whose exhaustiveness is a question about a TypeScript type —
+    /// [`crate::literal_matches`]). This is what sema reports on; there is
+    /// no second implementation of the rule.
     pub coverage: Option<Coverage>,
 }
 
@@ -171,15 +175,70 @@ pub struct BodyBinding {
     pub ty: Option<String>,
 }
 
-/// Tag coverage of a single wildcard-free match with a resolved subject —
-/// the same rule sema enforces, exposed as data.
+/// The exhaustiveness answer for one `match` — the single source sema's
+/// error and every other consumer read (`docs/design/match-analysis.md` §5).
+///
+/// A single match is the arity-1 case: one position, one tag per row. A
+/// tuple match enumerates the cartesian product of its positions, so a row
+/// is a combination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Coverage {
-    /// Tags covered by unguarded, nested-free arms (a guard may be false
-    /// and a nested pattern may mismatch, so those arms cover nothing).
+    /// One entry per scrutinee position: the enum whose cases that position
+    /// enumerates. `None` for a *universal* position of a tuple match —
+    /// every arm writes `_` there, so it constrains nothing.
+    pub positions: Vec<Option<CoveredEnum>>,
+    /// Tags covered by covering arms — unguarded and nested-free, since a
+    /// guard may be false and a nested pattern may mismatch. Single matches
+    /// only: a tuple arm covers a *combination*, not a tag, so this is
+    /// empty there and [`Coverage::missing`] carries the whole answer.
     pub covered: Vec<String>,
-    /// The subject's tags no covering arm handles.
-    pub missing: Vec<String>,
+    /// The combinations no covering arm handles, in the subject's case
+    /// order: one row per uncovered combination, one entry per position
+    /// (`None` at a universal position). Empty when the match is
+    /// exhaustive.
+    pub missing: Vec<Vec<Option<String>>>,
+}
+
+impl Coverage {
+    /// The arity-1 view of [`Coverage::missing`] — the tags a single match
+    /// leaves uncovered. Empty for a tuple match's coverage.
+    pub fn missing_tags(&self) -> Vec<&str> {
+        if self.positions.len() != 1 {
+            return Vec::new();
+        }
+        self.missing
+            .iter()
+            .filter_map(|row| row.first().and_then(Option::as_deref))
+            .collect()
+    }
+}
+
+/// An enum a [`Coverage`] position enumerates, with where it was declared —
+/// the origin an error message names ("enum E", "built-in enum Option",
+/// "enum T (imported from \"./token.rl\")").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoveredEnum {
+    /// The enum's name in this file's scope.
+    pub name: String,
+    /// Where the declaration came from.
+    pub origin: Origin,
+}
+
+/// Where a declaration in the analysis' table came from. Resolution runs
+/// local > imported > built-in, so a nearer origin shadows a farther one of
+/// the same name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// Declared in the file being analyzed.
+    Local,
+    /// Imported from another module.
+    Imported {
+        /// The specifier as written (`./token.rl`), when the collector
+        /// recorded it — an error message quotes it to say *which* enum.
+        from: Option<String>,
+    },
+    /// A built-in enum (`Option`, `Result`).
+    Builtin,
 }
 
 impl MatchAnalyses {
@@ -279,66 +338,195 @@ impl MatchAnalyses {
 pub fn match_analyses(source: &str, externs: &[EnumSymbol]) -> MatchAnalyses {
     let program = crate::parser::parse(source);
     let table = Table::build(&program, externs);
+    analyze(&program, &table, Depth::Full)
+}
+
+/// The coverage-only analysis of an already-parsed program — sema's input,
+/// so exhaustiveness and the editor's model answer from one implementation
+/// of the rule.
+///
+/// `externs` are the imported declarations the CLI collects for sema
+/// ([`crate::Options::extern_enums`]); they carry tags without field types,
+/// which is all coverage needs. Pattern bindings are therefore not analyzed
+/// and every arm comes back empty — [`match_analyses`] is the entry point
+/// for those.
+pub(crate) fn coverage_analyses(program: &Program, externs: &[ExternEnum]) -> MatchAnalyses {
+    let table = Table::build_from_tags(program, externs);
+    analyze(program, &table, Depth::CoverageOnly)
+}
+
+/// How much of each match to analyze — bindings cost work no coverage
+/// consumer would read.
+#[derive(Clone, Copy, PartialEq)]
+enum Depth {
+    Full,
+    CoverageOnly,
+}
+
+fn analyze(program: &Program, table: &Table, depth: Depth) -> MatchAnalyses {
     let mut analyses = MatchAnalyses::default();
-    walk(&program, &table, &mut analyses);
+    walk(program, table, depth, &mut analyses);
     analyses
+}
+
+/// One candidate enum of the analysis' declaration table.
+struct Entry {
+    /// The enum's name in the analyzed file's scope.
+    name: String,
+    /// Where it was declared — carried into [`Coverage`] so a consumer can
+    /// name the origin without a table of its own.
+    origin: Origin,
+    /// The constructors, in declaration order. An imported declaration that
+    /// only carried tags ([`ExternEnum`], sema's input) has `fields: None`
+    /// throughout — enough for coverage, which is all that path asks.
+    constructors: Vec<MatchConstructor>,
 }
 
 /// The candidate enums a match's subject can resolve to, in shadowing
 /// order — the analysis' declaration table.
 struct Table {
-    /// `(in-scope name, constructors)`, local > imported > built-in, each
-    /// name once (the nearer origin wins, as in sema).
-    entries: Vec<(String, Vec<MatchConstructor>)>,
+    /// Local declarations first (in source order), then imported ones, then
+    /// the built-ins; each name appears once, so the nearer origin wins.
+    entries: Vec<Entry>,
 }
 
 impl Table {
+    /// The table an editor-side analysis uses: imported declarations with
+    /// their field types ([`EnumSymbol`]), so pattern bindings get types.
     fn build(program: &Program, externs: &[EnumSymbol]) -> Table {
-        let mut entries: Vec<(String, Vec<MatchConstructor>)> = Vec::new();
+        Table::assemble(
+            program,
+            externs
+                .iter()
+                .map(|e| Entry {
+                    name: e.name.clone(),
+                    origin: Origin::Imported { from: None },
+                    constructors: e
+                        .cases
+                        .iter()
+                        .map(|c| MatchConstructor {
+                            tag: c.tag.clone(),
+                            fields: c.fields.as_ref().map(|fields| {
+                                fields
+                                    .iter()
+                                    .map(|f| PayloadField {
+                                        name: f.name.clone(),
+                                        optional: f.optional,
+                                        ty: f.ty.clone(),
+                                    })
+                                    .collect()
+                            }),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        )
+    }
+
+    /// The table the compiler's own passes use: imported declarations as
+    /// the CLI collects them for sema ([`ExternEnum`] — tags and the
+    /// specifier they came from, no field types).
+    fn build_from_tags(program: &Program, externs: &[ExternEnum]) -> Table {
+        Table::assemble(
+            program,
+            externs
+                .iter()
+                .map(|e| Entry {
+                    name: e.name.clone(),
+                    origin: Origin::Imported {
+                        from: e.from.clone(),
+                    },
+                    constructors: e
+                        .tags
+                        .iter()
+                        .map(|tag| MatchConstructor {
+                            tag: tag.clone(),
+                            fields: None,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        )
+    }
+
+    fn assemble(program: &Program, externs: Vec<Entry>) -> Table {
+        let mut entries: Vec<Entry> = Vec::new();
         collect_local_enums(program, &mut entries);
         for e in externs {
-            if entries.iter().any(|(name, _)| *name == e.name) {
+            if entries.iter().any(|entry| entry.name == e.name) {
                 continue;
             }
-            entries.push((
-                e.name.clone(),
-                e.cases
-                    .iter()
-                    .map(|c| MatchConstructor {
-                        tag: c.tag.clone(),
-                        fields: c.fields.as_ref().map(|fields| {
-                            fields
-                                .iter()
-                                .map(|f| PayloadField {
-                                    name: f.name.clone(),
-                                    optional: f.optional,
-                                    ty: f.ty.clone(),
-                                })
-                                .collect()
-                        }),
-                    })
-                    .collect(),
-            ));
+            entries.push(e);
         }
         for (name, constructors) in builtin_enums() {
-            if entries.iter().any(|(n, _)| *n == name) {
+            if entries.iter().any(|entry| entry.name == name) {
                 continue;
             }
-            entries.push((name, constructors));
+            entries.push(Entry {
+                name,
+                origin: Origin::Builtin,
+                constructors,
+            });
         }
         Table { entries }
     }
 
     /// The first enum whose cases contain every tag — `None` for an empty
     /// tag set (nothing identifies an enum) or when no candidate fits.
+    ///
+    /// This is the *type* answer: which declaration a pattern binding reads
+    /// its field type from. Exhaustiveness asks a different question and
+    /// uses [`Table::resolve_coverage`].
     fn resolve(&self, tags: &[&str]) -> Option<(&str, &[MatchConstructor])> {
         if tags.is_empty() {
             return None;
         }
+        self.candidates(tags)
+            .first()
+            .map(|e| (e.name.as_str(), e.constructors.as_slice()))
+    }
+
+    /// Every candidate for a tag set, in shadowing order: the enums whose
+    /// cases contain every tag the arms use.
+    fn candidates(&self, tags: &[&str]) -> Vec<&Entry> {
         self.entries
             .iter()
-            .find(|(_, cases)| tags.iter().all(|t| cases.iter().any(|c| c.tag == *t)))
-            .map(|(name, cases)| (name.as_str(), cases.as_slice()))
+            .filter(|e| {
+                tags.iter()
+                    .all(|t| e.constructors.iter().any(|c| c.tag == *t))
+            })
+            .collect()
+    }
+
+    /// The exhaustiveness answer for one tag set: the candidate the covering
+    /// arms satisfy if there is one, otherwise the candidate they leave
+    /// fewest cases of — the rule sema has always reported, now with one
+    /// implementation. `None` when no candidate fits the tags at all: rlc
+    /// has no type information for such a match, so it is not checked.
+    fn resolve_coverage(
+        &self,
+        tags: &[&str],
+        covered: &[String],
+    ) -> Option<(CoveredEnum, Vec<String>)> {
+        if tags.is_empty() {
+            return None;
+        }
+        let mut best: Option<(&Entry, Vec<String>)> = None;
+        for entry in self.candidates(tags) {
+            let missing: Vec<String> = entry
+                .constructors
+                .iter()
+                .filter(|c| !covered.contains(&c.tag))
+                .map(|c| c.tag.clone())
+                .collect();
+            if missing.is_empty() {
+                return Some((entry.covered_enum(), Vec::new()));
+            }
+            if best.as_ref().is_none_or(|(_, m)| missing.len() < m.len()) {
+                best = Some((entry, missing));
+            }
+        }
+        best.map(|(entry, missing)| (entry.covered_enum(), missing))
     }
 
     /// The enum a declared type text names: a bare (possibly dotted)
@@ -363,12 +551,21 @@ impl Table {
         let base = &trimmed[..base_len];
         self.entries
             .iter()
-            .find(|(name, _)| name == base)
-            .map(|(name, cases)| (name.as_str(), cases.as_slice()))
+            .find(|e| e.name == base)
+            .map(|e| (e.name.as_str(), e.constructors.as_slice()))
     }
 }
 
-fn collect_local_enums(program: &Program, entries: &mut Vec<(String, Vec<MatchConstructor>)>) {
+impl Entry {
+    fn covered_enum(&self) -> CoveredEnum {
+        CoveredEnum {
+            name: self.name.clone(),
+            origin: self.origin.clone(),
+        }
+    }
+}
+
+fn collect_local_enums(program: &Program, entries: &mut Vec<Entry>) {
     for segment in &program.segments {
         if let Segment::Enum(decl) = segment {
             let constructors = decl
@@ -389,19 +586,24 @@ fn collect_local_enums(program: &Program, entries: &mut Vec<(String, Vec<MatchCo
                 })
                 .collect();
             // Later declarations win, as in sema's registry.
-            if let Some(entry) = entries.iter_mut().find(|(name, _)| *name == decl.name) {
-                entry.1 = constructors;
+            if let Some(entry) = entries.iter_mut().find(|e| e.name == decl.name) {
+                entry.constructors = constructors;
             } else {
-                entries.push((decl.name.clone(), constructors));
+                entries.push(Entry {
+                    name: decl.name.clone(),
+                    origin: Origin::Local,
+                    constructors,
+                });
             }
         }
     }
 }
 
-/// `Option`/`Result` as the analysis sees them, matching
-/// [`crate::stdlib::BUILTIN_ENUMS`] (tags) and the standard library module
-/// (field names). Payload types are the declarations' type parameters —
-/// the honest declared answer; instantiation is the checker's.
+/// `Option`/`Result` as every consumer sees them: the enums a file gets
+/// without declaring them. Tags and field names match the standard library
+/// module (`src/stdlib/rl_std.ts`); payload types are the declarations'
+/// type parameters — the honest declared answer, since instantiation is the
+/// checker's. This is the only table of the built-ins in the compiler.
 fn builtin_enums() -> Vec<(String, Vec<MatchConstructor>)> {
     let field = |name: &str, ty: &str| PayloadField {
         name: name.to_string(),
@@ -438,7 +640,7 @@ fn builtin_enums() -> Vec<(String, Vec<MatchConstructor>)> {
     ]
 }
 
-fn walk(program: &Program, table: &Table, out: &mut MatchAnalyses) {
+fn walk(program: &Program, table: &Table, depth: Depth, out: &mut MatchAnalyses) {
     for segment in &program.segments {
         match segment {
             Segment::Verbatim(_)
@@ -446,54 +648,54 @@ fn walk(program: &Program, table: &Table, out: &mut MatchAnalyses) {
             | Segment::Enum(_)
             | Segment::ValModifier(_) => {}
             Segment::Match(expr) => {
-                out.matches.push(analyze_match(expr, table));
-                walk(&expr.scrutinee, table, out);
+                out.matches.push(analyze_match(expr, table, depth));
+                walk(&expr.scrutinee, table, depth, out);
                 for arm in &expr.arms {
                     if let Some(guard) = &arm.guard {
-                        walk(&guard.expr, table, out);
+                        walk(&guard.expr, table, depth, out);
                     }
-                    walk(&arm.body, table, out);
+                    walk(&arm.body, table, depth, out);
                 }
             }
             Segment::TupleMatch(expr) => {
-                out.matches.push(analyze_tuple_match(expr, table));
+                out.matches.push(analyze_tuple_match(expr, table, depth));
                 for (_, scrutinee) in &expr.scrutinees {
-                    walk(scrutinee, table, out);
+                    walk(scrutinee, table, depth, out);
                 }
                 for arm in &expr.arms {
                     if let Some(guard) = &arm.guard {
-                        walk(&guard.expr, table, out);
+                        walk(&guard.expr, table, depth, out);
                     }
-                    walk(&arm.body, table, out);
+                    walk(&arm.body, table, depth, out);
                 }
             }
-            Segment::Try(stmt) => walk(&stmt.expr, table, out),
+            Segment::Try(stmt) => walk(&stmt.expr, table, depth, out),
             Segment::LetElse(stmt) => {
-                walk(&stmt.expr, table, out);
-                walk(&stmt.else_body, table, out);
+                walk(&stmt.expr, table, depth, out);
+                walk(&stmt.else_body, table, depth, out);
             }
-            Segment::IfLet(stmt) => walk_if_let(stmt, table, out),
+            Segment::IfLet(stmt) => walk_if_let(stmt, table, depth, out),
             Segment::Pipe(pipe) => {
                 if let Some(head) = &pipe.head {
-                    walk(head, table, out);
+                    walk(head, table, depth, out);
                 }
                 for step in &pipe.steps {
-                    walk(&step.body, table, out);
+                    walk(&step.body, table, depth, out);
                 }
             }
             Segment::ResultBlock(block) => {
                 for item in &block.items {
                     match item {
-                        ResultItem::Stmts(stmts) => walk(stmts, table, out),
-                        ResultItem::Bind(bind) => walk(&bind.expr, table, out),
+                        ResultItem::Stmts(stmts) => walk(stmts, table, depth, out),
+                        ResultItem::Bind(bind) => walk(&bind.expr, table, depth, out),
                     }
                 }
-                walk(&block.value, table, out);
+                walk(&block.value, table, depth, out);
             }
             Segment::Template(template) => {
                 for chunk in &template.chunks {
                     if let TemplateChunk::Interp(interp) = chunk {
-                        walk(interp, table, out);
+                        walk(interp, table, depth, out);
                     }
                 }
             }
@@ -501,17 +703,17 @@ fn walk(program: &Program, table: &Table, out: &mut MatchAnalyses) {
     }
 }
 
-fn walk_if_let(stmt: &IfLetStmt, table: &Table, out: &mut MatchAnalyses) {
-    walk(&stmt.expr, table, out);
-    walk(&stmt.body, table, out);
+fn walk_if_let(stmt: &IfLetStmt, table: &Table, depth: Depth, out: &mut MatchAnalyses) {
+    walk(&stmt.expr, table, depth, out);
+    walk(&stmt.body, table, depth, out);
     match &stmt.else_part {
-        Some(IfLetElse::Block(block)) => walk(block, table, out),
-        Some(IfLetElse::IfLet(inner)) => walk_if_let(inner, table, out),
+        Some(IfLetElse::Block(block)) => walk(block, table, depth, out),
+        Some(IfLetElse::IfLet(inner)) => walk_if_let(inner, table, depth, out),
         None => {}
     }
 }
 
-fn analyze_match(expr: &MatchExpr, table: &Table) -> MatchAnalysis {
+fn analyze_match(expr: &MatchExpr, table: &Table, depth: Depth) -> MatchAnalysis {
     // The subject is identified from *every* arm's tags, guarded or not —
     // the same identification sema uses.
     let tags: Vec<&str> = expr
@@ -534,14 +736,14 @@ fn analyze_match(expr: &MatchExpr, table: &Table) -> MatchAnalysis {
                 pattern_bindings: Vec::new(),
                 body_bindings: Vec::new(),
             };
-            if let Pattern::Tags(alts) = &arm.pattern {
+            if let (Depth::Full, Pattern::Tags(alts)) = (depth, &arm.pattern) {
                 analyze_group(alts, subject, table, &mut analyzed);
             }
             analyzed
         })
         .collect();
 
-    let coverage = coverage_of(expr, subject);
+    let coverage = coverage_of(expr, table);
     MatchAnalysis {
         keyword_off: expr.keyword_off,
         subjects: vec![subject.map(to_subject)],
@@ -550,7 +752,7 @@ fn analyze_match(expr: &MatchExpr, table: &Table) -> MatchAnalysis {
     }
 }
 
-fn analyze_tuple_match(expr: &TupleMatchExpr, table: &Table) -> MatchAnalysis {
+fn analyze_tuple_match(expr: &TupleMatchExpr, table: &Table, depth: Depth) -> MatchAnalysis {
     let arity = expr.scrutinees.len();
     // Each position resolves independently, from the tags every arm uses
     // there — sema's tuple identification.
@@ -583,7 +785,7 @@ fn analyze_tuple_match(expr: &TupleMatchExpr, table: &Table) -> MatchAnalysis {
                 pattern_bindings: Vec::new(),
                 body_bindings: Vec::new(),
             };
-            if let TuplePattern::Elems(elems) = &arm.pattern {
+            if let (Depth::Full, TuplePattern::Elems(elems)) = (depth, &arm.pattern) {
                 for (p, elem) in elems.iter().enumerate() {
                     if let Pattern::Tags(alts) = elem {
                         analyze_group(
@@ -603,7 +805,7 @@ fn analyze_tuple_match(expr: &TupleMatchExpr, table: &Table) -> MatchAnalysis {
         keyword_off: expr.keyword_off,
         subjects: subjects.into_iter().map(|s| s.map(to_subject)).collect(),
         arms,
-        coverage: None,
+        coverage: tuple_coverage_of(expr, table),
     }
 }
 
@@ -753,12 +955,26 @@ fn merge_types(types: &[Option<String>]) -> Option<String> {
     }
 }
 
-/// [`Coverage`] of a single match, when it means something: a tag match
-/// with a resolved subject and no wildcard arm — sema's covering rule
-/// (guarded arms and nested patterns cover nothing) over the subject's
-/// cases.
-fn coverage_of(expr: &MatchExpr, subject: Option<(&str, &[MatchConstructor])>) -> Option<Coverage> {
-    let (_, cases) = subject?;
+/// True when the alternative carries a nested pattern — like a guard, such
+/// an arm may mismatch at runtime, so it identifies the enum but covers
+/// nothing (sema's rule, and now the only copy of it).
+pub(crate) fn has_nested(alt: &TagPattern) -> bool {
+    alt.bindings
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|b| b.nested.is_some())
+}
+
+/// Whether an arm covers what it matches: guarded arms and arms with a
+/// nested pattern identify the subject but cover nothing.
+fn covers(guard: &Option<GuardExpr>, alts: &[TagPattern]) -> bool {
+    guard.is_none() && !alts.iter().any(has_nested)
+}
+
+/// [`Coverage`] of a single match, when the question means something: a tag
+/// match with no wildcard arm whose tags identify a known enum.
+fn coverage_of(expr: &MatchExpr, table: &Table) -> Option<Coverage> {
     if expr
         .arms
         .iter()
@@ -766,19 +982,20 @@ fn coverage_of(expr: &MatchExpr, subject: Option<(&str, &[MatchConstructor])>) -
     {
         return None;
     }
+    // Identification uses every arm's tags; covering uses only the arms
+    // that cannot fall through.
+    let mut tags: Vec<&str> = Vec::new();
     let mut covered: Vec<String> = Vec::new();
     for arm in &expr.arms {
         let Pattern::Tags(alts) = &arm.pattern else {
             continue;
         };
-        let nested = alts.iter().any(|alt| {
-            alt.bindings
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .any(|b| b.nested.is_some())
-        });
-        if arm.guard.is_some() || nested {
+        for alt in alts {
+            if !tags.contains(&alt.tag.as_str()) {
+                tags.push(&alt.tag);
+            }
+        }
+        if !covers(&arm.guard, alts) {
             continue;
         }
         for alt in alts {
@@ -787,12 +1004,123 @@ fn coverage_of(expr: &MatchExpr, subject: Option<(&str, &[MatchConstructor])>) -
             }
         }
     }
-    let missing = cases
+    let (subject, missing) = table.resolve_coverage(&tags, &covered)?;
+    Some(Coverage {
+        positions: vec![Some(subject)],
+        covered,
+        missing: missing.into_iter().map(|tag| vec![Some(tag)]).collect(),
+    })
+}
+
+/// [`Coverage`] of a tuple match: the cartesian product of its positions'
+/// case sets, minus every combination a covering arm handles. `None` when
+/// a bare `_` arm covers everything, when any tagged position resolves to
+/// no known enum, or when no position is tagged at all (nothing to
+/// enumerate).
+fn tuple_coverage_of(expr: &TupleMatchExpr, table: &Table) -> Option<Coverage> {
+    let arity = expr.scrutinees.len();
+    if expr
+        .arms
         .iter()
-        .filter(|c| !covered.contains(&c.tag))
-        .map(|c| c.tag.clone())
-        .collect();
-    Some(Coverage { covered, missing })
+        .any(|a| matches!(a.pattern, TuplePattern::Wildcard))
+    {
+        return None;
+    }
+
+    // Per position, the tags any arm uses there (identification); per
+    // covering arm, what it covers at each position (`None` = `_`).
+    let mut position_tags: Vec<Vec<String>> = vec![Vec::new(); arity];
+    let mut rows: Vec<Vec<Option<Vec<String>>>> = Vec::new();
+    for arm in &expr.arms {
+        let TuplePattern::Elems(elems) = &arm.pattern else {
+            continue;
+        };
+        if elems.len() != arity {
+            continue; // sema reports the arity mismatch; nothing to enumerate here
+        }
+        let mut row: Vec<Option<Vec<String>>> = Vec::with_capacity(arity);
+        let mut nested = false;
+        for (p, elem) in elems.iter().enumerate() {
+            match elem {
+                Pattern::Wildcard => row.push(None),
+                // A literal element covers no tag combination.
+                Pattern::Literals(_) => row.push(Some(Vec::new())),
+                Pattern::Tags(alts) => {
+                    nested |= alts.iter().any(has_nested);
+                    let tags: Vec<String> = alts.iter().map(|t| t.tag.clone()).collect();
+                    for tag in &tags {
+                        if !position_tags[p].contains(tag) {
+                            position_tags[p].push(tag.clone());
+                        }
+                    }
+                    row.push(Some(tags));
+                }
+            }
+        }
+        if arm.guard.is_none() && !nested {
+            rows.push(row);
+        }
+    }
+
+    // Each position resolves independently, to the first candidate whose
+    // cases contain every tag used there.
+    let mut positions: Vec<Option<CoveredEnum>> = Vec::with_capacity(arity);
+    let mut cases: Vec<Vec<String>> = Vec::with_capacity(arity);
+    for tags in &position_tags {
+        if tags.is_empty() {
+            positions.push(None); // universal position: only `_` written here
+            cases.push(Vec::new());
+            continue;
+        }
+        let refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+        let entry = *table.candidates(&refs).first()?;
+        positions.push(Some(entry.covered_enum()));
+        cases.push(entry.constructors.iter().map(|c| c.tag.clone()).collect());
+    }
+
+    let tagged: Vec<usize> = (0..arity).filter(|&p| !cases[p].is_empty()).collect();
+    if tagged.is_empty() {
+        return None;
+    }
+
+    // Odometer over the tagged positions, rightmost fastest.
+    let mut missing: Vec<Vec<Option<String>>> = Vec::new();
+    let mut idx = vec![0usize; tagged.len()];
+    loop {
+        let handled = rows.iter().any(|row| {
+            tagged.iter().enumerate().all(|(ti, &p)| match &row[p] {
+                None => true,
+                Some(tags) => tags.iter().any(|t| *t == cases[p][idx[ti]]),
+            })
+        });
+        if !handled {
+            let mut combination: Vec<Option<String>> = vec![None; arity];
+            for (ti, &p) in tagged.iter().enumerate() {
+                combination[p] = Some(cases[p][idx[ti]].clone());
+            }
+            missing.push(combination);
+        }
+        let mut ti = tagged.len();
+        let mut wrapped = true;
+        while ti > 0 {
+            ti -= 1;
+            idx[ti] += 1;
+            if idx[ti] < cases[tagged[ti]].len() {
+                wrapped = false;
+                break;
+            }
+            idx[ti] = 0;
+        }
+        if wrapped {
+            break;
+        }
+    }
+
+    Some(Coverage {
+        positions,
+        covered: Vec::new(),
+        missing,
+    })
 }
 
 /// The identifier span containing `offset`, byte-based like the scanner:
@@ -1001,10 +1329,99 @@ mod tests {
         let coverage = analyses.matches[0].coverage.as_ref().unwrap();
         assert_eq!(coverage.covered, ["A"]);
         // The guarded `B` arm identifies the enum but covers nothing.
-        assert_eq!(coverage.missing, ["B", "C"]);
+        assert_eq!(coverage.missing_tags(), ["B", "C"]);
+        assert_eq!(
+            coverage.positions[0].as_ref().map(|e| (&e.name, &e.origin)),
+            Some((&"E".to_string(), &Origin::Local))
+        );
 
         let with_wildcard = "enum E { A, B }\nconst v = match (e) { A => 0, _ => 1 };\n";
         assert_eq!(match_analyses(with_wildcard, &[]).matches[0].coverage, None);
+    }
+
+    #[test]
+    fn coverage_prefers_the_candidate_the_arms_satisfy() {
+        // Both enums contain every arm tag; `Small` is fully covered, so the
+        // match is exhaustive even though `Big` is missing a case. This is
+        // the rule sema has always reported — an arm set that satisfies
+        // *some* candidate is not a missing-case error.
+        let src = "enum Big { A(s: string), B, C }\nenum Small { A(s: string), B }\nconst v = match (e) { A(x) => x, B => 1 };\n";
+        let coverage = match_analyses(src, &[]).matches[0]
+            .coverage
+            .clone()
+            .expect("resolved");
+        assert!(coverage.missing.is_empty());
+        assert_eq!(coverage.positions[0].as_ref().unwrap().name, "Small");
+
+        // With no satisfied candidate, the one left fewest cases is named.
+        let unsatisfied = "enum Big { A(s: string), B, C, D }\nenum Small { A(s: string), B, C }\nconst v = match (e) { A(x) => x, B => 1 };\n";
+        let coverage = match_analyses(unsatisfied, &[]).matches[0]
+            .coverage
+            .clone()
+            .expect("resolved");
+        assert_eq!(coverage.positions[0].as_ref().unwrap().name, "Small");
+        assert_eq!(coverage.missing_tags(), ["C"]);
+    }
+
+    #[test]
+    fn coverage_of_an_imported_enum_carries_its_specifier() {
+        let src = "import { Token } from \"./token.rl\";\nconst v = match (t) { Word => 0 };\n";
+        let externs = [ExternEnum {
+            name: "Token".to_string(),
+            tags: vec!["Word".to_string(), "Punct".to_string()],
+            from: Some("./token.rl".to_string()),
+        }];
+        let program = crate::parser::parse(src);
+        let analyses = coverage_analyses(&program, &externs);
+        let coverage = analyses.matches[0].coverage.as_ref().unwrap();
+        assert_eq!(coverage.missing_tags(), ["Punct"]);
+        assert_eq!(
+            coverage.positions[0].as_ref().unwrap().origin,
+            Origin::Imported {
+                from: Some("./token.rl".to_string())
+            }
+        );
+        // Coverage-only analyses skip binding work entirely.
+        assert!(analyses.matches[0].arms[0].pattern_bindings.is_empty());
+    }
+
+    #[test]
+    fn tuple_coverage_is_the_product_of_its_positions() {
+        let src = "enum A { X(v: number), Y }\nenum B { P(v: number), Q }\nconst v = match (a, b) { (X, P) => 0, (Y, _) => 1 };\n";
+        let coverage = match_analyses(src, &[]).matches[0]
+            .coverage
+            .clone()
+            .expect("resolved");
+        let names: Vec<&str> = coverage
+            .positions
+            .iter()
+            .map(|p| p.as_ref().map_or("_", |e| e.name.as_str()))
+            .collect();
+        assert_eq!(names, ["A", "B"]);
+        // (X, Q) is the only combination no arm handles.
+        assert_eq!(
+            coverage.missing,
+            [vec![Some("X".to_string()), Some("Q".to_string())]]
+        );
+        // A tuple arm covers a combination, not a tag.
+        assert!(coverage.covered.is_empty());
+        assert!(coverage.missing_tags().is_empty());
+    }
+
+    #[test]
+    fn a_universal_tuple_position_shows_as_a_hole() {
+        // Nothing is ever written at position 1, so it constrains nothing.
+        let src = "enum A { X(v: number), Y }\nconst v = match (a, b) { (X, _) => 0 };\n";
+        let coverage = match_analyses(src, &[]).matches[0]
+            .coverage
+            .clone()
+            .expect("resolved");
+        assert_eq!(coverage.positions[1], None);
+        assert_eq!(coverage.missing, [vec![Some("Y".to_string()), None]]);
+
+        // A bare `_` arm covers everything; there is nothing to enumerate.
+        let bare = "enum A { X(v: number), Y }\nconst v = match (a, b) { (X, _) => 0, _ => 1 };\n";
+        assert_eq!(match_analyses(bare, &[]).matches[0].coverage, None);
     }
 
     #[test]

@@ -308,6 +308,31 @@ function run(): void {
 }
 
 #[test]
+fn tuple_element_bindings_follow_the_same_rule() {
+    // A tuple match destructures each scrutinee separately, so the rule is
+    // per element: a single-alternative element maps its bindings, an
+    // or-pattern element does not (one destructuring, several patterns).
+    let src = r#"enum Dir { North(deg: number), South }
+enum Speed { Fast(kmh: number), Slow(kmh: number) }
+declare function dir(): Dir;
+declare function speed(): Speed;
+const v = match (dir(), speed()) {
+  (North(deg), Fast(kmh) | Slow(kmh)) => deg + kmh,
+  _ => 0,
+};
+"#;
+    let m = emit_mapped(src);
+    assert_mapping_invariants(src, &m);
+    assert_mapped_in(src, &m, "(North(deg),", "deg");
+    assert_eq!(
+        map_offset(&m, offset_in(src, "Fast(kmh) | Slow(kmh)", "kmh")),
+        None
+    );
+    // The body reference is mapped either way.
+    assert_mapped_in(src, &m, "=> deg + kmh", "kmh");
+}
+
+#[test]
 fn or_pattern_bindings_are_left_unmapped() {
     // One destructuring stands for every alternative, so it belongs to no
     // single one: claiming a source position would point the editor at an
