@@ -405,6 +405,7 @@ fn rl_completions(params: &serde_json::Value) -> Result<serde_json::Value, Strin
                     "kind": match item.kind {
                         rlc::engine::RlCompletionKind::Case => "case",
                         rlc::engine::RlCompletionKind::Field => "field",
+                        rlc::engine::RlCompletionKind::Wildcard => "wildcard",
                     },
                     "detail": item.detail,
                     "covered": item.covered,

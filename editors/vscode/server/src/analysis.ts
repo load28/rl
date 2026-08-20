@@ -580,20 +580,6 @@ export function parseMatches(masked: string): MatchInfo[] {
   return matches;
 }
 
-/** Innermost match whose body contains `offset`. */
-export function matchBodyAt(
-  matches: MatchInfo[],
-  offset: number,
-): MatchInfo | null {
-  let best: MatchInfo | null = null;
-  for (const m of matches) {
-    if (offset > m.bodyOpen && offset <= m.bodyClose) {
-      if (best === null || m.bodyOpen > best.bodyOpen) best = m;
-    }
-  }
-  return best;
-}
-
 /** The match whose `match` keyword sits at (or right before) `offset`. */
 export function matchKeywordAt(
   matches: MatchInfo[],
@@ -602,118 +588,6 @@ export function matchKeywordAt(
   return (
     matches.find((m) => offset >= m.start && offset <= m.start + 5) ?? null
   );
-}
-
-export interface ArmContext {
-  match: MatchInfo;
-  /** Cursor is where an arm pattern tag may be typed. */
-  patternPosition: boolean;
-  /** Cursor is inside the binding parens of this tag, if any. */
-  bindingTag: string | null;
-}
-
-/** Classify the cursor position inside the innermost match body. */
-export function armContextAt(
-  masked: string,
-  matches: MatchInfo[],
-  offset: number,
-): ArmContext | null {
-  const m = matchBodyAt(matches, offset);
-  if (m === null) return null;
-
-  let depth = 0;
-  let segStart = m.bodyOpen + 1;
-  let parenOpen = -1;
-  for (let i = m.bodyOpen + 1; i < offset; i++) {
-    const c = masked[i];
-    if (c === "(" || c === "{" || c === "[") {
-      if (depth === 0 && c === "(") parenOpen = i;
-      depth++;
-    } else if (c === ")" || c === "}" || c === "]") {
-      depth--;
-      if (depth <= 0) {
-        parenOpen = -1;
-        if (depth < 0) depth = 0;
-      }
-    } else if (c === "," && depth === 0) {
-      segStart = i + 1;
-    }
-  }
-
-  const seg = masked.slice(segStart, offset);
-  const hasArrow = seg.includes("=>");
-  if (depth === 0) {
-    return { match: m, patternPosition: !hasArrow, bindingTag: null };
-  }
-  if (depth === 1 && parenOpen !== -1 && !hasArrow) {
-    let k = parenOpen;
-    while (k > segStart && /\s/.test(masked[k - 1])) k--;
-    const idEnd = k;
-    while (k > segStart && ID_CHAR.test(masked[k - 1])) k--;
-    const tag = masked.slice(k, idEnd);
-    if (isIdent(tag)) {
-      return { match: m, patternPosition: false, bindingTag: tag };
-    }
-  }
-  return { match: m, patternPosition: false, bindingTag: null };
-}
-
-/** Leading pattern tags of each arm (or-pattern alternatives included). */
-export function armTags(masked: string, m: MatchInfo): string[] {
-  const tags: string[] = [];
-  for (const [from, to] of splitArms(masked, m)) {
-    const seg = masked.slice(from, to);
-    const arrow = seg.indexOf("=>");
-    const head = arrow === -1 ? seg : seg.slice(0, arrow);
-    for (const alt of head.split("|")) {
-      const lead = /^\s*([A-Za-z_$][A-Za-z0-9_$]*)/.exec(alt);
-      const t = lead ? lead[1] : "";
-      if (t !== "_" && isIdent(t)) tags.push(t);
-    }
-  }
-  return tags;
-}
-
-/** Top-level arm segments of a match body. */
-function splitArms(masked: string, m: MatchInfo): Array<[number, number]> {
-  const parts: Array<[number, number]> = [];
-  let depth = 0;
-  let start = m.bodyOpen + 1;
-  for (let i = m.bodyOpen + 1; i < m.bodyClose; i++) {
-    const c = masked[i];
-    if ("({[".includes(c)) depth++;
-    else if (")}]".includes(c)) depth--;
-    else if (c === "," && depth === 0) {
-      parts.push([start, i]);
-      start = i + 1;
-    }
-  }
-  parts.push([start, m.bodyClose]);
-  return parts;
-}
-
-/**
- * Best-effort enum for a match: an `Enum.` mention in the scrutinee wins,
- * then a unique owner of the tags already written in the arms.
- */
-export function inferEnum(
-  masked: string,
-  m: MatchInfo,
-  enums: EnumInfo[],
-): EnumInfo | null {
-  const scrut = masked.slice(m.scrutOpen + 1, m.scrutClose);
-  for (const e of enums) {
-    const name = e.name.replace(/\$/g, "\\$");
-    if (new RegExp(`(?<![.\\w$])${name}\\s*\\.`).test(scrut)) return e;
-  }
-  const tags = armTags(masked, m);
-  if (tags.length > 0) {
-    const owners = enums.filter((e) =>
-      tags.some((t) => e.cases.some((c) => c.tag === t)),
-    );
-    if (owners.length === 1) return owners[0];
-  }
-  return null;
 }
 
 /** `Base.` member-access base identifier right before `offset`, if any. */
@@ -749,70 +623,8 @@ export function wordAt(src: string, offset: number): WordAt | null {
   return { word, start, end };
 }
 
-export type SymbolAt =
-  | { kind: "enum"; enum: EnumInfo }
-  | { kind: "case"; enum: EnumInfo; case: CaseInfo };
-
-/** Resolve the enum or case the identifier at `offset` refers to. */
-export function symbolAt(
-  src: string,
-  masked: string,
-  offset: number,
-  declared: EnumInfo[],
-  matches: MatchInfo[],
-  imported: EnumInfo[] = [],
-): SymbolAt | null {
-  const w = wordAt(src, offset);
-  if (w === null || !isIdent(w.word)) return null;
-  const enums = visibleEnums(declared, imported);
-
-  // Enum.Tag member access.
-  const base = memberAccessAt(masked, w.start);
-  if (base !== null) {
-    const e = enums.find((x) => x.name === base);
-    const c = e?.cases.find((x) => x.tag === w.word);
-    if (e && c) return { kind: "case", enum: e, case: c };
-  }
-
-  // Inside an enum declaration: its own name or one of its tags.
-  const decl = declared.find((e) => w.start >= e.start && w.end <= e.end);
-  if (decl) {
-    if (decl.name === w.word && w.start === decl.nameStart) {
-      return { kind: "enum", enum: decl };
-    }
-    const c = decl.cases.find((x) => x.tag === w.word && x.tagStart === w.start);
-    if (c) return { kind: "case", enum: decl, case: c };
-  }
-
-  // Inside a match body: a pattern tag of the inferred enum, else of any.
-  const m = matchBodyAt(matches, offset);
-  if (m !== null) {
-    const inferred = inferEnum(masked, m, enums);
-    const pool = inferred ? [inferred, ...enums] : enums;
-    for (const e of pool) {
-      const c = e.cases.find((x) => x.tag === w.word);
-      if (c) return { kind: "case", enum: e, case: c };
-    }
-  }
-
-  const byName = enums.find((e) => e.name === w.word);
-  if (byName) return { kind: "enum", enum: byName };
-  return null;
-}
-
 const fieldSig = (f: FieldInfo): string =>
   `${f.name}${f.optional ? "?" : ""}: ${f.type}`;
-
-/** Render an enum declaration the way it would appear in source. */
-export function enumSignature(e: EnumInfo): string {
-  const cases = e.cases.map((c) =>
-    c.hasParens || c.fields.length > 0
-      ? `${c.tag}(${c.fields.map(fieldSig).join(", ")})`
-      : c.tag,
-  );
-  const body = cases.length > 0 ? `\n  ${cases.join(",\n  ")},\n` : "";
-  return `${e.exported ? "export " : ""}enum ${e.name}${e.generics} {${body}}`;
-}
 
 /** Render a case as `Enum.Tag(field: type, ...)`. */
 export function caseSignature(e: EnumInfo, c: CaseInfo): string {

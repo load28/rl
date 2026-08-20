@@ -33,6 +33,9 @@ pub enum RlCompletionKind {
     Case,
     /// A payload field name.
     Field,
+    /// The wildcard arm `_`. Offered where an arm may be written, and
+    /// nowhere else — `if let _ = x` is not rl syntax.
+    Wildcard,
 }
 
 /// One thing that can be written at the asked-about position.
@@ -60,10 +63,19 @@ pub fn rl_completions_at(path: &Path, source: &str, position: Position) -> Vec<R
     let declarations = super::language::analyses_for(path, source).declarations;
     match context(source, &tokens, offset) {
         Some(Context::Case { of: Some(tags) }) => {
-            let Some(declared) = resolve(&declarations, &tags) else {
-                return Vec::new();
+            let mut items = match resolve(&declarations, &tags) {
+                Some(declared) => cases(declared, &tags),
+                None => Vec::new(),
             };
-            cases(declared, &tags)
+            // An arm position always admits the wildcard, whether or not
+            // the subject resolved.
+            items.push(RlCompletion {
+                label: "_".to_string(),
+                kind: RlCompletionKind::Wildcard,
+                detail: "wildcard arm — every remaining case (must be last)".to_string(),
+                covered: false,
+            });
+            items
         }
         // A pattern position with nothing to say which enum it is over —
         // an `if let` names its enum only by the tag being typed. Every
@@ -400,7 +412,7 @@ mod tests {
         let src = format!("{DECL}const a = match (s) {{ Circle(r) => r, Po }};\n");
         assert_eq!(
             labels(&src, "Circle(r) => r, "),
-            ["Circle", "Rect", "Point"]
+            ["Circle", "Rect", "Point", "_"]
         );
         let items = rl_completions_at(Path::new("/p/a.rl"), &src, at(&src, "Circle(r) => r, "));
         assert_eq!(
@@ -454,6 +466,14 @@ mod tests {
                    enum Outer { Wrap(inner: Inner), Bare }\n\
                    if let Wrap(inner: ) = o { }\n";
         assert_eq!(labels(src, "Wrap(inner: "), ["Yes", "No"]);
+    }
+
+    #[test]
+    fn the_wildcard_is_an_arm_position_only() {
+        let src = format!("{DECL}const a = match (s) {{  }};\n");
+        assert!(labels(&src, "match (s) { ").contains(&"_".to_string()));
+        let src = format!("{DECL}if let  = s {{ }}\n");
+        assert!(!labels(&src, "if let ").contains(&"_".to_string()));
     }
 
     #[test]

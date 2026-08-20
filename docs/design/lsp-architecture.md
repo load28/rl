@@ -76,7 +76,13 @@ HEAD `c6b013f5`(로컬 클론·빌드)와 TASK-086 완료 시점의 main이다.
 | TS 진단 (에디터) | tsgo LSP pull | parse-error 가드(코드<2000) 등 기존 계약이 이 표면 위에 정의됨 |
 | typed rl 진단·소진성·val | tsgo **API server** (기존 Query/Answers) | TASK-073~085의 규범 경로 그대로 |
 | rl 구조 기능 (arm completion, 문서 심볼, quick fix, rl hover/definition) | **RL 자체** (analysis.ts) | 타입 불필요 + 미완성 버퍼 내성 필요 |
-| rl 이름 hover/definition (enum·케이스·필드) | **엔진** (`engine/names.rs`, `rlSymbol`) | 위와 같은 이유지만 구현이 엔진에 있어야 규칙이 하나다 — 정규식 재구현은 컴파일러와 다른 답을 했다 (TASK-105). 나머지 rl 구조 기능의 이관은 후속 |
+| rl 이름 hover/definition (enum·케이스·필드) | **엔진** (`engine/names.rs`, `rlSymbol`) | 위와 같은 이유지만 구현이 엔진에 있어야 규칙이 하나다 — 정규식 재구현은 컴파일러와 다른 답을 했다 (TASK-105) |
+| 패턴 자리 완성 (태그·필드) | **엔진** (`engine/completions.rs`, `rlCompletions`) | 같은 이유. 자리 판정은 토큰 스트림이라 미완성 버퍼에서도 답한다 (TASK-106) |
+
+**갱신 (TASK-107)**: 위 두 행을 에디터가 실제로 채택했다. `analysis.ts`에서
+`symbolAt`·`armContextAt`·`inferEnum`·`armTags`·`matchBodyAt`·`enumSignature`가
+사라졌고(=해석 규칙의 두 번째 구현), 남은 것은 이 프로세스가 스스로 읽는 구조뿐이다
+— `match` 키워드 위치, 멤버 접근 판정, 문서 심볼, 빠진 암 quick fix.
 | semantic tokens (하이라이팅 정밀화) | **RL 자체** (`engine/tokens.rs`, 파스 전용·무상태) | TextMate 문법이 못 하는 판별(파서가 청구한/안 한 `match`·`result`·`flow`)의 단일 원천은 파서; 툴체인 없이도 답해야 하므로 text 기반 요청 (TASK-093) |
 
 핵심: 이 표는 전부 **엔진 내부**의 세부다. Node LSP는 어느 백엔드가

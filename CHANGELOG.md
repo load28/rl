@@ -8,6 +8,16 @@
 
 ### Added
 
+- **에디터가 엔진의 rl 표면을 쓴다** (TASK-107). VS Code 서버의 hover·definition·
+  rename·완성이 `rlSymbol`/`rlCompletions`를 호출하고, `analysis.ts`의 해석
+  재구현(`symbolAt`·`armContextAt`·`inferEnum`·`armTags`·`matchBodyAt`·
+  `enumSignature`)이 삭제됐다.
+
+  - `if let`·let-else·중첩 패턴에서 hover·정의 이동·완성이 **처음으로** 동작한다.
+  - 케이스와 이름이 같은 지역 변수가 enum 케이스로 hover되던 오탐이 사라졌다.
+  - 규칙이 하나가 됐다 — 이전의 정규식 구현은 컴파일러와 다른 후보 선택 규칙을
+    갖고 있었다.
+
 - **패턴 자리 자동완성** (TASK-106). 케이스 태그와 페이로드 필드 이름은 방출
   TypeScript에 존재하지 않아 체커가 완성할 수 없다. 이제 rl이 답한다 —
   `rlc --server`의 `rlCompletions`, 라이브러리의 `engine::rl_completions_at`.

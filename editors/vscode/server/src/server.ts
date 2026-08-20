@@ -12,11 +12,18 @@
  *   signature help, type diagnostics — comes back from it already in `.rl`
  *   coordinates. No projection, source mapping, TypeScript session or
  *   probe logic lives in this process.
- * - The **rl syntax layer** (analysis.ts) answers what needs no types and
- *   must work on a buffer mid-keystroke: enum/case structure, match-arm
- *   completion, document symbols, quick fixes. It is deliberately
- *   diagnostic-free — a near-miss can lose a convenience, never invent an
- *   error.
+ * - **rl's own names** — enum names, case tags, payload fields — come from
+ *   the engine too (`rlSymbol`, `rlCompletions`), even though no type is
+ *   involved: they exist nowhere in the emitted TypeScript, so the
+ *   compiler's declaration table is the only thing that knows them, and a
+ *   second opinion here would answer differently from the compiler
+ *   (TASK-107). Those requests are text-based, so they work on a buffer
+ *   mid-keystroke and with no TypeScript toolchain installed.
+ * - The **rl syntax layer** (analysis.ts) is what is left after that: the
+ *   structure this process still reads for itself — where a `match`
+ *   keyword is, whether a `.` is a member access, document symbols, the
+ *   missing-arms quick fix. It is deliberately diagnostic-free — a
+ *   near-miss can lose a convenience, never invent an error.
  * - Diagnostics run the real compiler through rlc.ts (`--check`, and the
  *   typed layer via the engine's `typedCheck`).
  * ----------------------------------------------------------------------- */
@@ -808,64 +815,37 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
     return tsCompletions(doc, offset, true);
   }
 
-  const ctx = analysis.armContextAt(masked, matches, offset);
-
-  // Inside `Tag(` in a pattern → field bindings of that tag.
-  if (ctx?.bindingTag) {
-    const owners = visible.filter((e) =>
-      e.cases.some((c) => c.tag === ctx.bindingTag),
-    );
-    const items: CompletionItem[] = [];
-    for (const e of owners) {
-      const c = e.cases.find((x) => x.tag === ctx.bindingTag);
-      if (!c) continue;
-      for (const f of c.fields) {
-        items.push({
-          label: f.name,
-          kind: CompletionItemKind.Field,
-          detail: `${analysis.caseSignature(e, c)} — 필드 바인딩`,
-          sortText: `0${f.name}`,
-        });
-      }
-    }
-    return items;
-  }
-
-  // Arm pattern position → case tags (not yet covered) + `_`.
-  if (ctx?.patternPosition) {
-    // Structural inference (an `Enum.` mention in the scrutinee, or a unique
-    // owner of the written tags) — exact when it fires. Otherwise the whole
-    // visible pool: TypeScript 7 has no structural way to name the type of
-    // the scrutinee, and offering a superset beats naming the wrong enum.
-    const inferred = analysis.inferEnum(masked, ctx.match, visible);
-    const pool = inferred ? [inferred] : visible;
-    const covered = new Set(analysis.armTags(masked, ctx.match));
-    const items: CompletionItem[] = [];
-    for (const e of pool) {
-      for (const c of e.cases) {
-        if (covered.has(c.tag)) continue;
-        items.push({
-          label: c.tag,
-          kind: CompletionItemKind.EnumMember,
-          detail: analysis.caseSignature(e, c),
-          documentation: e.builtin
-            ? { kind: MarkupKind.Markdown, value: `내장 enum \`${e.name}\`의 케이스` }
-            : undefined,
-          insertText:
-            c.fields.length > 0
-              ? `${c.tag}(${c.fields.map((f) => f.name).join(", ")})`
-              : c.tag,
-          sortText: `0${c.tag}`,
-        });
-      }
-    }
-    items.push({
-      label: "_",
-      kind: CompletionItemKind.Keyword,
-      detail: "와일드카드 암 — 나머지 모든 케이스 (반드시 마지막)",
-      sortText: "1_",
-    });
-    return items;
+  // A pattern position — an arm, an `if let`, a payload field list, a
+  // nested pattern — is rl's alone: case tags and field names exist
+  // nowhere in the emitted TypeScript, so the service has nothing to
+  // complete there. The engine answers from the compiler's own
+  // declaration table, under the same shadowing the compiler resolves
+  // with, and knows the positions this server never did (`if let`,
+  // let-else payloads, nested patterns).
+  const fsPath = enginePath(doc);
+  const rlItemsHere = fsPath
+    ? await engine.rlCompletions(
+        currentCompiler(),
+        fsPath,
+        doc.getText(),
+        params.position,
+        logEngine,
+      )
+    : [];
+  if (rlItemsHere.length > 0) {
+    return rlItemsHere.map((item) => ({
+      label: item.label,
+      kind:
+        item.kind === "case"
+          ? CompletionItemKind.EnumMember
+          : item.kind === "field"
+            ? CompletionItemKind.Field
+            : CompletionItemKind.Keyword,
+      detail: item.detail,
+      // An arm already written stays in the list — a guard may repeat a
+      // tag — but sorts after the ones still missing.
+      sortText: `${item.covered ? 1 : 0}${item.label}`,
+    }));
   }
 
   // General position → enum names + rl keyword snippets, then everything
@@ -1011,48 +991,28 @@ connection.onHover(async (params) => {
     }
   }
 
-  const sym = analysis.symbolAt(
-    text,
-    masked,
-    offset,
-    enums,
-    matches,
-    await importedEnums(doc),
-  );
-  // Not an rl symbol — an ordinary TypeScript one, perhaps. Delegate.
-  if (!sym || !w) return tsHover(doc, params.position);
-
-  const range = { start: doc.positionAt(w.start), end: doc.positionAt(w.end) };
-  if (sym.kind === "enum") {
-    const note = sym.enum.builtin
-      ? "내장 enum — 선언 없이도 match 소진성 검사의 대상입니다. 값·타입은 표준 라이브러리 모듈(`@rl/std`)에서 import하세요."
-      : sym.enum.imported
-        ? `\`${sym.enum.imported.specifier}\`에서 import한 rl enum — match 소진성 검사의 대상입니다.`
-        : "rl enum — 같은 이름의 타입 별칭(`kind` 태그드 유니언)과 생성자 객체로 컴파일됩니다.";
-    return {
-      contents: {
-        kind: MarkupKind.Markdown,
-        value: `\`\`\`rl\n${analysis.enumSignature(sym.enum)}\n\`\`\`\n${note}`,
-      },
-      range,
-    };
-  }
-
-  const unit = !sym.case.hasParens && sym.case.fields.length === 0;
-  const what = unit
-    ? "유닛 케이스 — 싱글턴 값으로 컴파일됩니다."
-    : "페이로드 케이스 — 생성자 함수로 컴파일됩니다.";
-  const origin = sym.enum.builtin
-    ? `내장 enum \`${sym.enum.name}\``
-    : sym.enum.imported
-      ? `\`${sym.enum.imported.specifier}\`의 \`enum ${sym.enum.name}\``
-      : `\`enum ${sym.enum.name}\``;
+  // An rl name — an enum, a case tag, a payload field. None of the three
+  // survives lowering in a form the TypeScript service can be pointed at,
+  // so the engine answers from the compiler's own declaration table. It
+  // answers only where the service cannot be asked; everywhere else
+  // (`Shape.Circle(1)`, `const s: Shape`) the service knows more.
+  const fsPath = enginePath(doc);
+  const sym = fsPath
+    ? await engine.rlSymbol(
+        currentCompiler(),
+        fsPath,
+        doc.getText(),
+        params.position,
+        logEngine,
+      )
+    : null;
+  if (!sym) return tsHover(doc, params.position);
   return {
     contents: {
       kind: MarkupKind.Markdown,
-      value: `\`\`\`rl\n${analysis.caseSignature(sym.enum, sym.case)}\n\`\`\`\n${origin}의 ${what}`,
+      value: `\`\`\`rl\n${sym.signature}\n\`\`\`\n${sym.detail}`,
     },
-    range,
+    range: sym.range,
   };
 });
 
@@ -1081,49 +1041,28 @@ async function tsHover(
 connection.onDefinition(async (params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
-  const { text, masked, enums, matches } = analyze(doc);
-  const offset = doc.offsetAt(params.position);
-  const sym = analysis.symbolAt(
-    text,
-    masked,
-    offset,
-    enums,
-    matches,
-    await importedEnums(doc),
-  );
-  if (sym && !sym.enum.builtin) {
-    // Imported enum: the declaration lives in the imported file, at the
-    // 1-based position the compiler reported. The name/tag is an ASCII
-    // identifier, so its length is its column width.
-    const imported = sym.enum.imported;
-    if (imported) {
-      const target =
-        sym.kind === "enum"
-          ? { pos: imported, length: imported.name.length }
-          : { pos: imported.cases[sym.case.tag], length: sym.case.tag.length };
-      if (target.pos) {
-        const start = {
-          line: target.pos.line - 1,
-          character: target.pos.col - 1,
-        };
-        return Location.create(URI.file(imported.path).toString(), {
-          start,
-          end: {
-            line: start.line,
-            character: start.character + target.length,
-          },
-        });
-      }
-    } else {
-      const [start, end] =
-        sym.kind === "enum"
-          ? [sym.enum.nameStart, sym.enum.nameEnd]
-          : [sym.case.tagStart, sym.case.tagEnd];
-      return Location.create(doc.uri, {
-        start: doc.positionAt(start),
-        end: doc.positionAt(end),
-      });
+
+  // An rl name first: an enum, a case tag, a payload field. The engine
+  // knows where each is declared — in this file or in the `.rl` the import
+  // names — because the emitted TypeScript carries none of them.
+  const rlPath = enginePath(doc);
+  if (rlPath !== null) {
+    const sym = await engine.rlSymbol(
+      currentCompiler(),
+      rlPath,
+      doc.getText(),
+      params.position,
+      logEngine,
+    );
+    if (sym?.definition) {
+      return Location.create(
+        URI.file(sym.definition.path).toString(),
+        sym.definition.range,
+      );
     }
+    // A built-in case has no declaration to open; nothing else does either
+    // once the engine has claimed the position.
+    if (sym) return null;
   }
 
   // Everything else — ordinary TypeScript symbols, and built-in enum
@@ -1167,17 +1106,17 @@ connection.onRenameRequest(async (params) => {
   const fsPath = enginePath(doc);
   if (fsPath === null) return null;
 
-  // rl symbols (enums, case tags) are compiled into the emitted `kind`
-  // strings — renaming them needs rl-aware rewriting, so refuse rather
-  // than let TypeScript do half the job.
-  const { text, masked, enums, matches } = analyze(doc);
-  const sym = analysis.symbolAt(
-    text,
-    masked,
-    doc.offsetAt(params.position),
-    enums,
-    matches,
-    await importedEnums(doc),
+  // rl names (enums, case tags, payload fields) are compiled into emitted
+  // `kind` strings and destructuring keys — renaming one needs rl-aware
+  // rewriting across both worlds, so refuse rather than let TypeScript do
+  // half the job. The engine decides what is an rl name; this server does
+  // not keep a second opinion.
+  const sym = await engine.rlSymbol(
+    currentCompiler(),
+    fsPath,
+    doc.getText(),
+    params.position,
+    logEngine,
   );
   if (sym) return null;
 
