@@ -47,7 +47,9 @@ function registry(): Promise<vsctm.Registry> {
             ? path.join(syntaxesDir, "rl.tmLanguage.json")
             : scopeName === "source.ts"
               ? path.join(syntaxesDir, "src", "typescript.tmLanguage.json")
-              : undefined;
+              : scopeName === "markdown.rl.codeblock"
+                ? path.join(syntaxesDir, "rl.markdown.tmLanguage.json")
+                : undefined;
         if (!file) return null;
         return vsctm.parseRawGrammar(fs.readFileSync(file, "utf8"), file);
       },
@@ -306,6 +308,69 @@ test("pure TypeScript tokenizes identically to the TypeScript grammar", async ()
       line.map((t) => ({ text: t.text, scopes: t.scopes.slice(1).join(" ") })),
     );
   assert.deepEqual(strip(rl), strip(ts));
+});
+
+// 마크다운 injection 문법 — ```rl 펜스 안을 source.rl로 칠한다.
+// 호스트(내장 마크다운 문법)를 vendoring하지 않고 injection 문법을 루트로
+// 직접 토크나이즈한다 — 펜스 인식·source.rl 임베드·펜스 종료·타 언어 펜스
+// 불간섭이 이 문법의 계약 전부다 (TASK-094 결정 3).
+const MARKDOWN_FENCES = `\`\`\`rl
+enum Shape { Circle(r: number), Dot }
+const area = match (s) { Circle(r) => r * r, _ => 0 };
+\`\`\`
+after the fence
+
+~~~rl
+const out = raw |> trim |> parse;
+~~~
+
+\`\`\`ts
+const enum Flags { A = 1 }
+\`\`\`
+`;
+
+test("markdown ```rl fences embed the rl grammar", async () => {
+  const lines = await tokenize("markdown.rl.codeblock", MARKDOWN_FENCES);
+
+  // 여는 펜스: 구분자와 언어 태그가 내장 마크다운과 같은 스코프를 받는다.
+  assertScope(lines, 1, "```", "punctuation.definition.markdown");
+  assertScope(lines, 1, "rl", "fenced_code.block.language.markdown");
+
+  // 펜스 안: 내용이 meta.embedded.block.rl로 감싸이고 rl/TS 스코프가 붙는다.
+  assertScope(lines, 2, "enum", "storage.type.enum.ts");
+  assertScope(lines, 2, "Circle", "variable.other.enummember.ts");
+  assertScope(lines, 3, "match", "keyword.control.match.rl");
+  assertScope(lines, 3, "_", "keyword.control.wildcard.rl");
+  for (const line of [2, 3]) {
+    for (const token of lines[line - 1]) {
+      assert.ok(
+        token.scopes.includes("meta.embedded.block.rl"),
+        `line ${line} token ${JSON.stringify(token.text)} is outside the embedded block`,
+      );
+    }
+  }
+
+  // 닫는 펜스에서 임베드가 끝난다 — 뒤 텍스트는 rl로 칠해지지 않는다.
+  assertScope(lines, 4, "```", "punctuation.definition.markdown");
+  for (const token of lines[5 - 1]) {
+    assert.ok(
+      token.scopes.length === 1,
+      `text after the fence leaked scopes: ${token.scopes.join(" ")}`,
+    );
+  }
+
+  // ~~~ 펜스도 동일하게 동작한다.
+  assertScope(lines, 8, "|>", "keyword.operator.pipeline.rl");
+
+  // 다른 언어의 펜스는 건드리지 않는다.
+  for (const line of [11, 12, 13]) {
+    for (const token of lines[line - 1]) {
+      assert.ok(
+        token.scopes.length === 1,
+        `\`\`\`ts fence was claimed on line ${line}: ${token.scopes.join(" ")}`,
+      );
+    }
+  }
 });
 
 test("generated grammar matches its sources (build.mjs --check)", () => {
