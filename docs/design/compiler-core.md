@@ -249,7 +249,7 @@ compiler API가 대체한 뒤 VSCode 확장의 정규식/마스킹 rl 구현(D6)
 | 0 | 구조화 다중 진단, recoverable projection, 문안 통일 (TASK-117 흡수) | TASK-120 | 완료 |
 | 1 | HIR 기반: ID, arena, lowering, source map | TASK-121 | 완료 |
 | 2 | 선언 수집·이름 해석: scope graph, DefId, builtins | TASK-122 | 완료 |
-| 3 | typed pattern: 해석의 단일화(1/2) — analysis가 resolver 소비 | TASK-123 | 완료 (2/2는 후속) |
+| 3 | typed pattern: 해석의 단일화 — analysis가 resolver 소비(1/2), Table 구축도 resolver 위로(2/2) | TASK-123·129 | 완료 |
 | 4 | 타입 query: TypedFacts 경계 확정 — 백엔드 실패 강등 | TASK-124 | 완료 |
 | 5 | flow/effect: 최소 CFG — let-else 발산부터 | TASK-125 | 완료 (1/n) |
 | 6 | query engine: cross-snapshot semantic cache + 무효화 | TASK-126 | 완료 (1/n) |
@@ -262,11 +262,10 @@ INDEX 상태에 따라 조정될 수 있다 — 확정 번호는 INDEX가 진실
 
 ### 남은 후속 (등록 대기)
 
-- **Phase 3 2/2** — coverage/usefulness와 `analysis::Table` 구축을
-  resolver의 identity 위로 완전히 이동(현재 Table 구축 규칙이 resolve의
-  collect와 병존하며 동등성 테스트로 고정됨). usefulness 내부의 태그
-  문자열 비교는 열의 alphabet이 한 enum으로 고정된 뒤의 비교라 의미론적
-  결함은 아니다(TASK-123 정산).
+- usefulness 내부의 태그 문자열 비교를 `VariantRef` 비교로 — 열의
+  alphabet이 한 enum으로 고정된 뒤의 비교라 의미론적 결함은 아니고
+  (TASK-123 정산), Table 구축이 resolver 위로 이동한 지금(TASK-129)은
+  identity 표현만 남은 정리다.
 - **Phase 5 잔여** — `try` 배치·`result` early-return 범위·분기별 초기화의
   flow 이동, flow의 HIR body 연동(`Branch { condition: ExprId }`).
 - **Phase 6 잔여** — 에디터 semantic API(`language.rs`)의 semantic cache

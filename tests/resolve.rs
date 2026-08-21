@@ -198,9 +198,10 @@ fn a_single_pattern_site_reports_only_a_unique_one_edit_miss() {
 
 #[test]
 fn resolution_matches_the_analysis_answer() {
-    // The resolver and the analysis implement one rule set; until the
-    // analysis consumes the resolver (Phase 3), this equivalence is the
-    // guard that keeps them from drifting.
+    // The analysis consumes the resolver (Phase 3), so this no longer
+    // guards two implementations against drifting — it pins the fidelity
+    // of the conversion: what the resolver reports is exactly what the
+    // analysis surface hands on, span for span, word for word.
     let cases = [
         // a match typo
         "enum Shape { Circle(r: number), Empty }\n\

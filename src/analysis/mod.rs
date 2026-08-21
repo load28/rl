@@ -525,11 +525,8 @@ impl PatternAnalyses {
 /// ```
 pub fn pattern_analyses(source: &str, externs: &[EnumSymbol]) -> PatternAnalyses {
     let program = crate::parser::parse(source);
-    let table = Table::build(&program, externs);
-    let mut analyses = analyze(&program, &table, Depth::Full);
     let decls: Vec<crate::resolve::ExternDecl> = externs.iter().map(Into::into).collect();
-    attach_resolution(&mut analyses, &program, &decls);
-    analyses
+    analyses_over(&program, &decls, Depth::Full)
 }
 
 /// The coverage-only analysis of an already-parsed program — sema's input,
@@ -542,27 +539,38 @@ pub fn pattern_analyses(source: &str, externs: &[EnumSymbol]) -> PatternAnalyses
 /// and every arm comes back empty — [`pattern_analyses`] is the entry point
 /// for those.
 pub(crate) fn coverage_analyses(program: &Program, externs: &[ExternEnum]) -> PatternAnalyses {
-    let table = Table::build_from_tags(program, externs);
-    let mut analyses = analyze(program, &table, Depth::CoverageOnly);
     let decls: Vec<crate::resolve::ExternDecl> = externs.iter().map(Into::into).collect();
-    attach_resolution(&mut analyses, program, &decls);
+    analyses_over(program, &decls, Depth::CoverageOnly)
+}
+
+/// The one pipeline both entry points run: lower, resolve, build the
+/// declaration table **from the resolver's world** (one construction of
+/// the rules — local later-wins, imports shadowed by locals, built-ins by
+/// both), analyze, then attach the resolver's name answers.
+fn analyses_over(
+    program: &Program,
+    externs: &[crate::resolve::ExternDecl],
+    depth: Depth,
+) -> PatternAnalyses {
+    let mut hir = crate::hir::lower_program(crate::hir::FileId(0), program);
+    let resolution = crate::resolve::resolve_file(&mut hir, externs);
+    let table = Table::from_resolution(&resolution);
+    let mut analyses = analyze(program, &table, depth);
+    attach_resolution(&mut analyses, &hir, &resolution);
     analyses
 }
 
-/// Runs the resolver over the same program and copies its answers into the
-/// analysis' vocabulary: [`PatternAnalyses::unresolved`],
-/// [`PatternAnalyses::resolved`], and each match's
-/// [`MatchAnalysis::has_unresolved`]. Name resolution has **one**
+/// Copies the resolver's answers into the analysis' vocabulary:
+/// [`PatternAnalyses::unresolved`], [`PatternAnalyses::resolved`], and each
+/// match's [`MatchAnalysis::has_unresolved`]. Name resolution has **one**
 /// implementation — [`crate::resolve`] — and this is where its answers
 /// enter the surface sema and the editor already consume.
 fn attach_resolution(
     analyses: &mut PatternAnalyses,
-    program: &Program,
-    externs: &[crate::resolve::ExternDecl],
+    hir: &crate::hir::HirFile,
+    resolution: &crate::resolve::Resolution,
 ) {
     use crate::resolve as res;
-    let mut hir = crate::hir::lower_program(crate::hir::FileId(0), program);
-    let resolution = crate::resolve::resolve_file(&mut hir, externs);
 
     let span_of = |node: crate::hir::NodeId| {
         hir.source_map
@@ -691,109 +699,72 @@ struct Table {
 }
 
 impl Table {
-    /// The table an editor-side analysis uses: imported declarations with
-    /// their field types ([`EnumSymbol`]), so pattern bindings get types.
-    fn build(program: &Program, externs: &[EnumSymbol]) -> Table {
-        Table::assemble(
-            program,
-            externs
-                .iter()
-                .map(|e| Entry {
-                    name: e.name.clone(),
-                    origin: Origin::Imported { from: None },
-                    constructors: e
-                        .cases
+    /// The table, derived from the resolver's world — **one** construction
+    /// of the visibility rules (local later-wins, imports shadowed by
+    /// locals, built-ins by both), owned by [`crate::resolve`]. What stays
+    /// here is only the coverage/typed-model *view* of it: names, origins
+    /// and constructors with declared field text.
+    fn from_resolution(resolution: &crate::resolve::Resolution) -> Table {
+        use crate::resolve::{DeclOrigin, DefKind};
+        let entries = resolution
+            .defs
+            .iter()
+            .filter_map(|(id, def)| {
+                let DefKind::Enum(data) = &def.kind else {
+                    return None;
+                };
+                // Only the winner of each name is a candidate.
+                if resolution.type_ns.get(&def.name) != Some(&id) {
+                    return None;
+                }
+                Some(Entry {
+                    name: def.name.clone(),
+                    origin: match &data.origin {
+                        DeclOrigin::Local(_) => Origin::Local,
+                        DeclOrigin::Imported { from } => Origin::Imported { from: from.clone() },
+                        DeclOrigin::Builtin => Origin::Builtin,
+                    },
+                    constructors: data
+                        .variants
                         .iter()
-                        .map(|c| MatchConstructor {
-                            tag: c.tag.clone(),
-                            fields: c.fields.as_ref().map(|fields| {
+                        .map(|variant| MatchConstructor {
+                            tag: variant.name.clone(),
+                            fields: variant.fields.as_ref().map(|fields| {
                                 fields
                                     .iter()
-                                    .map(|f| PayloadField {
-                                        name: f.name.clone(),
-                                        optional: f.optional,
-                                        ty: f.ty.clone(),
+                                    .map(|field| PayloadField {
+                                        name: field.name.clone(),
+                                        optional: field.optional,
+                                        ty: field.ty_text.clone(),
                                     })
                                     .collect()
                             }),
                         })
                         .collect(),
                 })
-                .collect(),
-        )
-    }
-
-    /// The table the compiler's own passes use: imported declarations as
-    /// the CLI collects them for sema ([`ExternEnum`] — tags and the
-    /// specifier they came from, no field types).
-    fn build_from_tags(program: &Program, externs: &[ExternEnum]) -> Table {
-        Table::assemble(
-            program,
-            externs
-                .iter()
-                .map(|e| Entry {
-                    name: e.name.clone(),
-                    origin: Origin::Imported {
-                        from: e.from.clone(),
-                    },
-                    constructors: e
-                        .tags
-                        .iter()
-                        .map(|tag| MatchConstructor {
-                            tag: tag.clone(),
-                            fields: None,
-                        })
-                        .collect(),
-                })
-                .collect(),
-        )
-    }
-
-    fn assemble(program: &Program, externs: Vec<Entry>) -> Table {
-        let mut entries: Vec<Entry> = Vec::new();
-        collect_local_enums(program, &mut entries);
-        for e in externs {
-            if entries.iter().any(|entry| entry.name == e.name) {
-                continue;
-            }
-            entries.push(e);
-        }
-        for (name, constructors) in builtin_enums() {
-            if entries.iter().any(|entry| entry.name == name) {
-                continue;
-            }
-            entries.push(Entry {
-                name,
-                origin: Origin::Builtin,
-                constructors,
-            });
-        }
+            })
+            .collect();
         Table { entries }
     }
 
     /// The first enum whose cases contain every tag — `None` for an empty
     /// tag set (nothing identifies an enum) or when no candidate fits.
-    ///
-    /// This is the *type* answer: which declaration a pattern binding reads
-    /// its field type from. Exhaustiveness asks a different question and
-    /// uses [`Table::resolve_coverage`].
     fn resolve(&self, tags: &[&str]) -> Option<(&str, &[MatchConstructor])> {
         if tags.is_empty() {
             return None;
         }
         self.candidates(tags)
             .first()
-            .map(|e| (e.name.as_str(), e.constructors.as_slice()))
+            .map(|entry| (entry.name.as_str(), entry.constructors.as_slice()))
     }
 
-    /// Every candidate for a tag set, in shadowing order: the enums whose
-    /// cases contain every tag the arms use.
+    /// Every candidate for a tag set, in shadowing order.
     fn candidates(&self, tags: &[&str]) -> Vec<&Entry> {
         self.entries
             .iter()
-            .filter(|e| {
+            .filter(|entry| {
                 tags.iter()
-                    .all(|t| e.constructors.iter().any(|c| c.tag == *t))
+                    .all(|tag| entry.constructors.iter().any(|c| c.tag == *tag))
             })
             .collect()
     }
@@ -863,81 +834,6 @@ impl Entry {
             origin: self.origin.clone(),
         }
     }
-}
-
-fn collect_local_enums(program: &Program, entries: &mut Vec<Entry>) {
-    for segment in &program.segments {
-        if let Segment::Enum(decl) = segment {
-            let constructors = decl
-                .cases
-                .iter()
-                .map(|c| MatchConstructor {
-                    tag: c.tag.clone(),
-                    fields: c.fields.as_ref().map(|fields| {
-                        fields
-                            .iter()
-                            .map(|f| PayloadField {
-                                name: f.name.clone(),
-                                optional: f.optional,
-                                ty: f.ty.clone(),
-                            })
-                            .collect()
-                    }),
-                })
-                .collect();
-            // Later declarations win, as in sema's registry.
-            if let Some(entry) = entries.iter_mut().find(|e| e.name == decl.name) {
-                entry.constructors = constructors;
-            } else {
-                entries.push(Entry {
-                    name: decl.name.clone(),
-                    origin: Origin::Local,
-                    constructors,
-                });
-            }
-        }
-    }
-}
-
-/// `Option`/`Result` as every consumer sees them: the enums a file gets
-/// without declaring them. Tags and field names match the standard library
-/// module (`src/stdlib/rl_std.ts`); payload types are the declarations'
-/// type parameters — the honest declared answer, since instantiation is the
-/// checker's. This is the only table of the built-ins in the compiler.
-fn builtin_enums() -> Vec<(String, Vec<MatchConstructor>)> {
-    let field = |name: &str, ty: &str| PayloadField {
-        name: name.to_string(),
-        optional: false,
-        ty: ty.to_string(),
-    };
-    vec![
-        (
-            "Option".to_string(),
-            vec![
-                MatchConstructor {
-                    tag: "Some".to_string(),
-                    fields: Some(vec![field("value", "T")]),
-                },
-                MatchConstructor {
-                    tag: "None".to_string(),
-                    fields: None,
-                },
-            ],
-        ),
-        (
-            "Result".to_string(),
-            vec![
-                MatchConstructor {
-                    tag: "Ok".to_string(),
-                    fields: Some(vec![field("value", "T")]),
-                },
-                MatchConstructor {
-                    tag: "Err".to_string(),
-                    fields: Some(vec![field("error", "E")]),
-                },
-            ],
-        ),
-    ]
 }
 
 fn walk(program: &Program, table: &Table, depth: Depth, out: &mut PatternAnalyses) {
@@ -1416,7 +1312,10 @@ pub(crate) fn checked_coverage(
     payloads: &[PayloadAlphabet],
 ) -> Vec<(usize, Coverage)> {
     let program = crate::parser::parse(source);
-    let table = Table::build(&program, externs);
+    let decls: Vec<crate::resolve::ExternDecl> = externs.iter().map(Into::into).collect();
+    let mut hir = crate::hir::lower_program(crate::hir::FileId(0), &program);
+    let resolution = crate::resolve::resolve_file(&mut hir, &decls);
+    let table = Table::from_resolution(&resolution);
     let mut found = Vec::new();
     let mut matches = Vec::new();
     let mut tuples = Vec::new();
