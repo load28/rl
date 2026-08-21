@@ -149,14 +149,9 @@ fn walk(src: &str, program: &Program, out: &mut Vec<(usize, usize, SemanticToken
                 walk(src, &t.expr, out);
             }
             Segment::LetElse(stmt) => {
-                // The tag carries no recorded offset; it follows the
-                // declaration keyword after trivia. Best-effort: emit only
-                // when the bytes right after the whitespace are the tag.
-                let after_kw = stmt.keyword_off + stmt.kw.len();
-                if let Some(tag_off) = expect_word(src, after_kw, &stmt.tag) {
-                    out.push((tag_off, stmt.tag.len(), SemanticTokenKind::EnumMember));
+                for alt in &stmt.alternatives {
+                    tag_pattern(alt, out);
                 }
-                bindings(&stmt.bindings, out);
                 walk(src, &stmt.expr, out);
                 walk(src, &stmt.else_body, out);
             }
@@ -219,7 +214,9 @@ fn if_let(
     stmt: &crate::ast::IfLetStmt,
     out: &mut Vec<(usize, usize, SemanticTokenKind)>,
 ) {
-    tag_pattern(&stmt.pattern, out);
+    for alt in &stmt.alternatives {
+        tag_pattern(alt, out);
+    }
     walk(src, &stmt.expr, out);
     walk(src, &stmt.body, out);
     match &stmt.else_part {

@@ -407,35 +407,21 @@ impl Lower {
 
     fn lower_let_else(&mut self, stmt: &ast::LetElseStmt) -> LetElseStmt {
         let node = self.node(Self::span(stmt.head_span), AstOrigin::LetElse);
-        // The let-else pattern is a single constructor alternative with
-        // alias-only bindings — lowered through the same path as a match
-        // arm's, so it is the same shape to every analysis.
-        let path_node = self.node(
-            Span::new(stmt.tag_off, stmt.tag_off + stmt.tag.len()),
-            AstOrigin::Pattern,
-        );
-        let fields: Vec<FieldPat> = stmt
-            .bindings
+        // The let-else pattern's alternatives are lowered through the same
+        // path as a match arm's ([`Pat::Or`] for several), so it is the
+        // same shape to every analysis.
+        let lowered: Vec<PatternId> = stmt
+            .alternatives
             .iter()
-            .map(|binding| self.lower_field_pat(binding))
+            .map(|alt| self.lower_tag_pattern(alt))
             .collect();
-        let pattern_end = fields
-            .last()
-            .and_then(|f| self.hir.source_map.node_span(f.node))
-            .map_or(stmt.tag_off + stmt.tag.len(), |s| s.end);
-        let pattern = self.alloc_pattern(
-            Pat::Constructor {
-                path: UnresolvedPath {
-                    node: path_node,
-                    name: stmt.tag.clone(),
-                },
-                // let-else parens are mandatory, so the field list always
-                // exists (possibly empty).
-                fields: Some(fields),
-            },
-            Span::new(stmt.tag_off, pattern_end),
-        );
-        let arm_node = self.node(Span::new(stmt.tag_off, pattern_end), AstOrigin::Arm);
+        let pattern = self.or_of(lowered);
+        let pattern_span = self
+            .hir
+            .source_map
+            .pattern_span(pattern)
+            .unwrap_or(Self::span(stmt.head_span));
+        let arm_node = self.node(pattern_span, AstOrigin::Arm);
         let subject = self.lower_expr_program(&stmt.expr, Self::span(stmt.head_span));
         let site_node = self.node(Self::span(stmt.head_span), AstOrigin::LetElse);
         let site = self.hir.sites.alloc(PatternSite {
@@ -462,7 +448,12 @@ impl Lower {
 
     fn lower_if_let(&mut self, stmt: &ast::IfLetStmt) -> IfLetStmt {
         let node = self.node(Self::span(stmt.head_span), AstOrigin::IfLet);
-        let pattern = self.lower_tag_pattern(&stmt.pattern);
+        let lowered: Vec<PatternId> = stmt
+            .alternatives
+            .iter()
+            .map(|alt| self.lower_tag_pattern(alt))
+            .collect();
+        let pattern = self.or_of(lowered);
         let pattern_span = self
             .hir
             .source_map

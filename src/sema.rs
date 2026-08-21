@@ -409,6 +409,8 @@ impl Checker {
                 .code(DiagnosticCode::LetElseNotDiverging),
             );
         }
+        self.check_leaf_bindings(&stmt.alternatives[0]);
+        self.check_alternatives(&stmt.alternatives, "let-else");
         self.visit_program(&stmt.expr, Ctx::Expr);
         self.visit_program(&stmt.else_body, Ctx::Stmt);
     }
@@ -427,13 +429,53 @@ impl Checker {
                 .code(DiagnosticCode::IfLetPlacement),
             );
         }
-        self.check_leaf_bindings(&stmt.pattern);
+        self.check_leaf_bindings(&stmt.alternatives[0]);
+        self.check_alternatives(&stmt.alternatives, "if let");
         self.visit_program(&stmt.expr, Ctx::Expr);
         self.visit_program(&stmt.body, Ctx::Stmt);
         match &stmt.else_part {
             Some(IfLetElse::Block(block)) => self.visit_program(block, Ctx::Stmt),
             Some(IfLetElse::IfLet(inner)) => self.check_if_let(inner, Ctx::Stmt),
             None => {}
+        }
+    }
+
+    /// The rules every multi-alternative pattern shares with a match
+    /// or-arm ([`Checker::check_match`] keeps its own interleaved copy —
+    /// its duplicate-arm bookkeeping decides which alternatives are even
+    /// compared): the alternatives share one emitted destructuring, so a
+    /// nested pattern cannot ride in them and every alternative must bind
+    /// the same (field, name) set. `construct` prefixes the message.
+    fn check_alternatives(&mut self, alts: &[TagPattern], construct: &str) {
+        if alts.len() < 2 {
+            return;
+        }
+        if alts.iter().any(has_nested) {
+            let at = alts.iter().find(|a| has_nested(a)).unwrap();
+            self.error(
+                RlError::span(
+                    at.tag_off,
+                    at.tag_off + at.tag.len(),
+                    format!("{construct}: nested patterns cannot be combined with or-patterns"),
+                )
+                .code(DiagnosticCode::MatchNestedInOrPattern),
+            );
+        }
+        let first_set = binding_set(&alts[0].bindings);
+        for alt in &alts[1..] {
+            if binding_set(&alt.bindings) != first_set {
+                self.error(
+                    RlError::span(
+                        alt.tag_off,
+                        alt.tag_off + alt.tag.len(),
+                        format!(
+                            "{construct}: or-pattern alternatives must bind the same names — {}",
+                            binding_mismatch(&alts[0], alt)
+                        ),
+                    )
+                    .code(DiagnosticCode::MatchOrBindingMismatch),
+                );
+            }
         }
     }
 

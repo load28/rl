@@ -101,9 +101,10 @@ const b = match (s) { Circle(radiuz) => radiuz, Empty => 0 };
 
 - **`match`**: 암들의 태그를 가장 많이 포함하는 유일한 enum. 후보가 없거나
   동점이면 검사하지 않습니다.
-- **let-else·`if let`**: 태그가 하나뿐이라 근거가 얇으므로 **편집 한 번** 거리의
-  케이스를 가진 enum이 유일할 때만 보고합니다. 태그가 정확히 해석되면 그
-  케이스의 필드는 match와 똑같이 검사합니다.
+- **let-else·`if let`**: 태그가 **하나**뿐이면 근거가 얇으므로 편집 한 번
+  거리의 케이스를 가진 enum이 유일할 때만 보고합니다. or-패턴의 여러 태그는
+  match와 같은 근거라 match의 규칙을 그대로 씁니다. 태그가 정확히 해석되면
+  그 케이스의 필드는 match와 똑같이 검사합니다.
 - **중첩 패턴**: 바깥 필드의 **선언된 타입**이 가리키는 enum에 대조합니다.
 
 태그가 해석되지 않아 보고된 match는 **소진성을 함께 보고하지 않습니다** —
@@ -115,8 +116,8 @@ const b = match (s) { Circle(radiuz) => radiuz, Empty => 0 };
 |--------|-------------|
 | ``match: the wildcard arm `_` must be the last arm`` | `_` 뒤의 암은 도달 불가능. `_`를 마지막으로 옮깁니다 |
 | `match: duplicate arm "<태그>"` | **무가드 암이 이미 덮은 태그**가 다시 나옴 — `A \| A`, `A \| B => .., B => ..`, `A => .., A if c => ..`. 가드 암끼리의 반복은 에러가 아닙니다. 위치는 두 번째 태그 |
-| `match: or-pattern alternatives must bind the same names — <detail>` | 대안들이 하나의 구조 분해를 공유하므로 같은 (필드, 이름) 집합을 바인딩해야 합니다. `A(x) \| B(x)`·`A(x, y) \| B(y, x)`는 되고 `A(x) \| B(y)`·`A \| B(x)`는 안 됩니다. `<detail>`은 어긋난 바인딩을 지목합니다 — 한쪽에만 있는 이름은 `` `y` is bound in `B(...)` but not in `A(...)` ``, 같은 이름을 다른 필드에서 가져오면 `` `v` is bound from field `v` in `A(...)` but from field `w` in `B(...)` `` |
-| `match: nested patterns cannot be combined with or-patterns` | 중첩 패턴(`Tag(field: Inner(...))`)은 대안별 경로 조건이 필요해 공유 구조 분해와 양립하지 않습니다. 암을 나눕니다 |
+| `match: or-pattern alternatives must bind the same names — <detail>` (let-else·`if let`에서는 접두사가 `let-else:`/`if let:`) | 대안들이 하나의 구조 분해를 공유하므로 같은 (필드, 이름) 집합을 바인딩해야 합니다. `A(x) \| B(x)`·`A(x, y) \| B(y, x)`는 되고 `A(x) \| B(y)`·`A \| B(x)`는 안 됩니다. `<detail>`은 어긋난 바인딩을 지목합니다 — 한쪽에만 있는 이름은 `` `y` is bound in `B(...)` but not in `A(...)` ``, 같은 이름을 다른 필드에서 가져오면 `` `v` is bound from field `v` in `A(...)` but from field `w` in `B(...)` `` |
+| `match: nested patterns cannot be combined with or-patterns` (`if let`에서는 접두사가 `if let:`) | 중첩 패턴(`Tag(field: Inner(...))`)은 대안별 경로 조건이 필요해 공유 구조 분해와 양립하지 않습니다. 암을 나눕니다 |
 | `` match: binding `<이름>` is used more than once in this pattern (rename one with `field: alias`) `` | 한 패턴(중첩 포함)이 같은 이름을 두 번 바인딩 — 한 스코프에 두 번 선언됩니다. 별칭으로 바꿉니다 |
 
 ### 리터럴 패턴

@@ -222,10 +222,12 @@ pub(crate) enum RlImportNames {
 }
 
 /// A structurally parsed rl let-else statement:
-/// `const|let|var Tag(bindings...) = <expr> else { ... };`. Like
-/// [`TryStmt`] it compiles to statements in the enclosing function scope:
-/// evaluate once, run the (diverging) `else` block unless the value's
-/// `kind` is the pattern's tag, then destructure the bindings.
+/// `const|let|var Tag(bindings...) (| Tag(bindings...))* = <expr> else
+/// { ... };`. Like [`TryStmt`] it compiles to statements in the enclosing
+/// function scope: evaluate once, run the (diverging) `else` block unless
+/// the value's `kind` is one of the pattern's tags, then destructure the
+/// bindings (shared across alternatives — sema enforces the same
+/// (field, name) set, exactly as in a match or-arm).
 #[derive(Debug)]
 pub(crate) struct LetElseStmt {
     /// Byte offset of the declaration keyword, for error reporting.
@@ -236,14 +238,10 @@ pub(crate) struct LetElseStmt {
     pub head_span: Span,
     /// The declaration keyword: `const`, `let`, or `var`.
     pub kw: String,
-    /// The pattern's case tag.
-    pub tag: String,
-    /// Byte offset of the tag, for error reporting — the same role
-    /// [`TagPattern::tag_off`] plays for a match arm's pattern.
-    pub tag_off: usize,
-    /// The pattern's bindings. Possibly empty — the parens are mandatory
-    /// (`const Tag() = ... else ...;` checks the case without binding).
-    pub bindings: Vec<Binding>,
+    /// The `|`-separated pattern alternatives, non-empty. The first always
+    /// carries parens (that is what claims the construct); later ones may
+    /// be bare tags. Bindings are alias-only (no nested patterns).
+    pub alternatives: Vec<TagPattern>,
     /// The expression after `=`, recursively parsed.
     pub expr: Program,
     /// The `else { ... }` block body, recursively parsed (braces excluded).
@@ -280,9 +278,12 @@ pub(crate) struct IfLetStmt {
     /// expression, the then-block excluded — the span a diagnostic about
     /// the binding belongs on (`crate::EmitAnchor`).
     pub head_span: Span,
-    /// The pattern (parens mandatory; nested patterns allowed, or-patterns
-    /// not — same binding grammar as a match arm's single alternative).
-    pub pattern: TagPattern,
+    /// The `|`-separated pattern alternatives, non-empty — the same
+    /// pattern grammar as a match arm's: nested patterns allowed in a
+    /// single alternative, and (sema-enforced) not combinable with
+    /// or-patterns; the first alternative's parens are mandatory, later
+    /// ones may be bare tags.
+    pub alternatives: Vec<TagPattern>,
     /// The expression after `=`, recursively parsed.
     pub expr: Program,
     /// The then-block body, recursively parsed (braces excluded).

@@ -346,6 +346,14 @@ fn parse_arm_tail(
 /// Parses one `Tag` / `Tag(bindings...)` alternative starting at the
 /// identifier under the cursor.
 fn parse_tag_pattern(cur: &mut Cursor) -> Option<TagPattern> {
+    parse_alternative(cur, true)
+}
+
+/// One tag alternative — a tag, optionally with a parenthesized binding
+/// list — parsed at the cursor. Shared with the let-else and `if let`
+/// parsers, whose or-pattern alternatives use the same grammar
+/// (`allow_nested` is false for let-else, whose bindings stay alias-only).
+pub(super) fn parse_alternative(cur: &mut Cursor, allow_nested: bool) -> Option<TagPattern> {
     let (tag, tag_span) = cur.eat_ident()?;
     if is_reserved(tag) {
         return None;
@@ -357,7 +365,7 @@ fn parse_tag_pattern(cur: &mut Cursor) -> Option<TagPattern> {
         let close = cur.find_close()?;
         bindings = Some(parse_bindings(
             cur.sub(open + 1, close, cur.tokens[close].span.start),
-            true,
+            allow_nested,
         )?);
         end = cur.tokens[close].span.end;
         cur.idx = close + 1;

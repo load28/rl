@@ -1030,21 +1030,13 @@ fn to_subject((name, constructors): (&str, &[MatchConstructor])) -> MatchSubject
     }
 }
 
-/// Analyzes a let-else's pattern as a [`PatternSite`].
-///
-/// A let-else pattern is a single alternative with alias-only bindings —
-/// no or-patterns, no nested patterns — so the analysis is the
-/// single-alternative case of [`analyze_group`] with the arm bookkeeping
-/// dropped.
+/// Analyzes a let-else's pattern as a [`PatternSite`] — one or more
+/// alias-only alternatives, no nested patterns.
 fn analyze_let_else(stmt: &LetElseStmt, table: &Table, depth: Depth) -> PatternSite {
-    let end = stmt.tag_off + stmt.tag.len();
-    analyze_site(
+    analyze_alt_site(
         SiteKind::LetElse,
         stmt.keyword_off,
-        &stmt.tag,
-        stmt.tag_off,
-        end,
-        &stmt.bindings,
+        &stmt.alternatives,
         table,
         depth,
     )
@@ -1053,52 +1045,56 @@ fn analyze_let_else(stmt: &LetElseStmt, table: &Table, depth: Depth) -> PatternS
 /// Analyzes one `if let` link as a [`PatternSite`]. Chained `else if let`s
 /// are separate sites, recorded by the walk.
 fn analyze_if_let(stmt: &IfLetStmt, table: &Table, depth: Depth) -> PatternSite {
-    let pattern = &stmt.pattern;
-    analyze_site(
+    analyze_alt_site(
         SiteKind::IfLet,
         stmt.keyword_off,
-        &pattern.tag,
-        pattern.tag_off,
-        pattern.end,
-        pattern.bindings.as_deref().unwrap_or_default(),
+        &stmt.alternatives,
         table,
         depth,
     )
 }
 
-/// The body both single-pattern constructs share: read the subject from
-/// the one tag and record the bindings' declared types. (Resolving the
-/// names — and the near-miss report when they do not resolve — is
-/// [`crate::resolve`]'s, attached afterwards.)
-#[allow(clippy::too_many_arguments)]
-fn analyze_site(
+/// The body both statement pattern sites share: identify the subject from
+/// every alternative's tag — the same evidence rule a match arm list uses
+/// — and record each alternative's bindings with their declared types,
+/// occurrence spans kept apart exactly as [`analyze_group`] keeps a match
+/// or-arm's. (Resolving the names — and the near-miss report when they do
+/// not resolve — is [`crate::resolve`]'s, attached afterwards.)
+fn analyze_alt_site(
     kind: SiteKind,
     keyword_off: usize,
-    tag: &str,
-    tag_off: usize,
-    end: usize,
-    bindings: &[Binding],
+    alts: &[TagPattern],
     table: &Table,
     depth: Depth,
 ) -> PatternSite {
-    let subject = table.resolve(&[tag]);
+    let tags: Vec<&str> = alts.iter().map(|alt| alt.tag.as_str()).collect();
+    let subject = table.resolve(&tags);
+    let group = (alts[0].tag_off, alts.last().expect("non-empty").end);
 
     let mut pattern_bindings = Vec::new();
     if depth == Depth::Full {
-        let constructor = subject
-            .and_then(|(_, cases)| cases.iter().find(|c| c.tag == tag))
-            .map(|c| (subject.expect("just matched").0, c));
-        let mut leaves = Vec::new();
-        collect_bindings(bindings, constructor, tag, table, &mut leaves);
-        for leaf in leaves {
-            pattern_bindings.push(PatternBinding {
-                group_start: tag_off,
-                group_end: end,
-                alt_start: tag_off,
-                alt_end: end,
-                alternatives: 1,
-                ..leaf
-            });
+        for alt in alts {
+            let constructor = subject
+                .and_then(|(_, cases)| cases.iter().find(|c| c.tag == alt.tag))
+                .map(|c| (subject.expect("just matched").0, c));
+            let mut leaves = Vec::new();
+            collect_bindings(
+                alt.bindings.as_deref().unwrap_or_default(),
+                constructor,
+                &alt.tag,
+                table,
+                &mut leaves,
+            );
+            for leaf in leaves {
+                pattern_bindings.push(PatternBinding {
+                    group_start: group.0,
+                    group_end: group.1,
+                    alt_start: alt.tag_off,
+                    alt_end: alt.end,
+                    alternatives: alts.len(),
+                    ..leaf
+                });
+            }
         }
     }
 

@@ -192,7 +192,9 @@ fn payload_walk(program: &Program, out: &mut Vec<PayloadProbe>) {
 }
 
 fn payload_if_let(stmt: &IfLetStmt, out: &mut Vec<PayloadProbe>) {
-    payload_of(&stmt.pattern, out);
+    for alt in &stmt.alternatives {
+        payload_of(alt, out);
+    }
     payload_walk(&stmt.expr, out);
     payload_walk(&stmt.body, out);
     match &stmt.else_part {

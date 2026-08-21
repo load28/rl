@@ -1,6 +1,6 @@
 //! Name-resolution tests: declaration collection, shadowing, identity, and
-//! equivalence with the analysis' resolution answers (the two are pinned
-//! together until Phase 3 moves the analysis onto the resolver).
+//! the fidelity of the conversion into the analysis surface (the analysis
+//! consumes this resolver — Phase 3, TASK-123·129).
 
 use rlc::ExternEnum;
 use rlc::hir::{self, FileId};
@@ -260,4 +260,31 @@ fn tuple_positions_identify_independently() {
     assert_eq!(subjects.len(), 2);
     assert_eq!(resolution.defs[subjects[0].unwrap()].name, "A");
     assert_eq!(resolution.defs[subjects[1].unwrap()].name, "B");
+}
+
+#[test]
+fn an_or_pattern_site_gets_match_grade_identification() {
+    // Two tags are match-grade evidence: the unique best-overlap holder
+    // identifies the enum, so a typo two edits away is reported — the
+    // strict one-edit licence only governs a site whose evidence is a
+    // single tag.
+    let src = "enum Shape { Circle(radius: number), Empty }\n\
+        function f(s: Shape): number {\n\
+        \x20 const Cyrcla(radius) | Empty() = s else { return 0; };\n\
+        \x20 return radius;\n\
+        }\n";
+    let (_, resolution) = resolved(src, &[]);
+    assert_eq!(resolution.unresolved.len(), 1);
+    assert_eq!(resolution.unresolved[0].name, "Cyrcla");
+    assert_eq!(resolution.unresolved[0].suggestion, "Circle");
+
+    // The same typo as the only alternative stays unreported: one tag is
+    // thin evidence and `Cyrcla` is two edits from `Circle`.
+    let alone = "enum Shape { Circle(radius: number), Empty }\n\
+        function f(s: Shape): number {\n\
+        \x20 const Cyrcla(radius) = s else { return 0; };\n\
+        \x20 return radius;\n\
+        }\n";
+    let (_, resolution) = resolved(alone, &[]);
+    assert_eq!(resolution.unresolved.len(), 0);
 }

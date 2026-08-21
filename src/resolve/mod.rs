@@ -496,8 +496,10 @@ impl Resolver {
             }
             let subject = self.identify(&tags);
             // Resolve this position's constructor uses against the
-            // identified enum — or, for a single-pattern site whose one
-            // tag identified nothing, under the strict one-edit licence.
+            // identified enum — or, for a statement site whose evidence is
+            // a **single** tag, under the strict one-edit licence (an
+            // or-pattern's several tags are match-grade evidence, so they
+            // go through `identify` like an arm list and get no licence).
             match subject {
                 Some(enum_def) => {
                     for arm in &site.arms {
@@ -511,7 +513,7 @@ impl Resolver {
                         );
                     }
                 }
-                None if single_pattern => {
+                None if single_pattern && tags.len() == 1 => {
                     for arm in &site.arms {
                         self.report_near_miss(hir, site_id, arm.pattern);
                     }

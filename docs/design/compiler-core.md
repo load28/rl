@@ -278,7 +278,7 @@ INDEX 상태에 따라 조정될 수 있다 — 확정 번호는 INDEX가 진실
   에디터 폴백이 `Project`의 한 캐시를 공유).
 - **Phase 7 실체** — 안정화된 HIR node의 codegen 이동(검증된 lowering
   plan 소비의 실질 형태).
-- let-else·`if let`의 or-패턴(언어 표면 확장 — rust-parity-analysis GAP-6).
+- ~~let-else·`if let`의 or-패턴~~ — TASK-133에서 구현(GAP-6 마지막 항목 해소).
 
 ## 14. 완료 기준
 

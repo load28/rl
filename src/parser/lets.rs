@@ -2,7 +2,7 @@
 //! binding):
 //!
 //! ```text
-//! const|let|var Tag(bindings...) = <expr> else { ... };
+//! const|let|var Tag(bindings...) (| Tag[(bindings...)])* = <expr> else { ... };
 //! ```
 //!
 //! Contract safety: in valid TypeScript a `const`/`let`/`var` keyword is
@@ -31,7 +31,10 @@ pub(super) fn parse_let_else<'t>(
     mut cur: Cursor<'t>,
     kw_span: crate::ast::Span,
 ) -> Option<(Cursor<'t>, usize, LetElseStmt)> {
-    // pattern: `Tag(bindings...)`
+    // pattern: `Tag(bindings...) (| Tag[(bindings...)])*` — the first
+    // alternative's parens claim the construct (a declaration keyword is
+    // never followed by `<ident>(` in valid TypeScript); later ones may be
+    // bare. `||` lexes as one OrOr token, so it never separates.
     let (tag, tag_span) = cur.eat_ident()?;
     if super::is_reserved(tag) {
         return None; // `const enum E { ... }` and friends
@@ -46,6 +49,16 @@ pub(super) fn parse_let_else<'t>(
         false, // let-else bindings stay alias-only (no nested patterns)
     )?;
     cur.idx = close + 1;
+    let mut alternatives = vec![crate::ast::TagPattern {
+        tag: tag.to_string(),
+        tag_off: tag_span.start,
+        end: cur.tokens[close].span.end,
+        bindings: Some(bindings),
+    }];
+    while cur.at_punct(b'|') {
+        cur.bump();
+        alternatives.push(super::matches::parse_alternative(&mut cur, false)?);
+    }
 
     // `=` (but not `==` / `=>`; `=>` lexes as a fused Arrow token)
     let eq = cur.eat_punct(b'=')?;
@@ -89,9 +102,7 @@ pub(super) fn parse_let_else<'t>(
                 end: expr_end,
             },
             kw: cur.parser.src[kw_span.start..kw_span.end].to_string(),
-            tag: tag.to_string(),
-            tag_off: tag_span.start,
-            bindings,
+            alternatives,
             expr: cur
                 .parser
                 .parse_tokens(&cur.tokens[expr_from..else_idx], expr_start, expr_end),

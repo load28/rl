@@ -39,7 +39,7 @@ const area = match (shape) {
 - or-pattern: `A | B => body` (never `||`); all alternatives must bind same (field,name) set.
 - guard: `Some(v) if v > 0 => v`; guard false → falls to next arm; guarded arms may repeat a tag; re-matching a tag already covered by an unguarded arm = duplicate-arm error. A dead arm the duplicate rule misses (nested pattern or tuple combination already covered) is NOT an error — it compiles, and the editor dims it (engine `rlHints`).
 - nested: `Ok(value: Some(v)) => v`; inner UNIT case needs parens `field: None()` (`field: name` = alias); no combining with or-patterns; same binding name twice in a pattern = error (alias one); inner mismatch falls through.
-- Name resolution: pattern tags and field names are checked against the declaration — but ONLY when rlc can name what you meant (case-insensitive or near-miss; a transposition counts as one edit), because tag patterns also match hand-written `kind` unions whose tags are in no table. `Circel(r)` → `enum Shape has no case \`Circel\` — did you mean \`Circle\`?`; `Circle(radiuz)` → `case \`Circle\` has no field \`radiuz\` — did you mean \`radius\`?`. Same rule in let-else / `if let` (single-tag sites need a ONE-edit match to report the tag; fields are checked once the tag resolves) and in nested patterns (resolved against the outer field's declared type). A wrong-but-not-typo name is NOT reported (needs types). A reported typo suppresses that match's exhaustiveness error.
+- Name resolution: pattern tags and field names are checked against the declaration — but ONLY when rlc can name what you meant (case-insensitive or near-miss; a transposition counts as one edit), because tag patterns also match hand-written `kind` unions whose tags are in no table. `Circel(r)` → `enum Shape has no case \`Circel\` — did you mean \`Circle\`?`; `Circle(radiuz)` → `case \`Circle\` has no field \`radiuz\` — did you mean \`radius\`?`. Same rule in let-else / `if let` (a single-tag site needs a ONE-edit match to report the tag; an or-pattern's several tags are match-grade evidence and use the match rule; fields are checked once the tag resolves) and in nested patterns (resolved against the outer field's declared type). A wrong-but-not-typo name is NOT reported (needs types). A reported typo suppresses that match's exhaustiveness error.
 - Exhaustiveness: match without `_` is checked; missing case = compile error. Enum resolution: local decl > direct (1-hop) relative-`.rl`-import > built-in Option/Result. GUARDED arms NEVER count as covering (add an unguarded arm or `_`); NESTED patterns DO — the check descends into payloads, so `Ok(value: Some(v))` + `Ok(value: None())` + `Err(e)` is exhaustive, and a hole is reported as a PATTERN you can paste back (`missing "Ok(value: None)"`). Inner position's enum comes from the field's declared type, else from the patterns written there (so generic `T` payloads still work); if neither names an enum, only `_` covers that position. With `_`: unchecked. Unknown union: compiles unchecked, runtime default throws on unexpected kind.
 - await allowed in scrutinee/guards/bodies → async IIFE, awaited. Detection is token-level: await inside a nested callback also triggers async — avoid in non-async contexts.
 
@@ -80,7 +80,7 @@ const Some(value: user) = findUser(id) else { return "who?"; };
 ```
 - Pattern parens AND trailing `;` mandatory (else passthrough).
 - else block must diverge — a CONTROL-FLOW check: every path leaves via return/throw/break/continue. Accepts a diverging final statement, an `if`/`else` (chains too) whose branches ALL diverge (`if (c) return a; else return b;` is fine), a diverging bare block, and unreachable code after a diverge. Loops/`switch`/`try` count as fall-through (conservative); a nested function's `return` doesn't count. An object literal's / arrow body's `}` ends no statement, so `else { return { kind: "Err", error: e }; };` is one diverging `return`.
-- Single tag pattern only: no or/guard/nested; no `= try expr else`. Position limits same as try.
+- Or-patterns OK (`const Circle(r) | Square(r) = s else {...};` — first alternative needs parens, all alternatives must bind the same (field,name) set, shared destructuring); no guard/nested; no `= try expr else`. Position limits same as try (module top level allowed — no `return` of its own).
 
 ## if let
 
@@ -90,7 +90,7 @@ else if let Some(value: c) = cache.get(id) { greet(c); }
 else { prompt(); }
 ```
 - Statement position only (incl. match block-arm bodies); never expression position.
-- Pattern parens mandatory; nested ok (`if let Ok(value: Some(value: v)) = r {}`); no or/guards.
+- Pattern parens mandatory (first alternative); nested ok (`if let Ok(value: Some(value: v)) = r {}`); or-patterns ok (`if let Circle(r) | Square(r) = s {}` — same-binding-set rule, no nested inside or); no guards.
 - else = block or another if-let ONLY; plain `else if (cond)` must go inside an else block.
 - Malformed if let = located compile error (not passthrough).
 

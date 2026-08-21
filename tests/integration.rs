@@ -540,6 +540,37 @@ console.log(JSON.stringify(checked("4")));
 }
 
 #[test]
+fn runtime_or_patterns_in_let_else_and_if_let() {
+    require_toolchain!();
+    // tsc --strict must accept both shapes: the let-else guard narrows the
+    // temporary to the alternatives' union for the shared destructuring,
+    // and the if-let disjunction narrows inside the then-block.
+    let lines = run(r#"
+enum Shape { Circle(r: number), Square(r: number), Dot }
+
+function side(s: Shape): number {
+  const Circle(r) | Square(r) = s else { return 0; };
+  return r;
+}
+
+function tell(s: Shape): string {
+  if let Circle(r) | Square(r) = s {
+    return "sized " + r;
+  } else {
+    return "dot";
+  }
+}
+
+console.log(side(Shape.Circle(3)));
+console.log(side(Shape.Square(4)));
+console.log(side(Shape.Dot));
+console.log(tell(Shape.Square(5)));
+console.log(tell(Shape.Dot));
+"#);
+    assert_eq!(lines, vec!["3", "4", "0", "sized 5", "dot"]);
+}
+
+#[test]
 fn runtime_try_inside_a_closure_propagates_from_the_closure() {
     require_toolchain!();
     // Rust's `?` inside a closure: the `try` inside the arrow written in a
