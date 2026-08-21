@@ -54,7 +54,13 @@ jobs:
       - name: Test
         run: cargo test
 
+      # A skipped suite is green in every other way, so the suite itself
+      # has to go red: `RLC_REQUIRE_TSGO` turns "no toolchain found" from a
+      # silent skip into a failure. (It replaced a `grep "N passed"` count,
+      # which went stale every time a test was added.)
       - name: Guard — integration tests must not have been skipped
+        env:
+          RLC_REQUIRE_TSGO: "1"
         run: |
           tsc --version
           node --version
@@ -62,8 +68,7 @@ jobs:
           # against; declaration emit needs more than a release has, and is
           # covered by the `native` job below.
           test -f "$RLC_TSGO_API"
-          cargo test --test native 2>&1 | tee /tmp/native.log
-          grep -q "23 passed" /tmp/native.log
+          cargo test --test native
 
   extension:
     name: vscode extension
@@ -167,9 +172,9 @@ jobs:
       - name: Test — the type checking modes end to end
         env:
           RLC_TSGO_ROOT: ${{ github.workspace }}/typescript-go
-        run: |
-          cargo test --test native 2>&1 | tee /tmp/native.log
-          grep -q "23 passed" /tmp/native.log
+          # Nothing here may skip: this job builds the compiler itself.
+          RLC_REQUIRE_TSGO: "1"
+        run: cargo test --test native
 
       - name: Build the extension
         working-directory: editors/vscode

@@ -100,7 +100,7 @@ fn decode_vlq(field: &str) -> Vec<i64> {
 fn field(map: &str, key: &str) -> String {
     let start = map.find(key).expect("key present") + key.len();
     let rest = &map[start..];
-    let end = rest.find(['"']).map_or(rest.len(), |i| i);
+    let end = rest.find(['"']).unwrap_or(rest.len());
     rest[..end].to_string()
 }
 

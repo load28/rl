@@ -6,6 +6,11 @@
 //! when one is not there, exactly as the `tsc`/`node` tests do; the guard
 //! mirrors the compiler's own resolution rules so a skip means "no
 //! toolchain", never "the check quietly did nothing".
+//!
+//! Where a toolchain is *supposed* to be there — CI installs one — set
+//! `RLC_REQUIRE_TSGO=1` and a missing one fails the suite instead of
+//! skipping it. That is the whole of the CI guard: a skipped suite is
+//! green in every other way, so something has to make it red.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,6 +30,23 @@ enum Toolchain {
 }
 
 fn toolchain() -> Option<Toolchain> {
+    match resolve() {
+        Some(found) => Some(found),
+        // A caller that asked for no skipping gets an error, not a pass.
+        None if required() => panic!(
+            "RLC_REQUIRE_TSGO is set but no TypeScript 7 toolchain was found \
+             (RLC_TSGO_API, RLC_TSGO_ROOT, or a built ../typescript-go)"
+        ),
+        None => None,
+    }
+}
+
+/// True when the caller has declared that a toolchain must be present.
+fn required() -> bool {
+    std::env::var_os("RLC_REQUIRE_TSGO").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+fn resolve() -> Option<Toolchain> {
     // rlc's own order: a directly named client wins over any checkout, so
     // the guard has to agree or a test will run against a compiler the
     // guard did not vet.
