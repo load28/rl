@@ -105,7 +105,7 @@ fn report_resolution(analyses: &crate::analysis::PatternAnalyses) -> Result<(), 
             unresolved.name, unresolved.suggestion
         ),
     };
-    Err(RlError::at(unresolved.start, message))
+    Err(RlError::span(unresolved.start, unresolved.end, message))
 }
 
 struct Checker {
@@ -199,24 +199,27 @@ impl Checker {
         // position. Report them as rl errors here instead (error-layering
         // contract).
         if let Some(&off) = program.stray_pipes.first() {
-            return Err(RlError::at(
+            return Err(RlError::span(
                 off,
+                off + "|>".len(),
                 "pipeline: `|>` could not be parsed here (steps must be expressions; \
                  parenthesize ternaries and arrow functions)"
                     .to_string(),
             ));
         }
         if let Some(&off) = program.stray_if_lets.first() {
-            return Err(RlError::at(
+            return Err(RlError::span(
                 off,
+                off + "if".len(),
                 "`if let` could not be parsed here (pattern parens are mandatory, and the \
                  `else` must be a block or another `if let`)"
                     .to_string(),
             ));
         }
         if let Some(&off) = program.stray_results.first() {
-            return Err(RlError::at(
+            return Err(RlError::span(
                 off,
+                off + "result".len(),
                 "`result` block could not be parsed here (every binding is \
                  `const <binding> <- <expression>;`, and the block must end with an \
                  expression)"
@@ -249,8 +252,9 @@ impl Checker {
                         && let Some(first) = pipe.steps.first()
                         && first.postfix
                     {
-                        return Err(RlError::at(
+                        return Err(RlError::span(
                             first.span.start,
+                            first.span.end,
                             "`flow`: the first step cannot be a method step — it is the \
                              composed function's input, so it must be a function \
                              (`flow |> ((s: string) => s.trim()) |> ...`)"
@@ -280,8 +284,9 @@ impl Checker {
 
     fn check_try(&mut self, stmt: &TryStmt, ctx: Ctx) -> Result<(), RlError> {
         if ctx != Ctx::Top {
-            return Err(RlError::at(
-                stmt.keyword_off,
+            return Err(RlError::span(
+                stmt.span.start,
+                stmt.span.end,
                 "`try` cannot be used inside a match expression, a `result` block, a \
                  template interpolation, or another `try` — it compiles to a `return` \
                  from the enclosing function"
@@ -293,8 +298,9 @@ impl Checker {
 
     fn check_let_else(&mut self, stmt: &LetElseStmt, ctx: Ctx) -> Result<(), RlError> {
         if ctx != Ctx::Top {
-            return Err(RlError::at(
-                stmt.keyword_off,
+            return Err(RlError::span(
+                stmt.head_span.start,
+                stmt.head_span.end,
                 "let-else cannot be used inside a match expression, a `result` block, a \
                  template interpolation, or a `try` — it compiles to statements in the \
                  enclosing function"
@@ -302,8 +308,9 @@ impl Checker {
             ));
         }
         if !stmt.diverges {
-            return Err(RlError::at(
+            return Err(RlError::span(
                 stmt.else_off,
+                stmt.else_off + "else".len(),
                 "let-else: the `else` block must end with a `return`, `throw`, `break`, or \
                  `continue` statement"
                     .to_string(),
@@ -315,8 +322,9 @@ impl Checker {
 
     fn check_if_let(&mut self, stmt: &IfLetStmt, ctx: Ctx) -> Result<(), RlError> {
         if ctx == Ctx::Expr {
-            return Err(RlError::at(
-                stmt.keyword_off,
+            return Err(RlError::span(
+                stmt.head_span.start,
+                stmt.head_span.end,
                 "`if let` cannot be used in expression position (a template interpolation, \
                  a scrutinee or guard, an expression arm body, a `try` expression, or a \
                  pipeline) — it compiles to a block statement"
@@ -352,8 +360,9 @@ impl Checker {
         let mut seen: Vec<&str> = Vec::new();
         for case in &decl.cases {
             if seen.contains(&case.tag.as_str()) {
-                return Err(RlError::at(
+                return Err(RlError::span(
                     case.tag_off,
+                    case.tag_off + case.tag.len(),
                     format!("enum {}: duplicate case \"{}\"", decl.name, case.tag),
                 ));
             }
@@ -365,8 +374,9 @@ impl Checker {
                 if let Some(fields) = &case.fields {
                     for field in fields {
                         if let Err(msg) = verify::check_type_fragment(&field.ty) {
-                            return Err(RlError::at(
+                            return Err(RlError::span(
                                 field.ty_off,
+                                field.ty_off + field.ty.len(),
                                 format!(
                                     "enum {}: invalid type for field `{}`: {}",
                                     decl.name, field.name, msg
@@ -388,8 +398,9 @@ impl Checker {
         leaf_bindings(alt, &mut leaves);
         for (i, name) in leaves.iter().enumerate() {
             if leaves[..i].contains(name) {
-                return Err(RlError::at(
+                return Err(RlError::span(
                     alt.tag_off,
+                    alt.tag_off + alt.tag.len(),
                     format!(
                         "match: binding `{name}` is used more than once in this pattern (rename one with `field: alias`)"
                     ),
@@ -433,8 +444,9 @@ impl Checker {
             match &arm.pattern {
                 Pattern::Wildcard => {
                     if idx != expr.arms.len() - 1 {
-                        return Err(RlError::at(
+                        return Err(RlError::span(
                             arm.pattern_off,
+                            arm.pattern_off + 1,
                             "match: the wildcard arm `_` must be the last arm".to_string(),
                         ));
                     }
@@ -443,8 +455,9 @@ impl Checker {
                     let mut arm_values: Vec<&LiteralValue> = Vec::new();
                     for alt in alts {
                         if alt.value.kind() != alts[0].value.kind() {
-                            return Err(RlError::at(
+                            return Err(RlError::span(
                                 alt.span.start,
+                                alt.span.end,
                                 format!(
                                     "match: or-pattern alternatives must all be the same kind of \
                                      literal (found {} after {})",
@@ -456,8 +469,9 @@ impl Checker {
                         if covered_literals.contains(&&alt.value)
                             || arm_values.contains(&&alt.value)
                         {
-                            return Err(RlError::at(
+                            return Err(RlError::span(
                                 alt.span.start,
+                                alt.span.end,
                                 format!("match: duplicate arm {}", alt.value.render()),
                             ));
                         }
@@ -474,8 +488,10 @@ impl Checker {
                     // also why a nested pattern (per-alternative conditions
                     // and paths) cannot appear inside an or-pattern.
                     if alts.len() > 1 && alts.iter().any(has_nested) {
-                        return Err(RlError::at(
-                            alts.iter().find(|a| has_nested(a)).unwrap().tag_off,
+                        let at = alts.iter().find(|a| has_nested(a)).unwrap();
+                        return Err(RlError::span(
+                            at.tag_off,
+                            at.tag_off + at.tag.len(),
                             "match: nested patterns cannot be combined with or-patterns"
                                 .to_string(),
                         ));
@@ -487,15 +503,17 @@ impl Checker {
                         if covered.contains(&alt.tag.as_str())
                             || arm_tags.contains(&alt.tag.as_str())
                         {
-                            return Err(RlError::at(
+                            return Err(RlError::span(
                                 alt.tag_off,
+                                alt.tag_off + alt.tag.len(),
                                 format!("match: duplicate arm \"{}\"", alt.tag),
                             ));
                         }
                         arm_tags.push(&alt.tag);
                         if binding_set(&alt.bindings) != first_set {
-                            return Err(RlError::at(
+                            return Err(RlError::span(
                                 alt.tag_off,
+                                alt.tag_off + alt.tag.len(),
                                 format!(
                                     "match: or-pattern alternatives must bind the same names — {}",
                                     binding_mismatch(&alts[0], alt)
@@ -533,8 +551,9 @@ impl Checker {
             match &arm.pattern {
                 TuplePattern::Wildcard => {
                     if idx != expr.arms.len() - 1 {
-                        return Err(RlError::at(
+                        return Err(RlError::span(
                             arm.pattern_off,
+                            arm.pattern_off + 1,
                             "match: the wildcard arm `_` must be the last arm".to_string(),
                         ));
                     }
@@ -558,8 +577,10 @@ impl Checker {
                     for elem in elems {
                         let Pattern::Tags(alts) = elem else { continue };
                         if alts.len() > 1 && alts.iter().any(has_nested) {
-                            return Err(RlError::at(
-                                alts.iter().find(|a| has_nested(a)).unwrap().tag_off,
+                            let at = alts.iter().find(|a| has_nested(a)).unwrap();
+                            return Err(RlError::span(
+                                at.tag_off,
+                                at.tag_off + at.tag.len(),
                                 "match: nested patterns cannot be combined with or-patterns"
                                     .to_string(),
                             ));
@@ -567,8 +588,9 @@ impl Checker {
                         let first_set = binding_set(&alts[0].bindings);
                         for alt in alts {
                             if binding_set(&alt.bindings) != first_set {
-                                return Err(RlError::at(
+                                return Err(RlError::span(
                                     alt.tag_off,
+                                    alt.tag_off + alt.tag.len(),
                                     format!(
                                         "match: or-pattern alternatives must bind the same names — {}",
                                         binding_mismatch(&alts[0], alt)
@@ -580,8 +602,9 @@ impl Checker {
                         leaf_bindings(&alts[0], &mut leaves);
                         for name in leaves {
                             if bound.contains(&name) {
-                                return Err(RlError::at(
+                                return Err(RlError::span(
                                     alts[0].tag_off,
+                                    alts[0].tag_off + alts[0].tag.len(),
                                     format!(
                                         "match: binding `{name}` is used more than once in this tuple pattern (rename one with `field: alias`)"
                                     ),
@@ -616,16 +639,22 @@ impl Checker {
 /// A tuple match always has at least two scrutinees (the parser requires
 /// the comma), so one position means a single match.
 fn report_coverage(analyses: &crate::analysis::PatternAnalyses) -> Result<(), RlError> {
-    let uncovered: Vec<(usize, &Coverage)> = analyses
+    // `match (scrutinee)` — the head, which is what the error is about;
+    // the arms below it are the user's own code.
+    let uncovered: Vec<((usize, usize), &Coverage)> = analyses
         .matches
         .iter()
-        .filter_map(|m| m.coverage.as_ref().map(|c| (m.keyword_off, c)))
+        .filter_map(|m| {
+            m.coverage
+                .as_ref()
+                .map(|c| ((m.keyword_off, m.head_end), c))
+        })
         .filter(|(_, c)| !c.missing.is_empty())
         .collect();
 
     // The first uncovered match decides the error; each `find` is that
     // match, not a loop over several.
-    if let Some((offset, coverage)) = uncovered.iter().find(|(_, c)| c.positions.len() == 1)
+    if let Some(((offset, head_end), coverage)) = uncovered.iter().find(|(_, c)| c.positions.len() == 1)
         // A single match's one position always resolved — that is what
         // makes it a coverage answer at all.
         && let Some(subject) = coverage.positions[0].as_ref()
@@ -637,15 +666,18 @@ fn report_coverage(analyses: &crate::analysis::PatternAnalyses) -> Result<(), Rl
             .collect::<Vec<_>>()
             .join(", ");
         let described = describe(subject);
-        return Err(RlError::at(
+        return Err(RlError::span(
             *offset,
+            *head_end,
             format!(
                 "match on {described} is not exhaustive: missing {list} (add the missing arms or a final `_` arm)"
             ),
         ));
     }
 
-    if let Some((offset, coverage)) = uncovered.iter().find(|(_, c)| c.positions.len() > 1) {
+    if let Some(((offset, head_end), coverage)) =
+        uncovered.iter().find(|(_, c)| c.positions.len() > 1)
+    {
         let names = coverage
             .positions
             .iter()
@@ -666,8 +698,9 @@ fn report_coverage(analyses: &crate::analysis::PatternAnalyses) -> Result<(), Rl
         } else {
             combinations.join(", ")
         };
-        return Err(RlError::at(
+        return Err(RlError::span(
             *offset,
+            *head_end,
             format!(
                 "match on ({names}) is not exhaustive: missing {shown} (add the missing arms or a final `_` arm)"
             ),

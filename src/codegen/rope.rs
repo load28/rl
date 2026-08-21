@@ -39,7 +39,11 @@ enum Piece<'a> {
     Mark { src: usize, kind: MarkKind },
     /// A zero-length note that everything up to the matching [`Piece::Close`]
     /// is glue one construct wrote ([`EmitAnchor`]). Nests.
-    Open { src: usize, kind: AnchorKind },
+    Open {
+        src: usize,
+        src_end: usize,
+        kind: AnchorKind,
+    },
     /// Closes the innermost open anchor.
     Close,
 }
@@ -117,9 +121,15 @@ impl<'a> Rope<'a> {
     }
 
     /// Appends `inner` as one construct's glue: everything it emits belongs
-    /// to the construct at source offset `src` ([`crate::EmitAnchor`]).
-    pub(crate) fn anchored(&mut self, kind: AnchorKind, src: usize, inner: Rope<'a>) {
-        self.pieces.push(Piece::Open { src, kind });
+    /// to the construct written at `src..src_end` ([`crate::EmitAnchor`]).
+    pub(crate) fn anchored(
+        &mut self,
+        kind: AnchorKind,
+        src: usize,
+        src_end: usize,
+        inner: Rope<'a>,
+    ) {
+        self.pieces.push(Piece::Open { src, src_end, kind });
         self.append(inner);
         self.pieces.push(Piece::Close);
     }
@@ -227,18 +237,19 @@ impl<'a> Rope<'a> {
         let mut marks: Vec<ScrutineeTemp> = Vec::new();
         let mut payloads: Vec<PayloadTemp> = Vec::new();
         let mut anchors: Vec<EmitAnchor> = Vec::new();
-        let mut open: Vec<(usize, usize, AnchorKind)> = Vec::new();
+        let mut open: Vec<(usize, usize, usize, AnchorKind)> = Vec::new();
         for piece in &self.pieces {
             match piece {
-                Piece::Open { src, kind } => open.push((out.len(), *src, *kind)),
+                Piece::Open { src, src_end, kind } => open.push((out.len(), *src, *src_end, *kind)),
                 Piece::Close => {
-                    if let Some((start, src, kind)) = open.pop() {
+                    if let Some((start, src, src_end, kind)) = open.pop() {
                         // Innermost first: a closing anchor is pushed
                         // before every anchor still open around it.
                         anchors.push(EmitAnchor {
                             out: start,
                             end: out.len(),
                             src,
+                            src_end,
                             kind,
                         });
                     }

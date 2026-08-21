@@ -1278,8 +1278,9 @@ impl<'a> Checker<'a> {
                 });
                 return Ok(());
             }
-            return Err(RlError::at(
+            return Err(RlError::span(
                 offset,
+                offset + name.len(),
                 format!(
                     "cannot mutate through val binding `{name}` \
                      (the binding is declared with `val`, so every access path from it is read-only)"
@@ -1346,8 +1347,9 @@ impl<'a> Checker<'a> {
                 Some(n) => format!("`{n}`"),
                 None => format!("#{}", idx + 1),
             };
-            return Err(RlError::at(
+            return Err(RlError::span(
                 tokens[start].span.start,
+                tokens[start].span.end,
                 format!(
                     "cannot pass val binding `{name}` to mutable parameter {described} of \
                      `{callee}` (the parameter is not declared with `val`, so the function \

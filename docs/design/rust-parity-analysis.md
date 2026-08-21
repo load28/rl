@@ -471,6 +471,9 @@ errty.ts(7,57): error TS2322: Type 'Err<string>' is not assignable to type 'Resu
 ### 10.2 계층 1 — 진단 앵커 (위치를 되찾는다)
 
 > **상태: 구현됨** (TASK-104) — `crate::EmitAnchor`.
+> TASK-116에서 앵커가 **점이 아니라 span**이 됐다(`src..src_end`): 아래에서
+> 말하는 "그 구성물의 소스 span"이 실제로 그 구성물의 텍스트(`try <식>`,
+> `match (스크루티니)`)를 덮고, 에디터의 밑줄이 그 범위다.
 
 지금 emit-map은 **verbatim 복사 구간만** 잇는다. 글루에는 매핑이 없고,
 TASK-089가 "가장 가까운 앞선 verbatim 바이트"로 근사한다.

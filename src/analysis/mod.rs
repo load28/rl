@@ -194,6 +194,10 @@ pub struct MatchAnalysis {
     /// with [`crate::TagMatch::offset`] and the emitted scrutinee temporary
     /// ([`crate::ScrutineeTemp::src`]).
     pub keyword_off: usize,
+    /// Byte offset just past the match's head — `match (scrutinee)`, arms
+    /// excluded. The head is what a diagnostic about the match as a whole
+    /// (a hole in its coverage) is drawn over.
+    pub head_end: usize,
     /// One subject per scrutinee position: one entry for a single match,
     /// one per position for a tuple match. `None` when the position's arm
     /// tags belong to no known enum — the match still analyzes, its
@@ -1047,6 +1051,7 @@ fn analyze_match(
     let coverage = coverage_of(expr, table);
     MatchAnalysis {
         keyword_off: expr.keyword_off,
+        head_end: expr.scrutinee_span.end + 1,
         subjects: vec![subject.map(to_subject)],
         arms,
         coverage,
@@ -1121,6 +1126,10 @@ fn analyze_tuple_match(
 
     MatchAnalysis {
         keyword_off: expr.keyword_off,
+        head_end: expr
+            .scrutinees
+            .last()
+            .map_or(expr.keyword_off, |(span, _)| span.end + 1),
         subjects: subjects.into_iter().map(|s| s.map(to_subject)).collect(),
         arms,
         coverage: tuple_coverage_of(expr, table),

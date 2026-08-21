@@ -8,6 +8,36 @@
 
 ### Fixed
 
+- **진단이 구문의 범위를 가진다 — 에디터의 밑줄이 정확해졌다** (TASK-116).
+  `try`가 전파하는 `Err`가 함수 반환 타입에 맞지 않을 때, 진단이 문의 첫
+  글자에 1글자 밑줄로 붙던 것을 고쳤다. 이제 위치는 `try` 키워드이고 밑줄은
+  `try <식>` 전체다.
+
+  ```
+  rlc: score.rl:22:19: the `Err` this `try` propagates does not fit the
+       enclosing function's return type — ... (ts2322: ...)
+  ```
+
+  - `RlError`/`CompileError`/엔진 `Diagnostic`이 시작 위치와 함께 **끝**을
+    나른다. 엔진 서버는 `endLine`/`endCol`로 전달하고, VS Code 확장은 그
+    범위를 밑줄 친다(없으면 종전대로 그 위치의 단어).
+  - `EmitAnchor`가 점이 아니라 span(`src..src_end`)이 됐다 — 글루에서 난
+    타입 에러는 그 글루를 쓴 구문의 텍스트를 덮는다.
+  - 소진되지 않은 match는 `match (스크루티니)`를, 중복 암·오타 이름·`val`
+    위반은 그 이름을 덮는다 ([`errors.md`](docs/reference/errors.md#진단의-범위)).
+
+- **생성물 자가 검사 실패가 `.rl`의 위치를 갖는다** (TASK-116). 거의 맞은 rl
+  구문(스크루티니 괄호 누락, `try`의 `;` 누락)은 계약대로 통과 영역으로
+  흘러가고 출력 자가 검사가 실패하는데, 그 에러는 **생성물 좌표**만 말하고
+  `.rl`에는 위치가 없어 에디터가 1행에 찍었다. 이제 방출 매핑을 타고 원본으로
+  돌아와 그 구문을 지목한다.
+
+  ```
+  rlc: file.rl:3:10: `match` here did not parse as an rl `match`, so it was
+       passed through as TypeScript and the generated module no longer
+       parses: Expected ';', got 'ident'
+  ```
+
 - **`result` 바인딩에서 `const`를 빠뜨리면 rl 위치로 보고한다** (TASK-112).
   `y <- g();`는 그동안 조용히 `y < -g();` 비교로 통과하거나(다른 바인딩이 있는
   블록), 생성물 좌표를 가리키는 verify 에러가 됐다.

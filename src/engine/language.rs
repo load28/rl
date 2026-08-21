@@ -806,20 +806,27 @@ impl Project {
             let e = if e > s { e } else { s + 1 };
             let raw = item["message"].as_str().unwrap_or_default().to_string();
             let code = item["code"].as_u64().unwrap_or(0) as u32;
-            // On glue, rlc says what the construct meant, at the
-            // construct's own keyword — the same table the CLI reports
+            // On glue the construct is the diagnostic's extent: its own
+            // text is underlined, and where rlc can say what the construct
+            // meant it says that instead — the same table the CLI reports
             // through, so the two surfaces cannot drift.
-            if !exact
-                && let Some(anchor) = glue_anchor(&doc, start)
-                && let Some(said) = crate::engine::semantics::translate(anchor.kind, code, &raw)
-            {
-                let at = mapper::to_utf16(&doc.source, anchor.src);
-                let range = source_range(&doc.source, at, at + 1);
-                let entry = ServiceDiagnostic {
-                    range,
-                    message: said,
-                    code,
-                    warning: severity == 2,
+            if !exact && let Some(anchor) = glue_anchor(&doc, start) {
+                let from = mapper::to_utf16(&doc.source, anchor.src);
+                let to = mapper::to_utf16(&doc.source, anchor.src_end).max(from + 1);
+                let range = source_range(&doc.source, from, to);
+                let entry = match crate::engine::semantics::translate(anchor.kind, code, &raw) {
+                    Some(said) => ServiceDiagnostic {
+                        range,
+                        message: said,
+                        code,
+                        warning: severity == 2,
+                    },
+                    None => ServiceDiagnostic {
+                        range,
+                        message: format!("{raw} (in code rlc generated for this construct)"),
+                        code,
+                        warning: severity == 2,
+                    },
                 };
                 // One construct's glue can draw several TypeScript errors
                 // that all mean the same rl thing.

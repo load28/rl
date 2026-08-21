@@ -18,7 +18,7 @@
 //! node) but *enforced* by [`crate::sema`] — the parser stays infallible.
 
 use super::cursor::{Cursor, dotted_at, skip_braced_construct};
-use crate::ast::LetElseStmt;
+use crate::ast::{LetElseStmt, Span};
 use crate::lexer::TokenKind;
 
 /// `cur` is positioned just past a `const`/`let`/`var` keyword
@@ -82,6 +82,10 @@ pub(super) fn parse_let_else<'t>(
         semi.end,
         LetElseStmt {
             keyword_off: kw_span.start,
+            head_span: Span {
+                start: kw_span.start,
+                end: expr_end,
+            },
             kw: cur.parser.src[kw_span.start..kw_span.end].to_string(),
             tag: tag.to_string(),
             tag_off: tag_span.start,

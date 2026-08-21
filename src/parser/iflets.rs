@@ -130,6 +130,10 @@ pub(super) fn parse_if_let<'t>(
         byte_end,
         IfLetStmt {
             keyword_off: kw_span.start,
+            head_span: Span {
+                start: kw_span.start,
+                end: expr_end,
+            },
             pattern: TagPattern {
                 tag: tag.to_string(),
                 tag_off: tag_span.start,

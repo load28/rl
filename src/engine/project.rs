@@ -172,6 +172,8 @@ impl Project {
                             filename: Some(file.display().to_string()),
                             line: 0,
                             col: 0,
+                            end_line: 0,
+                            end_col: 0,
                         },
                     })
                 })?,

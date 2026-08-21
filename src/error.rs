@@ -11,6 +11,8 @@ use std::fmt;
 ///     filename: Some("shapes.rl".to_string()),
 ///     line: 3,
 ///     col: 7,
+///     end_line: 3,
+///     end_col: 13,
 /// };
 /// assert_eq!(err.to_string(), "shapes.rl:3:7: match: duplicate arm \"Circle\"");
 /// ```
@@ -24,6 +26,14 @@ pub struct CompileError {
     pub line: usize,
     /// See [`CompileError::line`].
     pub col: usize,
+    /// End of the range the error covers, past its last character —
+    /// 1-based line and column, `(0, 0)` when the error is a position
+    /// only. `Display` never prints it: it is what a consumer that draws a
+    /// range (an editor) underlines, so the squiggle covers `try
+    /// parse(text)` rather than one character of it.
+    pub end_line: usize,
+    /// See [`CompileError::end_line`].
+    pub end_col: usize,
 }
 
 impl fmt::Display for CompileError {
@@ -46,13 +56,30 @@ pub(crate) struct RlError {
     pub message: String,
     /// Byte offset into the original source, or None for positionless errors.
     pub offset: Option<usize>,
+    /// Byte offset just past the last byte the error covers, when the
+    /// reporting site knows the construct's extent. `None` leaves the
+    /// width to the consumer (the editor underlines the word at the
+    /// position); `Some` is what makes the squiggle cover the construct.
+    pub end: Option<usize>,
 }
 
 impl RlError {
+    /// An error at one byte, its width left to the consumer.
     pub fn at(offset: usize, message: impl Into<String>) -> Self {
         RlError {
             message: message.into(),
             offset: Some(offset),
+            end: None,
+        }
+    }
+
+    /// An error over a byte range — the construct it is about, as the user
+    /// wrote it. Reported at `start`, underlined to `end`.
+    pub fn span(start: usize, end: usize, message: impl Into<String>) -> Self {
+        RlError {
+            message: message.into(),
+            offset: Some(start),
+            end: Some(end.max(start)),
         }
     }
 }

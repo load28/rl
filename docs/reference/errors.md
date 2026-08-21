@@ -7,12 +7,31 @@ rlc가 내는 모든 진단의 형식과 해결 방법입니다. 언어 규칙�
 rlc: <파일>:<행>:<열>: <메시지>
 ```
 
-행·열은 원본 `.rl` 기준 1-기반입니다. 위치를 특정할 수 없는 에러(출력 검증)는
+행·열은 원본 `.rl` 기준 1-기반입니다. 위치를 특정할 수 없는 에러는
 `rlc: <파일>: <메시지>`로 나옵니다.
 
 rl 구문으로 완전히 파싱되지 않는 텍스트는 에러가 아니라 조용히 통과합니다 —
 에러는 **rl 구문임이 확정된 뒤의 규칙 위반**에만 발생합니다. 통과 영역의 타입
 에러는 tsc의 몫입니다.
+
+## 진단의 범위
+
+CLI는 시작 위치만 찍지만, 진단은 그 안에 **범위**를 함께 담습니다 — 그
+에러가 말하는 구문을 사용자가 쓴 그대로 덮는 구간입니다. 에디터의 밑줄이
+이 범위입니다.
+
+| 에러 | 덮는 범위 |
+|------|-----------|
+| 소진되지 않은 match | `match (스크루티니)` — 암은 사용자 코드이므로 제외 |
+| `try` 관련 (위치 제약, 글루 타입 에러) | `try <식>` — 선언 형태여도 `const x = `는 제외 |
+| let-else 위치 제약 | 선언 키워드부터 `else` 앞까지 |
+| `if let` 위치 제약 | `if let <패턴> = <식>` (then 블록 제외) |
+| 중복 암·중복 케이스·오타로 보이는 이름 | 그 이름/리터럴 |
+| `val` 위반 | 그 바인딩 이름 |
+
+넓이를 알 수 없는 진단은 위치만 보고합니다 — 그때 밑줄의 넓이는 소비자가
+정합니다(에디터는 그 위치의 단어를 씁니다). 엔진 서버는 이 범위를
+`endLine`/`endCol`로 전달합니다 ([`cli.md`](./cli.md#엔진-서버---server)).
 
 ## enum
 
@@ -161,7 +180,7 @@ rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Man
 
 | 메시지 | 원인과 해결 |
 |--------|-------------|
-| `` `try` cannot be used inside a match expression, a `result` block, a template interpolation, or another `try` — ... `` | 그 자리의 `return`은 둘러싼 함수가 아니라 match의 IIFE(또는 `result` 블록)에서 반환됩니다. 로직을 별도 함수로 추출하거나, `result` 블록 안이라면 `<-` 바인딩을 쓰세요 ([§5.4](./language.md#54-사용-위치-제약)). 위치는 `try`(선언 형태면 `const`/`let`/`var`) |
+| `` `try` cannot be used inside a match expression, a `result` block, a template interpolation, or another `try` — ... `` | 그 자리의 `return`은 둘러싼 함수가 아니라 match의 IIFE(또는 `result` 블록)에서 반환됩니다. 로직을 별도 함수로 추출하거나, `result` 블록 안이라면 `<-` 바인딩을 쓰세요 ([§5.4](./language.md#54-사용-위치-제약)). 위치는 `try` |
 | `let-else cannot be used inside a match expression, a `result` block, a template interpolation, or a `try` — ...` | `try`와 같은 위치 제약 ([§6.4](./language.md#64-사용-위치와-발산-제약)). 위치는 선언 키워드 |
 | ``let-else: the `else` block must end with a `return`, `throw`, `break`, or `continue` statement`` | `else`가 발산하지 않으면 뒤의 구조 분해가 케이스 미보장 상태로 실행됩니다. 검사는 구문 수준이라 `if (c) return a; else return b;`로 끝나는 블록도 거부됩니다. 문장 경계는 최상위 `;`와 블록 문의 `}`이고 객체 리터럴·화살표 본문의 `}`는 아니므로 `return { … };`는 발산으로 인정됩니다 ([§6.4](./language.md#64-사용-위치와-발산-제약)). 위치는 `else` |
 
@@ -257,16 +276,34 @@ user.name = "Lee";
 
 ## 출력 검증
 
+생성물 자가 검사 실패입니다 — ① rl 구문이 **거의** 맞았지만 완전히 파싱되지
+않아 통과 영역으로 흘러갔거나 ② 통과 영역의 소스가 애초에 유효한 TS가 아니었거나
+(검증기가 아직 모르는 최신 문법 포함) ③ rlc의 버그.
+
+swc는 **생성물**의 위치를 말하지만 사용자가 여는 파일은 `.rl`이므로, 그 위치는
+방출 매핑을 타고 원본으로 돌아옵니다 — 글루에서 났다면 그 글루를 쓴 구문으로.
+즉 이 에러도 다른 에러처럼 `.rl`의 행·열을 갖습니다.
+
+①이면(가장 흔합니다) 그 구문을 지목합니다:
+
 ```
-generated TypeScript failed to parse: <상세> (line <행>, col <열> of the
-generated output). This is either invalid TypeScript passed through from the
-source or an rlc bug; use --no-verify to bypass.
+`match` here did not parse as an rl `match`, so it was passed through as
+TypeScript and the generated module no longer parses: <상세>
 ```
 
-생성물 자가 검사 실패입니다 — ① 통과 영역의 소스가 애초에 유효한 TS가 아니었거나
-(검증기가 아직 모르는 최신 문법 포함) ② rlc의 버그. 행·열은 **생성물 기준**으로
-메시지 안에 표기되고, 에러 자체는 위치 없이 보고됩니다. 소스가 유효한데도
-발생하면 rlc 버그이므로 제보해 주세요.
+```rl
+const a = match s { Circle(r) => r };   // 스크루티니 괄호가 없다
+// rlc: file.rl:1:11: `match` here did not parse as an rl `match`, ...
+```
+
+그 외에는 원래 문장 그대로입니다:
+
+```
+generated TypeScript failed to parse: <상세>. This is either invalid TypeScript
+passed through from the source or an rlc bug; use --no-verify to bypass.
+```
+
+소스가 유효한 TS인데도 발생하면 rlc 버그이므로 제보해 주세요.
 
 ## 타입 에러 (tsc)
 

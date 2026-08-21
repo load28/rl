@@ -559,11 +559,20 @@ function toDiagnostic(doc: TextDocument, d: rlc.RlcDiagnostic): Diagnostic {
   if (d.line > 0) {
     const start = { line: d.line - 1, character: Math.max(0, d.col - 1) };
     const offset = doc.offsetAt(start);
+    // The compiler's own range wins: it knows the construct's extent, so
+    // the squiggle covers `try parse(text)` or `match (shape)` whole.
+    // Without one, the word at the position is the best guess there is.
+    const reported =
+      d.endLine !== undefined && d.endLine > 0 && d.endCol !== undefined
+        ? { line: d.endLine - 1, character: Math.max(0, d.endCol - 1) }
+        : null;
     const word = analysis.wordAt(doc.getText(), offset);
     const end =
-      word && word.start === offset
-        ? doc.positionAt(word.end)
-        : { line: start.line, character: start.character + 1 };
+      reported && doc.offsetAt(reported) > offset
+        ? reported
+        : word && word.start === offset
+          ? doc.positionAt(word.end)
+          : { line: start.line, character: start.character + 1 };
     range = { start, end };
   } else {
     // Positionless (output-verification) errors: flag the first line.

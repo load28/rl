@@ -125,6 +125,7 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
                         start: binding_start,
                         end: binding_end,
                     },
+                    expr_span,
                     expr: cur.parser.parse_tokens(
                         &cur.tokens[expr_from..k],
                         expr_span.start,

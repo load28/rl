@@ -171,6 +171,10 @@ pub(crate) struct ResultBind {
     /// whitespace around it. Carried as a span, not a copy, so the emitted
     /// declaration maps back to the name the user wrote.
     pub binding_span: Span,
+    /// Raw span of the expression after `<-`, `;` excluded — with
+    /// [`Self::binding_span`] it bounds the binding a diagnostic belongs on
+    /// (`crate::EmitAnchor`).
+    pub expr_span: Span,
     /// The expression after `<-`, recursively parsed.
     pub expr: Program,
 }
@@ -219,6 +223,10 @@ pub(crate) enum RlImportNames {
 pub(crate) struct LetElseStmt {
     /// Byte offset of the declaration keyword, for error reporting.
     pub keyword_off: usize,
+    /// The statement's head: the declaration keyword through the last byte
+    /// of the bound expression, the `else` block excluded — the span a
+    /// diagnostic about the binding belongs on (`crate::EmitAnchor`).
+    pub head_span: Span,
     /// The declaration keyword: `const`, `let`, or `var`.
     pub kw: String,
     /// The pattern's case tag.
@@ -255,6 +263,10 @@ pub(crate) struct LetElseStmt {
 pub(crate) struct IfLetStmt {
     /// Byte offset of the `if` keyword, for error reporting.
     pub keyword_off: usize,
+    /// The statement's head: `if` through the last byte of the scrutinee
+    /// expression, the then-block excluded — the span a diagnostic about
+    /// the binding belongs on (`crate::EmitAnchor`).
+    pub head_span: Span,
     /// The pattern (parens mandatory; nested patterns allowed, or-patterns
     /// not — same binding grammar as a match arm's single alternative).
     pub pattern: TagPattern,
@@ -286,6 +298,11 @@ pub(crate) struct TryStmt {
     /// Byte offset of the statement start (the declaration keyword, or `try`
     /// for the bare form), for error reporting.
     pub keyword_off: usize,
+    /// The propagation itself: the `try` keyword through the last byte of
+    /// the expression it propagates, `;` excluded. This is the span a
+    /// diagnostic about the propagation belongs on — Rust underlines the
+    /// `?`, not the whole `let` statement (`crate::EmitAnchor`).
+    pub span: Span,
     /// `Some((decl_keyword, binding_span))` for the declaration form, where
     /// `binding_span` covers the (trimmed) bytes between the keyword and
     /// `=` — an identifier or destructuring pattern, optionally
