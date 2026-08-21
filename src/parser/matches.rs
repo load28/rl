@@ -82,6 +82,7 @@ pub(super) fn parse_match<'t>(
             byte_end,
             ParsedMatch::Tuple(TupleMatchExpr {
                 keyword_off: kw_span.start,
+                body_close: cur.tokens[body_close].span.start,
                 scrutinees,
                 arms,
             }),
@@ -104,6 +105,7 @@ pub(super) fn parse_match<'t>(
         byte_end,
         ParsedMatch::Single(MatchExpr {
             keyword_off: kw_span.start,
+            body_close: cur.tokens[body_close].span.start,
             scrutinee_span,
             scrutinee,
             arms,

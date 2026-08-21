@@ -39,6 +39,8 @@ pub struct ExternDecl {
     pub name: String,
     /// The import specifier, when recorded.
     pub from: Option<String>,
+    /// The verbatim `<...>` generic parameter list, or `""`.
+    pub generics: String,
     /// The variants.
     pub variants: Vec<ExternVariant>,
 }
@@ -55,6 +57,7 @@ impl From<&crate::ExternEnum> for ExternDecl {
         ExternDecl {
             name: e.name.clone(),
             from: e.from.clone(),
+            generics: String::new(),
             variants: e.tags.iter().map(|t| (t.clone(), None)).collect(),
         }
     }
@@ -65,6 +68,7 @@ impl From<&crate::EnumSymbol> for ExternDecl {
         ExternDecl {
             name: e.name.clone(),
             from: None,
+            generics: e.generics.clone(),
             variants: e
                 .cases
                 .iter()
@@ -197,6 +201,9 @@ pub enum DefKind {
 pub struct EnumDef {
     /// Where the declaration lives.
     pub origin: DeclOrigin,
+    /// The verbatim `<...>` generic parameter list, or `""` (built-ins
+    /// carry their declared parameters: `<T>`, `<T, E>`).
+    pub generics: String,
     /// The variants, in declaration order — a [`VariantRef`]'s index
     /// indexes this.
     pub variants: Vec<VariantDecl>,
@@ -374,6 +381,7 @@ impl Resolver {
                     decl.name.clone(),
                     EnumDef {
                         origin: DeclOrigin::Local(decl.node),
+                        generics: decl.generics.clone(),
                         variants,
                     },
                     hir.source_map.node_span(decl.node),
@@ -393,6 +401,7 @@ impl Resolver {
                     origin: DeclOrigin::Imported {
                         from: extern_decl.from.clone(),
                     },
+                    generics: extern_decl.generics.clone(),
                     variants: extern_decl
                         .variants
                         .iter()
@@ -419,7 +428,7 @@ impl Resolver {
                 hir,
             );
         }
-        for (name, variants) in builtin_enums() {
+        for (name, generics, variants) in builtin_enums() {
             if self.resolution.type_ns.contains_key(&name) {
                 continue; // shadowed by a local or imported declaration
             }
@@ -427,6 +436,7 @@ impl Resolver {
                 name,
                 EnumDef {
                     origin: DeclOrigin::Builtin,
+                    generics: generics.to_string(),
                     variants,
                 },
                 None,
@@ -817,7 +827,7 @@ fn collect_position_tags<'h>(
 
 /// `Option`/`Result` as declaration identities — the same shapes as the
 /// standard library module and [`crate::analysis`]'s table.
-fn builtin_enums() -> Vec<(String, Vec<VariantDecl>)> {
+fn builtin_enums() -> Vec<(String, &'static str, Vec<VariantDecl>)> {
     let field = |name: &str, ty: &str| FieldDecl {
         name: name.to_string(),
         node: None,
@@ -840,10 +850,12 @@ fn builtin_enums() -> Vec<(String, Vec<VariantDecl>)> {
     vec![
         (
             "Option".to_string(),
+            "<T>",
             vec![payload("Some", vec![field("value", "T")]), unit("None")],
         ),
         (
             "Result".to_string(),
+            "<T, E>",
             vec![
                 payload("Ok", vec![field("value", "T")]),
                 payload("Err", vec![field("error", "E")]),

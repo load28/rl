@@ -356,6 +356,9 @@ pub(crate) struct Field {
 pub(crate) struct MatchExpr {
     /// Byte offset of the `match` keyword, for error reporting.
     pub keyword_off: usize,
+    /// Byte offset of the body's closing `}` — where an editor inserts a
+    /// missing arm ([`crate::engine::rl_declarations`]).
+    pub body_close: usize,
     /// Raw span of the scrutinee (used for `await` detection).
     pub scrutinee_span: Span,
     /// The scrutinee, recursively parsed.
@@ -374,6 +377,9 @@ pub(crate) struct MatchExpr {
 pub(crate) struct TupleMatchExpr {
     /// Byte offset of the `match` keyword, for error reporting.
     pub keyword_off: usize,
+    /// Byte offset of the body's closing `}` — same role as
+    /// [`MatchExpr::body_close`].
+    pub body_close: usize,
     /// The scrutinees, in source order (always two or more): raw span for
     /// `await` detection plus the recursively parsed expression.
     pub scrutinees: Vec<(Span, Program)>,
