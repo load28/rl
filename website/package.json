@@ -1,0 +1,11 @@
+{
+  "name": "rl-official-site",
+  "private": true,
+  "scripts": {
+    "dev": "node dist/serve.js"
+  },
+  "devDependencies": {
+    "chokidar": "^4.0.3",
+    "ws": "^8.18.3"
+  }
+}
