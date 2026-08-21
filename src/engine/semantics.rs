@@ -92,6 +92,23 @@ pub struct ModuleDeclaration {
 /// order (a single match has one).
 type MatchAlphabets = (usize, Vec<Vec<String>>);
 
+/// One file's semantic analysis, computed once and cached across
+/// snapshots by [`super::Project`] — the report consumes this instead of
+/// re-parsing the file (and everything it imports) on every pass.
+///
+/// The cache key is the pair (file content, imported declarations): a
+/// change to a dependency's *body* leaves this valid, a change to its
+/// exported declarations invalidates it — exactly the invalidation
+/// boundary the query plan names (`docs/design/compiler-core.md` §11).
+#[derive(Debug)]
+pub(crate) struct FileSemantics {
+    /// The imported declarations in this file's scope (aliases applied) —
+    /// half of the cache key, and `checked_coverage`'s input.
+    pub externs: Vec<crate::EnumSymbol>,
+    /// The file's pattern analyses over those externs.
+    pub analyses: crate::PatternAnalyses,
+}
+
 /// Turns a TypeScript diagnostic that landed on rlc's own glue into an rl
 /// one — said in rl's words, about rl's construct.
 ///
@@ -433,13 +450,10 @@ pub(crate) fn report(
     answers: &Answers,
     probes: &Probes,
     rl_only: bool,
+    semantics: &HashMap<PathBuf, Arc<FileSemantics>>,
 ) -> Vec<Diagnostic> {
     let files = snapshot.files();
     let mut out = Vec::new();
-    // A file's declaration table, built the first time a translation on
-    // that file asks for it: it costs a parse of the file and of what it
-    // imports, and most passes translate nothing at all.
-    let mut declarations: HashMap<PathBuf, Vec<DeclaredEnum>> = HashMap::new();
 
     // The rl layer first: the diagnostics each file's projection found on
     // its own (duplicate arms, unknown cases, misplaced constructs). They
@@ -479,11 +493,10 @@ pub(crate) fn report(
         // declaration table its wording names types from is built only for
         // a file that has a diagnostic on glue at all, and once for it.
         if projection::glue_anchor(file, diagnostic.start).is_some() {
-            let declared = declarations
-                .entry(file.source_path.clone())
-                .or_insert_with(|| {
-                    crate::pattern_analyses(&file.source, &externs_of(files, file)).declarations
-                });
+            let declared: &[DeclaredEnum] = semantics
+                .get(&file.source_path)
+                .map(|s| s.analyses.declarations.as_slice())
+                .unwrap_or_default();
             if let Some((anchor, said)) = projection::translate_on_glue(file, diagnostic, declared)
             {
                 let entry = Diagnostic {
@@ -631,13 +644,16 @@ pub(crate) fn report(
         // The nested columns are resolved from declarations, so the
         // imported ones have to be collected — otherwise a payload whose
         // type is an imported enum reads as an unknown alphabet and its
-        // holes go unreported.
-        let externs = externs_of(files, file);
+        // holes go unreported. The cached semantics carry them.
+        let externs: &[crate::EnumSymbol] = semantics
+            .get(&file.source_path)
+            .map(|s| s.externs.as_slice())
+            .unwrap_or_default();
         let asked_payloads = payloads
             .get(&file.source_path)
             .map_or(&[][..], Vec::as_slice);
         for (offset, coverage) in
-            crate::analysis::checked_coverage(&file.source, &externs, asked, asked_payloads)
+            crate::analysis::checked_coverage(&file.source, externs, asked, asked_payloads)
         {
             // A single match's witness is one pattern, quoted the way the
             // default path quotes one; a tuple match's is a combination of
@@ -861,16 +877,34 @@ pub(crate) fn match_declarations(
 /// preferring the snapshot's own text for a file it holds — the same
 /// 1-hop collection every other surface does, so an imported enum is known
 /// under the name the import gave it.
-fn externs_of(
+/// The imported declarations in `file`'s scope, read from the snapshot's
+/// cached per-file symbols where the import target is in the snapshot —
+/// a target that did not change is never re-parsed — and from disk
+/// otherwise.
+pub(crate) fn externs_of(
     files: &[Arc<ProjectedDocument>],
     file: &ProjectedDocument,
 ) -> Vec<crate::EnumSymbol> {
-    super::language::externs_of(&file.source_path, &file.source, &|target| {
+    super::language::externs_from(&file.source_path, file.rl_imports(), &|target| {
         files
             .iter()
             .find(|f| f.source_path == target)
-            .map(|f| f.source.clone())
-            .or_else(|| std::fs::read_to_string(target).ok())
+            .map(|f| {
+                f.enum_symbols()
+                    .iter()
+                    .filter(|d| d.exported)
+                    .cloned()
+                    .collect()
+            })
+            .or_else(|| {
+                let text = std::fs::read_to_string(target).ok()?;
+                Some(
+                    crate::enum_symbols(&text)
+                        .into_iter()
+                        .filter(|d| d.exported)
+                        .collect(),
+                )
+            })
     })
 }
 

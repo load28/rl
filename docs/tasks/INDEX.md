@@ -133,7 +133,8 @@
 | TASK-123 | 이름 해석의 단일화 — analysis가 resolver를 소비 (Phase 3 1/2) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-123](./TASK-123-resolver-owns-names.md) |
 | TASK-124 | typed facts의 경계 확정 — 백엔드 실패 강등 (Phase 4) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-124](./TASK-124-typed-facts-degradation.md) |
 | TASK-125 | flow IR — let-else 발산을 제어 흐름으로 (Phase 5 1/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-125](./TASK-125-flow-ir.md) |
+| TASK-126 | cross-snapshot semantic cache와 의존성 무효화 (Phase 6 1/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-126](./TASK-126-semantic-cache.md) |
 
 ## 다음 태스크 번호
 
-**TASK-126**
+**TASK-127**

@@ -1059,9 +1059,29 @@ pub(super) fn externs_of(
     source: &str,
     read: &dyn Fn(&Path) -> Option<String>,
 ) -> Vec<crate::EnumSymbol> {
+    externs_from(path, &crate::rl_imports(source), &|target| {
+        let text = read(target)?;
+        Some(
+            crate::enum_symbols(&text)
+                .into_iter()
+                .filter(|d| d.exported)
+                .collect(),
+        )
+    })
+}
+
+/// [`externs_of`] over already-parsed pieces: the file's imports and a
+/// provider of each target's **exported** declarations. This is the layer
+/// the semantic cache uses — a target whose projection is cached hands its
+/// symbols over without a re-parse.
+pub(super) fn externs_from(
+    path: &Path,
+    imports: &[crate::RlImport],
+    exports_of: &dyn Fn(&Path) -> Option<Vec<crate::EnumSymbol>>,
+) -> Vec<crate::EnumSymbol> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut externs: Vec<crate::EnumSymbol> = Vec::new();
-    for import in crate::rl_imports(source) {
+    for import in imports {
         if matches!(import.names, crate::RlImportNames::None) {
             continue; // a re-export brings nothing into scope
         }
@@ -1069,13 +1089,9 @@ pub(super) fn externs_of(
             Ok(target) => target,
             Err(_) => continue, // unresolvable — tsc's TS2307, not ours
         };
-        let Some(text) = read(&target) else {
+        let Some(decls) = exports_of(&target) else {
             continue;
         };
-        let decls: Vec<crate::EnumSymbol> = crate::enum_symbols(&text)
-            .into_iter()
-            .filter(|d| d.exported)
-            .collect();
         match &import.names {
             crate::RlImportNames::Namespace(ns) => {
                 externs.extend(decls.into_iter().map(|mut d| {

@@ -14,12 +14,14 @@
 //! engine's incrementality, and it composes with the session's own (the
 //! compiler process stays up and only changed modules are re-served).
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::projection::{self, ProjectedDocument};
-use super::semantics::{self, Checked};
+use super::semantics::{self, Checked, FileSemantics};
 use super::snapshot::Snapshot;
 use crate::CompileError;
 use crate::typescript::backend::TypeScriptBackend;
@@ -80,6 +82,16 @@ pub struct Project {
     /// A project without one still opens and still answers the rl layer;
     /// only the typed facts degrade to unknown ([`Project::check`]).
     backend: Result<NativeBackend, String>,
+    /// Cross-snapshot semantic cache, keyed per file by (content hash,
+    /// imported declarations). A change to a dependency's body leaves an
+    /// importer's entry valid; a change to its exported declarations
+    /// invalidates exactly the importers — the invalidation boundary of
+    /// `docs/design/compiler-core.md` §11.
+    semantics_cache: RefCell<HashMap<PathBuf, CachedSemantics>>,
+    /// How many per-file semantic computations the cache answered without
+    /// recomputing, over the project's lifetime — observability for the
+    /// invalidation contract (and its tests).
+    semantic_cache_hits: Cell<usize>,
     next_snapshot: u64,
     /// The language-service half — the running `tsgo --lsp` conversation —
     /// started by the first editor question ([`crate::engine::language`]).
@@ -106,6 +118,8 @@ impl Project {
             overlays: HashMap::new(),
             cache: HashMap::new(),
             backend,
+            semantics_cache: RefCell::new(HashMap::new()),
+            semantic_cache_hits: Cell::new(0),
             next_snapshot: 0,
             service: None,
         }
@@ -204,11 +218,55 @@ impl Project {
         })
     }
 
+    /// How many per-file semantic computations the cross-snapshot cache
+    /// answered without recomputing. A dependency's body-only change keeps
+    /// its importers' entries; an exported-declaration change invalidates
+    /// them — this counter is how that contract is observed and tested.
+    pub fn semantic_cache_hits(&self) -> usize {
+        self.semantic_cache_hits.get()
+    }
+
+    /// The per-file semantics of a snapshot, served from the
+    /// cross-snapshot cache where the key — (content, imported
+    /// declarations) — still matches.
+    fn file_semantics(&self, snapshot: &Snapshot) -> HashMap<PathBuf, Arc<FileSemantics>> {
+        let files = snapshot.files();
+        let mut out = HashMap::with_capacity(files.len());
+        let mut cache = self.semantics_cache.borrow_mut();
+        for file in files {
+            let externs = semantics::externs_of(files, file);
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            file.source.hash(&mut hasher);
+            let source_hash = hasher.finish();
+            if let Some(cached) = cache.get(&file.source_path)
+                && cached.source_hash == source_hash
+                && cached.value.externs == externs
+            {
+                self.semantic_cache_hits
+                    .set(self.semantic_cache_hits.get() + 1);
+                out.insert(file.source_path.clone(), cached.value.clone());
+                continue;
+            }
+            let analyses = crate::pattern_analyses(&file.source, &externs);
+            let value = Arc::new(FileSemantics { externs, analyses });
+            cache.insert(
+                file.source_path.clone(),
+                CachedSemantics {
+                    source_hash,
+                    value: value.clone(),
+                },
+            );
+            out.insert(file.source_path.clone(), value);
+        }
+        out
+    }
+
     /// Checks a snapshot: asks the running compiler about it and returns
     /// diagnostics at `.rl` positions — and the emitted declarations, when
     /// the request wants them. The session persists across calls; only what
     /// changed since the last ask travels.
     pub fn check(&self, snapshot: &Snapshot, request: &CheckRequest) -> Result<Checked, String> {
+        let semantics = self.file_semantics(snapshot);
         let (mut query, probes) = projection::assemble(snapshot.files(), &self.root, &self.sources);
         query.emit_declarations = request.emit_declarations;
         // A backend that cannot run removes the typed facts, not the pass:
@@ -227,11 +285,25 @@ impl Project {
             Default::default()
         };
         Ok(Checked {
-            diagnostics: semantics::report(snapshot, &answers, &probes, request.rl_only),
+            diagnostics: semantics::report(
+                snapshot,
+                &answers,
+                &probes,
+                request.rl_only,
+                &semantics,
+            ),
             declarations,
             backend_error,
         })
     }
+}
+
+/// One cached [`FileSemantics`] with the half of its key the value does
+/// not carry (the content hash; the externs are compared on the value).
+#[derive(Debug)]
+struct CachedSemantics {
+    source_hash: u64,
+    value: Arc<FileSemantics>,
 }
 
 /// Every file of the project with one of `extensions`, as absolute paths.

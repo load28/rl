@@ -48,6 +48,28 @@ pub struct ProjectedDocument {
     /// its own answers, so one rl error no longer hides a file's type
     /// errors and exhaustiveness holes (TASK-117 symptom 3).
     pub(crate) rl_diagnostics: Vec<crate::Diagnostic>,
+    /// The file's enum declaration symbols, parsed once per content
+    /// version — what an importer's extern collection reads, so a file
+    /// that did not change is never re-parsed for its exports
+    /// (`docs/design/compiler-core.md` §11).
+    enum_symbols: std::sync::OnceLock<Vec<crate::EnumSymbol>>,
+    /// The file's relative `.rl` imports, parsed once per content version —
+    /// the dependency edges the semantic cache keys off.
+    imports: std::sync::OnceLock<Vec<crate::RlImport>>,
+}
+
+impl ProjectedDocument {
+    /// The file's enum declaration symbols (exported or not), computed on
+    /// first use and pinned to this projection's content version.
+    pub(crate) fn enum_symbols(&self) -> &[crate::EnumSymbol] {
+        self.enum_symbols
+            .get_or_init(|| crate::enum_symbols(&self.source))
+    }
+
+    /// The file's relative `.rl` imports, computed on first use.
+    pub(crate) fn rl_imports(&self) -> &[crate::RlImport] {
+        self.imports.get_or_init(|| crate::rl_imports(&self.source))
+    }
 }
 
 impl ProjectedDocument {
@@ -96,6 +118,8 @@ impl ProjectedDocument {
             source,
             emit,
             rl_diagnostics: report.diagnostics,
+            enum_symbols: std::sync::OnceLock::new(),
+            imports: std::sync::OnceLock::new(),
         })
     }
 }
