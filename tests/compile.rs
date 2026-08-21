@@ -2138,6 +2138,20 @@ fn if_let_in_expression_position_is_an_error() {
 }
 
 #[test]
+fn if_let_inside_a_function_inside_an_expression_region_is_allowed() {
+    // The same flow fact that places `try` (TASK-131), from the other
+    // side: an arrow written in a scrutinee or interpolation provides the
+    // statement position the emitted block needs.
+    let out = ok(
+        "const v = match (run(() => { if let A(x) = e { return x; } return 0; })) {\n  Ok(value) => value,\n  _ => 0,\n};\n",
+    );
+    assert!(out.contains("if ($rl_t0.kind === \"A\")"), "{out}");
+
+    let out = ok("const s = `${run(() => { if let A(x) = e { log(x); } return 1; })}`;\n");
+    assert!(out.contains("if ($rl_t0.kind === \"A\")"), "{out}");
+}
+
+#[test]
 fn malformed_if_let_is_an_error_with_position() {
     // `if let` cannot be passed through (never valid TS), so a candidate
     // that fails to parse is reported instead of failing the self-check.

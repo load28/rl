@@ -415,15 +415,21 @@ impl Checker {
         self.visit_program(&stmt.else_body, Ctx::Stmt);
     }
 
+    /// `if let` emits a self-contained block statement, so it needs a
+    /// statement position — which an expression region provides exactly
+    /// when the user wrote a function there (the same flow fact that
+    /// places `try`, judged from the other side: no IIFE to escape, just
+    /// a statement stream to stand in).
     fn check_if_let(&mut self, stmt: &IfLetStmt, ctx: Ctx) {
-        if ctx == Ctx::Expr {
+        if ctx == Ctx::Expr && !stmt.in_function {
             self.error(
                 RlError::span(
                     stmt.head_span.start,
                     stmt.head_span.end,
                     "`if let` cannot be used in expression position (a template interpolation, \
                      a scrutinee or guard, an expression arm body, a `try` expression, or a \
-                     pipeline) — it compiles to a block statement"
+                     pipeline) — it compiles to a block statement. Inside a function written \
+                     here it is fine"
                         .to_string(),
                 )
                 .code(DiagnosticCode::IfLetPlacement),

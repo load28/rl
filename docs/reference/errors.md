@@ -229,7 +229,7 @@ TS가 아니어서 아래 출력 검증 에러로 드러납니다.
 | 메시지 | 원인과 해결 |
 |--------|-------------|
 | `` `if let` could not be parsed here (pattern parens are mandatory, and the `else` must be a block or another `if let`) `` | `if let`으로 시작했지만 문으로 완전히 파싱되지 않았습니다. `if` 뒤의 `let`은 유효한 TS에 없어 통과시킬 수 없으므로 위치와 함께 에러입니다. 흔한 원인: 패턴 괄호 누락(`if let Some = ...`), `else if (조건)` 이어 붙이기(else 블록 안으로 옮깁니다), `= 식` 최상위의 괄호 없는 블록 화살표. 위치는 `if` |
-| `` `if let` cannot be used in expression position (...) — it compiles to a block statement `` | 템플릿 보간·스크루티니·가드·표현식 암 본문·`try` 식·파이프라인 안에서는 쓸 수 없습니다. 문장 위치(match 암의 블록 본문 포함)로 옮깁니다 |
+| `` `if let` cannot be used in expression position (...) — it compiles to a block statement ... `` | 템플릿 보간·스크루티니·가드·표현식 암 본문·`try` 식·파이프라인의 **표현식 자리에 직접** 쓸 수 없습니다. 문장 위치(match 암의 블록 본문 포함)로 옮기거나, 그 자리에 쓴 함수의 본문 안에 넣으세요(제어 흐름 판정 — [§6.5](./language.md#65-if-let-문--조건부-값-추출)) |
 | `` match: binding `<이름>` is used more than once in this pattern ... `` | match와 같은 패턴 규칙 — 별칭으로 해소합니다 |
 
 ## 파이프라인

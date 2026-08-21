@@ -420,9 +420,10 @@ impl Parser<'_> {
                     Some(t) if matches!(t.kind, TokenKind::Ident)
                         && &self.src[t.span.start..t.span.end] == "let")
             {
-                if let Some((cur, byte_end, stmt)) =
+                if let Some((cur, byte_end, mut stmt)) =
                     iflets::parse_if_let(Cursor::new(self, tokens, i + 1, end), tok.span)
                 {
+                    stmt.in_function = crate::flow::in_function_body(self.src, tokens, i);
                     flush_verbatim(&mut segments, seg_start, tok.span.start);
                     segments.push(Segment::IfLet(stmt));
                     seg_start = byte_end;

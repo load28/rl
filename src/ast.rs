@@ -290,6 +290,12 @@ pub(crate) struct IfLetStmt {
     pub body: Program,
     /// The `else` continuation, if any.
     pub else_part: Option<IfLetElse>,
+    /// Whether the statement sits inside a function body written in the
+    /// same parse region — same fact as [`TryStmt::in_function`]. An
+    /// `if let` emits a block statement (no `return` of its own), so the
+    /// fact only matters in expression regions: a function written there
+    /// provides the statement position the construct needs.
+    pub in_function: bool,
 }
 
 /// The `else` continuation of an [`IfLetStmt`].

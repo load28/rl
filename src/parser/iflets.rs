@@ -149,6 +149,10 @@ pub(super) fn parse_if_let<'t>(
             expr,
             body,
             else_part,
+            // Filled by the caller for the outermost statement (a chained
+            // `else if let` is never in expression position, so only the
+            // outer one's placement is ever judged).
+            in_function: false,
         },
     ))
 }
