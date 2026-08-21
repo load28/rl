@@ -52,12 +52,19 @@ pub struct Diagnostic {
 /// What one checked snapshot came back with.
 #[derive(Debug, Default)]
 pub struct Checked {
-    /// Every diagnostic of the pass, in report order: the type layer first
-    /// (unless the request was rl-only), then literal exhaustiveness, tag
+    /// Every diagnostic of the pass, in report order: the rl layer first
+    /// (each file's own recoverable diagnostics), then the type layer
+    /// (unless the request was rl-only), literal exhaustiveness, tag
     /// exhaustiveness, `val` mutations, and `val` passes.
     pub diagnostics: Vec<Diagnostic>,
     /// The declarations the compiler emitted, when they were requested.
     pub declarations: Declarations,
+    /// Why the TypeScript layer could not answer, when it could not — the
+    /// backend failed to run (no toolchain, a dead process). The rl-level
+    /// diagnostics above are still complete: a missing type checker
+    /// removes the *typed* facts, not rl's own answers
+    /// (`docs/design/compiler-core.md` §7).
+    pub backend_error: Option<String>,
 }
 
 /// The declarations of one emitting pass, matched back to their sources.

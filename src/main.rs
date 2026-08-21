@@ -763,7 +763,7 @@ fn typed_pass(
 
     // The declarations the compiler emitted for the lowered modules, laid
     // out under `-o` the way the sources are laid out under the project.
-    if options.emit {
+    if options.emit && checked.backend_error.is_none() {
         write_declarations(
             &checked.declarations,
             options.inputs,
@@ -784,6 +784,18 @@ fn typed_pass(
             ),
             None => eprintln!("rlc: {}: {}", shown(&diagnostic.path), diagnostic.message),
         }
+    }
+
+    // A backend that could not run is the pass failing to *run*, not the
+    // code failing the check — the rl diagnostics above are complete, the
+    // typed layer is missing, and the exit code says "could not check".
+    if let Some(error) = &checked.backend_error {
+        eprintln!("rlc: {error}");
+        eprintln!("rlc: the TypeScript layer did not run — only rl-level diagnostics are shown");
+        return Ok(TypedReport {
+            reported: checked.diagnostics.len().max(1),
+            blocked: true,
+        });
     }
 
     Ok(TypedReport {

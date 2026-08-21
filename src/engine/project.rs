@@ -76,7 +76,10 @@ pub struct Project {
     /// Projections by path, kept across snapshots. An entry is reused when
     /// the file's current text equals the projected text.
     cache: HashMap<PathBuf, Arc<ProjectedDocument>>,
-    backend: NativeBackend,
+    /// The TypeScript backend — or why there is none (no toolchain found).
+    /// A project without one still opens and still answers the rl layer;
+    /// only the typed facts degrade to unknown ([`Project::check`]).
+    backend: Result<NativeBackend, String>,
     next_snapshot: u64,
     /// The language-service half — the running `tsgo --lsp` conversation —
     /// started by the first editor question ([`crate::engine::language`]).
@@ -91,7 +94,7 @@ impl Project {
         collected: Vec<PathBuf>,
         initial: Vec<PathBuf>,
         sources: Vec<PathBuf>,
-        backend: NativeBackend,
+        backend: Result<NativeBackend, String>,
     ) -> Project {
         Project {
             root,
@@ -208,10 +211,17 @@ impl Project {
     pub fn check(&self, snapshot: &Snapshot, request: &CheckRequest) -> Result<Checked, String> {
         let (mut query, probes) = projection::assemble(snapshot.files(), &self.root, &self.sources);
         query.emit_declarations = request.emit_declarations;
-        let answers = self
-            .backend
-            .ask(self.tsconfig.as_deref(), &self.root, &query)?;
-        let declarations = if request.emit_declarations {
+        // A backend that cannot run removes the typed facts, not the pass:
+        // every typed answer degrades to unknown and the rl layer still
+        // reports in full (`docs/design/compiler-core.md` §7).
+        let (answers, backend_error) = match &self.backend {
+            Ok(backend) => match backend.ask(self.tsconfig.as_deref(), &self.root, &query) {
+                Ok(answers) => (answers, None),
+                Err(error) => (Default::default(), Some(error)),
+            },
+            Err(missing) => (Default::default(), Some(missing.clone())),
+        };
+        let declarations = if request.emit_declarations && backend_error.is_none() {
             semantics::match_declarations(snapshot, &answers, &self.root, &self.requested)
         } else {
             Default::default()
@@ -219,6 +229,7 @@ impl Project {
         Ok(Checked {
             diagnostics: semantics::report(snapshot, &answers, &probes, request.rl_only),
             declarations,
+            backend_error,
         })
     }
 }

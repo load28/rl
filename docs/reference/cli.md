@@ -218,6 +218,11 @@ rlc: src/main.rl:2:1: cannot call mutating method `set` through val binding `map
   진단과 **함께** 보고합니다. 파일이 통째로 막히는 것(종료 코드 2)은
   산출물이 TypeScript일 수 없는 경우뿐입니다
   ([`errors.md`](./errors.md#다중-보고)).
+- **역도 성립합니다: 타입 계층의 부재가 rl 진단을 가리지 않습니다.**
+  TypeScript 툴체인이 없거나 백엔드가 죽으면 typed 사실만 빠지고, rl 수준
+  진단은 전부 출력된 뒤 "the TypeScript layer did not run"과 함께 종료
+  코드 2로 끝납니다(검사가 *못 돈* 것이지 통과가 아니므로). `--server`의
+  `typedCheck`는 같은 상태를 `backendError` 필드로 전합니다.
 - **소진성 문안은 `--check`와 같은 렌더러를 씁니다.** `--check`는 자기 선언
   표에서 답하므로 enum 이름을 댈 수 있고(`match on enum Shape is not
   exhaustive`), 이 모드는 *타입*에서 답하므로 출처 없이 `match is not

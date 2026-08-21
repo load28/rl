@@ -561,7 +561,13 @@ fn typed_check(
                             })
                         })
                         .collect();
-                    json!({ "blocked": false, "diagnostics": diagnostics })
+                    // `backendError`: the TypeScript layer could not run —
+                    // the rl diagnostics above are still complete.
+                    json!({
+                        "blocked": false,
+                        "diagnostics": diagnostics,
+                        "backendError": checked.backend_error,
+                    })
                 }
             }
         }

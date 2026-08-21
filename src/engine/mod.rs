@@ -124,7 +124,10 @@ impl Engine {
             Ok(_) => collected.clone(),
             Err(e) => return Err(e.to_string()),
         };
-        let backend = NativeBackend::new(self.node.clone(), &root)?;
+        // No toolchain is not "no project": the rl layer answers without
+        // one, and the missing backend is carried as the typed layer's
+        // failure instead ([`Checked::backend_error`]).
+        let backend = NativeBackend::new(self.node.clone(), &root);
         // With a configuration the project's own `include` decides which
         // hand-written files are in the program; without one, they have to
         // be listed or a `.ts` nothing imports is never checked.
