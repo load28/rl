@@ -103,6 +103,13 @@ fn enum_invalid_field_type_is_rejected_by_swc_with_position() {
 }
 
 #[test]
+fn enum_with_unbalanced_field_type_is_a_malformed_rl_enum() {
+    let e = err("enum E { A(value: number]) }\n");
+    assert!(e.message.contains("rl `enum` could not be parsed"), "{e}");
+    assert_eq!((e.line, e.col), (1, 1));
+}
+
+#[test]
 fn enum_invalid_field_type_passes_without_verify() {
     // Without swc validation the construct still parses; the broken type is
     // carried into the output (where tsc would catch it).
@@ -340,14 +347,13 @@ fn or_pattern_binding_mismatch_is_error() {
 
 #[test]
 fn or_pattern_double_pipe_is_not_rl_syntax() {
-    // `A || B` is not an or-pattern; the candidate fails to parse and the
-    // (invalid-TS) text passes through to the output self-check.
+    // `A || B` is not an or-pattern; the surrounding arrow arm commits the
+    // construct to rl, so the parser reports it directly.
     let e = err("const r = match (x) { A || B => 1 };");
     // Reported where the text that failed is — the `match` that stayed
     // verbatim — not at a position in the generated module.
     assert!(
-        e.message
-            .contains("`match` here did not parse as an rl `match`"),
+        e.message.contains("rl `match` could not be parsed"),
         "{}",
         e.message
     );
@@ -460,12 +466,11 @@ fn await_in_guard_makes_match_async() {
 
 #[test]
 fn wildcard_with_guard_is_not_rl_syntax() {
-    // `_ if ...` does not parse as an rl match; the (invalid-TS) text passes
-    // through and the output self-check reports it.
+    // `_ if ...` does not parse as an rl match; the arrow arm has already
+    // committed the construct to rl.
     let e = err("const r = match (x) { A => 1, _ if c => 0 };");
     assert!(
-        e.message
-            .contains("`match` here did not parse as an rl `match`"),
+        e.message.contains("rl `match` could not be parsed"),
         "{}",
         e.message
     );
@@ -1869,6 +1874,20 @@ fn tuple_match_arity_mismatch_is_an_error() {
 }
 
 #[test]
+fn one_element_tuple_pattern_is_a_malformed_tuple_match() {
+    let e = err("const r = match (a, b) {\n  (A) => 1,\n  _ => 0,\n};\n");
+    assert!(e.message.contains("rl `match` could not be parsed"), "{e}");
+    assert_eq!((e.line, e.col), (1, 11));
+}
+
+#[test]
+fn match_without_scrutinee_parentheses_is_a_malformed_rl_match() {
+    let e = err("const r = match value { A => 1, _ => 0 };\n");
+    assert!(e.message.contains("rl `match` could not be parsed"), "{e}");
+    assert_eq!((e.line, e.col), (1, 11));
+}
+
+#[test]
 fn tuple_match_duplicate_binding_across_elements_is_an_error() {
     let e =
         err("const r = match (a, b) {\n  (Some(value), Some(value)) => value,\n  _ => 0,\n};\n");
@@ -2765,16 +2784,15 @@ fn literal_match_with_await_becomes_an_async_iife() {
 
 #[test]
 fn tuple_patterns_do_not_accept_literals() {
-    // v1 keeps literals out of tuple positions (design §18): the arms fail
-    // the tuple parse, and — with no `=>`-terminated single-match reading
-    // either — the whole construct passes through untouched. (The text is
-    // not valid TypeScript, so the output self-check is skipped here.)
+    // v1 keeps literals out of tuple positions (design §18). The arrow arm
+    // commits the construct to rl, then the tuple-pattern rule rejects it.
     let opts = Options {
         verify: false,
         ..Options::default()
     };
     let src = r#"const v = match (a, b) { ("x", 1) => 1, _ => 0 };"#;
-    assert_eq!(compile(src, &opts).unwrap(), src);
+    let error = compile(src, &opts).expect_err("tuple literals are malformed rl");
+    assert!(error.message.contains("rl `match` could not be parsed"));
 }
 
 #[test]

@@ -43,6 +43,10 @@ pub enum DiagnosticCode {
     StrayIfLet,
     /// A `result` block the parser could not claim.
     StrayResult,
+    /// An `enum` committed to rl syntax but not fully parsed.
+    MalformedEnum,
+    /// A `match` committed to rl syntax but not fully parsed.
+    MalformedMatch,
     /// A `result` binding missing its declaration keyword.
     ResultMissingKeyword,
     /// A `result` binding below the block's top level — it cannot
@@ -102,6 +106,8 @@ impl DiagnosticCode {
             DiagnosticCode::StrayPipe => "stray-pipe",
             DiagnosticCode::StrayIfLet => "stray-if-let",
             DiagnosticCode::StrayResult => "stray-result",
+            DiagnosticCode::MalformedEnum => "malformed-enum",
+            DiagnosticCode::MalformedMatch => "malformed-match",
             DiagnosticCode::ResultMissingKeyword => "result-missing-keyword",
             DiagnosticCode::ResultNestedBinding => "result-nested-binding",
             DiagnosticCode::FlowFirstStepMethod => "flow-first-step-method",

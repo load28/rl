@@ -146,7 +146,8 @@
 | TASK-136 | codegen 회복 출력 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-136](./TASK-136-codegen-recovery-output.md) |
 | TASK-137 | 에디터 타입 진단 투영 가드 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-137](./TASK-137-editor-diagnostic-projection-guard.md) |
 | TASK-138 | Snapshot 부분 실패 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-138](./TASK-138-snapshot-partial-failure.md) |
+| TASK-139 | 파서 Claim 커밋 모델 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-139](./TASK-139-parser-claim-model.md) |
 
 ## 다음 태스크 번호
 
-**TASK-139**
+**TASK-140**

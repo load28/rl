@@ -6,6 +6,7 @@
 //! misplaced wildcard, non-exhaustiveness — are the semantic phase's job.
 //! The scrutinee and every arm body are recursively parsed sub-programs.
 
+use super::Claim;
 use super::cursor::Cursor;
 use super::is_reserved;
 use super::literals::{at_literal, parse_literal_alternatives};
@@ -29,6 +30,51 @@ pub(super) enum ParsedMatch {
 /// success returns the advanced cursor, the byte just past the closing
 /// brace, and the parsed expression.
 pub(super) fn parse_match<'t>(
+    cur: Cursor<'t>,
+    kw_span: Span,
+) -> Claim<(Cursor<'t>, usize, ParsedMatch)> {
+    if let Some(parsed) = parse_match_complete(cur, kw_span) {
+        return Claim::Parsed(parsed);
+    }
+    let committed = match cur.peek() {
+        Some(token) if matches!(token.kind, TokenKind::Ident) => true,
+        Some(token) if matches!(token.kind, TokenKind::Punct(b'(')) => cur
+            .find_close()
+            .filter(|close| {
+                matches!(
+                    cur.tokens.get(*close + 1).map(|token| &token.kind),
+                    Some(TokenKind::Punct(b'{'))
+                )
+            })
+            .and_then(|close| {
+                let body = Cursor {
+                    idx: close + 1,
+                    ..cur
+                };
+                body.find_close().map(|body_close| (close + 2, body_close))
+            })
+            .is_some_and(|(start, end)| {
+                cur.tokens[start..end]
+                    .iter()
+                    .any(|token| matches!(token.kind, TokenKind::Arrow))
+            }),
+        _ => false,
+    };
+    if committed {
+        Claim::Malformed(
+            crate::error::RlError::span(
+                kw_span.start,
+                kw_span.end,
+                "rl `match` could not be parsed (write `match (<scrutinee>) { <pattern> => <body> }`; tuple patterns need at least two elements)".to_string(),
+            )
+            .code(crate::DiagnosticCode::MalformedMatch),
+        )
+    } else {
+        Claim::NotRl
+    }
+}
+
+fn parse_match_complete<'t>(
     mut cur: Cursor<'t>,
     kw_span: Span,
 ) -> Option<(Cursor<'t>, usize, ParsedMatch)> {

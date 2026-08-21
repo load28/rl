@@ -63,13 +63,14 @@ CLI는 시작 위치만 찍지만, 진단은 그 안에 **범위**를 함께 담
 |--------|-------------|
 | `enum <이름>: duplicate case "<태그>"` | 한 enum에 같은 태그가 두 번. 위치는 두 번째 태그. 합치거나 이름을 바꿉니다 |
 | `enum <이름>: invalid type for field ``<필드>``: <상세>` | 필드 타입이 TypeScript 타입으로 파싱되지 않음. 위치는 타입 시작 지점. 표기를 고치거나 `--no-verify`로 우회(이 경우 tsc 단계에서 드러납니다) |
+| ``rl `enum` could not be parsed (...)`` | payload 괄호나 제네릭으로 rl enum임이 확정됐지만 선언이 완성되지 않음. 위치는 `enum` |
 
 ```rl
 enum Shape { Circle(r: number), Circle(d: number) }
 // rlc: file.rl:1:33: enum Shape: duplicate case "Circle"
 
 enum E { A(x: number]) }
-// rlc: file.rl:1:15: enum E: invalid type for field `x`: Expected ',', got ']'
+// rlc: file.rl:1:1: rl `enum` could not be parsed (...)
 ```
 
 ## 패턴의 이름 해석
@@ -307,15 +308,18 @@ user.name = "Lee";
 
 ## 출력 검증
 
-생성물 자가 검사 실패입니다 — ① rl 구문이 **거의** 맞았지만 완전히 파싱되지
-않아 통과 영역으로 흘러갔거나 ② 통과 영역의 소스가 애초에 유효한 TS가 아니었거나
+생성물 자가 검사 실패입니다 — ① 통과 영역의 소스가 애초에 유효한 TS가 아니었거나
 (검증기가 아직 모르는 최신 문법 포함) ③ rlc의 버그.
 
 swc는 **생성물**의 위치를 말하지만 사용자가 여는 파일은 `.rl`이므로, 그 위치는
 방출 매핑을 타고 원본으로 돌아옵니다 — 글루에서 났다면 그 글루를 쓴 구문으로.
 즉 이 에러도 다른 에러처럼 `.rl`의 행·열을 갖습니다.
 
-①이면(가장 흔합니다) 그 구문을 지목합니다:
+`match`와 `enum`은 rl 구문으로 확정된 뒤 파싱에 실패하면 각각
+``rl `match` could not be parsed (...)``와 ``rl `enum` could not be parsed (...)``를
+직접 보고합니다. 출력 검증은 rl로 확정되지 않은 통과 영역의 백스톱입니다.
+
+통과 영역 근처의 rl 키워드를 찾을 수 있으면 그 구문을 지목합니다:
 
 ```
 `match` here did not parse as an rl `match`, so it was passed through as

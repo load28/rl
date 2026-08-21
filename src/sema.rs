@@ -255,6 +255,9 @@ impl Checker {
     }
 
     fn visit_program(&mut self, program: &Program, ctx: Ctx, place: Place) {
+        for error in &program.malformed {
+            self.error(error.clone());
+        }
         // A stray `|>` or `if let` cannot be passed through: neither is
         // valid TypeScript, so the output self-check would fail without a
         // position. Report them as rl errors here instead (error-layering

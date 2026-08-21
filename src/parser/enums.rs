@@ -5,6 +5,7 @@
 //! verbatim. rl-level errors — duplicate cases, bad field types — are the
 //! semantic phase's job.
 
+use super::Claim;
 use super::cursor::Cursor;
 use super::is_reserved;
 use crate::ast::{EnumCase, EnumDecl, Field};
@@ -14,6 +15,81 @@ use crate::lexer::TokenKind;
 /// the advanced cursor, the byte just past the closing brace, and the
 /// parsed declaration.
 pub(super) fn parse_enum<'t>(
+    cur: Cursor<'t>,
+    exported: bool,
+) -> Claim<(Cursor<'t>, usize, EnumDecl)> {
+    if let Some(parsed) = parse_enum_complete(cur, exported) {
+        return Claim::Parsed(parsed);
+    }
+    if enum_committed(cur) {
+        let start = cur
+            .idx
+            .checked_sub(1)
+            .and_then(|idx| cur.tokens.get(idx))
+            .map_or(0, |token| token.span.start);
+        return Claim::Malformed(
+            crate::error::RlError::span(
+                start,
+                start + "enum".len(),
+                "rl `enum` could not be parsed (cases are `Case` or `Case(field: Type)`)"
+                    .to_string(),
+            )
+            .code(crate::DiagnosticCode::MalformedEnum),
+        );
+    }
+    Claim::NotRl
+}
+
+fn enum_committed(cur: Cursor<'_>) -> bool {
+    let Some(name) = cur.tokens.get(cur.idx) else {
+        return false;
+    };
+    if !matches!(name.kind, TokenKind::Ident) {
+        return false;
+    }
+    if matches!(
+        cur.tokens.get(cur.idx + 1).map(|t| &t.kind),
+        Some(TokenKind::Punct(b'<'))
+    ) {
+        return true;
+    }
+    let Some(open) = (cur.idx + 1..cur.tokens.len())
+        .find(|index| matches!(cur.tokens[*index].kind, TokenKind::Punct(b'{')))
+    else {
+        return false;
+    };
+    let mut depth = 0usize;
+    for index in open..cur.tokens.len().saturating_sub(1) {
+        match cur.tokens[index].kind {
+            TokenKind::Punct(b'{') => depth += 1,
+            TokenKind::Punct(b'}') => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+            TokenKind::Ident if depth == 1 => {
+                let at_case_start = index == open + 1
+                    || matches!(
+                        cur.tokens.get(index.wrapping_sub(1)).map(|t| &t.kind),
+                        Some(TokenKind::Punct(b',' | b'{'))
+                    );
+                if at_case_start
+                    && matches!(
+                        cur.tokens.get(index + 1).map(|t| &t.kind),
+                        Some(TokenKind::Punct(b'('))
+                    )
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn parse_enum_complete<'t>(
     mut cur: Cursor<'t>,
     exported: bool,
 ) -> Option<(Cursor<'t>, usize, EnumDecl)> {

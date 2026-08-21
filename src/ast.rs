@@ -24,6 +24,9 @@ pub(crate) struct Span {
 #[derive(Debug)]
 pub(crate) struct Program {
     pub segments: Vec<Segment>,
+    /// Candidates committed to rl syntax but malformed. Unlike a failed
+    /// lookalike parse, these cannot be valid TypeScript passthrough.
+    pub malformed: Vec<crate::error::RlError>,
     /// Byte offsets of `|>` tokens that could not be claimed as a pipeline.
     /// `|>` cannot occur in valid TypeScript, so leaving one in the output
     /// would fail the self-check without a position — the semantic phase

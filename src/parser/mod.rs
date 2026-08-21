@@ -49,6 +49,12 @@ use cursor::Cursor;
 
 pub(crate) use cursor::{dotted_at, find_close_at};
 
+pub(super) enum Claim<T> {
+    Parsed(T),
+    NotRl,
+    Malformed(crate::error::RlError),
+}
+
 // Words that can never be a variant tag, match pattern tag, or binding name.
 // Meeting one of these while trying to parse an rl construct aborts the
 // attempt, so ordinary TypeScript (e.g. a class method named `match`) is
@@ -239,6 +245,7 @@ impl Parser<'_> {
     /// verbatim segments.
     pub(crate) fn parse_tokens(&self, tokens: &[Token], start: usize, end: usize) -> Program {
         let mut segments: Vec<Segment> = Vec::new();
+        let mut malformed = Vec::new();
         let mut stray_pipes: Vec<usize> = Vec::new();
         let mut stray_if_lets: Vec<usize> = Vec::new();
         let mut stray_results: Vec<usize> = Vec::new();
@@ -321,16 +328,19 @@ impl Parser<'_> {
                         _ => (None, false),
                     }
                 };
-                if let Some(kw_idx) = kw_idx
-                    && let Some((cur, byte_end, decl)) =
-                        enums::parse_enum(Cursor::new(self, tokens, kw_idx + 1, end), exported)
-                {
-                    flush_verbatim(&mut segments, seg_start, tok.span.start);
-                    segments.push(Segment::Enum(decl));
-                    seg_start = byte_end;
-                    i = cur.idx;
-                    expr = (i, false);
-                    continue;
+                if let Some(kw_idx) = kw_idx {
+                    match enums::parse_enum(Cursor::new(self, tokens, kw_idx + 1, end), exported) {
+                        Claim::Parsed((cur, byte_end, decl)) => {
+                            flush_verbatim(&mut segments, seg_start, tok.span.start);
+                            segments.push(Segment::Enum(decl));
+                            seg_start = byte_end;
+                            i = cur.idx;
+                            expr = (i, false);
+                            continue;
+                        }
+                        Claim::Malformed(error) => malformed.push(error),
+                        Claim::NotRl => {}
+                    }
                 }
             }
 
@@ -350,19 +360,21 @@ impl Parser<'_> {
                 continue;
             }
 
-            if !dotted
-                && word == "match"
-                && let Some((cur, byte_end, parsed)) =
-                    matches::parse_match(Cursor::new(self, tokens, i + 1, end), tok.span)
-            {
-                flush_verbatim(&mut segments, seg_start, tok.span.start);
-                segments.push(match parsed {
-                    matches::ParsedMatch::Single(expr) => Segment::Match(expr),
-                    matches::ParsedMatch::Tuple(expr) => Segment::TupleMatch(expr),
-                });
-                seg_start = byte_end;
-                i = cur.idx;
-                continue;
+            if !dotted && word == "match" {
+                match matches::parse_match(Cursor::new(self, tokens, i + 1, end), tok.span) {
+                    Claim::Parsed((cur, byte_end, parsed)) => {
+                        flush_verbatim(&mut segments, seg_start, tok.span.start);
+                        segments.push(match parsed {
+                            matches::ParsedMatch::Single(expr) => Segment::Match(expr),
+                            matches::ParsedMatch::Tuple(expr) => Segment::TupleMatch(expr),
+                        });
+                        seg_start = byte_end;
+                        i = cur.idx;
+                        continue;
+                    }
+                    Claim::Malformed(error) => malformed.push(error),
+                    Claim::NotRl => {}
+                }
             }
 
             // `try <expr>;` — never valid TypeScript in expression
@@ -486,6 +498,7 @@ impl Parser<'_> {
         flush_verbatim(&mut segments, seg_start, end);
         Program {
             segments,
+            malformed,
             stray_pipes,
             stray_if_lets,
             stray_results,
