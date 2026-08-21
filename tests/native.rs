@@ -421,6 +421,44 @@ fn a_diagnostic_on_generated_code_is_restated_in_rls_words() {
 }
 
 #[test]
+fn a_restated_diagnostic_calls_a_case_by_its_declared_name() {
+    let root = require_tsgo!();
+    // TypeScript has no word for an rl case, so a narrowed one prints as
+    // the object type it lowers to. rl knows whose case that is and says
+    // so (TASK-118) — while the original, structural, rides along.
+    let dir = project(&[(
+        "src/named.rl",
+        "import { Result } from \"@rl/std\";\n\
+         enum Wire { OutOfRange(value: number), Missing }\n\
+         enum ParseError { NotANumber(text: string) }\n\
+         function inner(w: Wire) {\n\
+         \x20 if (w.kind === \"OutOfRange\") { return Result.Err(w); }\n\
+         \x20 return Result.Ok(1);\n\
+         }\n\
+         export function outer(w: Wire): Result<number, ParseError> {\n\
+         \x20 const n = try inner(w);\n\
+         \x20 return Result.Ok(n);\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("the `Err` this `try` propagates does not fit"),
+        "in rl's words: {out}"
+    );
+    assert!(
+        out.contains(
+            "(in rl's names: Type 'Err<Wire.OutOfRange>' is not assignable to type \
+             'Result<number, ParseError>'.)"
+        ),
+        "the case by its declaration, the full union by its enum: {out}"
+    );
+    assert!(
+        out.contains("(ts2322: Type 'Err<{ kind: \"OutOfRange\"; value: number; }>'"),
+        "with TypeScript's own text alongside: {out}"
+    );
+}
+
+#[test]
 fn a_ts_file_and_an_rl_file_share_one_project_graph() {
     let root = require_tsgo!();
     let dir = project(&[
