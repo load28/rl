@@ -540,6 +540,38 @@ console.log(JSON.stringify(checked("4")));
 }
 
 #[test]
+fn runtime_try_inside_a_closure_propagates_from_the_closure() {
+    require_toolchain!();
+    // Rust's `?` inside a closure: the `try` inside the arrow written in a
+    // match scrutinee returns from the *arrow*, and the match sees the
+    // Result it produced.
+    let lines = run_with_std(
+        r#"
+import { Result } from "./rl.js";
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
+}
+
+function describe(raw: string): string {
+  return match (((): Result<number, string> => {
+    const n = try parseNum(raw);
+    return Result.Ok(n * 2);
+  })()) {
+    Ok(value) => "doubled: " + value,
+    Err(error) => "failed: " + error,
+  };
+}
+
+console.log(describe("21"));
+console.log(describe("x"));
+"#,
+    );
+    assert_eq!(lines, vec!["doubled: 42", "failed: not a number: x"]);
+}
+
+#[test]
 fn runtime_let_else_narrows_and_diverges() {
     require_toolchain!();
     // tsc --strict must accept the emitted destructuring: the diverging

@@ -70,7 +70,7 @@ try validateRange(parsed);          // propagate-only; `try await f();` ok
 - Result only (Ok unwraps `.value`; Err returned from enclosing fn). Option unsupported → `Option.okOr(o, err)` first.
 - Enclosing fn return type must be Result compatible with expr's Err type; no auto conversion.
 - UNANNOTATED fn: tsc infers the union of the return paths, so several `try`s with different Err types give `Ok<T> | Err<E1> | Err<E2>` = `Result<T, E1 | E2>`. rlc never collects/unions error types — leave inference to tsc.
-- FORBIDDEN (compile error): inside match (scrutinee/arm), template interpolation, another try, module top level → extract helper fn.
+- FORBIDDEN (compile error): module top level / namespace body (no function for the emitted `return` to exit), and statement positions directly inside match (scrutinee/arm), template interpolation, `result` block, another try (`return` would exit the construct's IIFE). ALLOWED inside a function you write there — `run(() => { try g(); ... })` in a guard/step/arm is Rust's `?` in a closure. Placement is a control-flow fact, not a nesting rule.
 - Expr can't start with `(` or `<`: `try f(x);` not `try (f(x));`.
 
 ## let-else
@@ -124,7 +124,7 @@ const data = result {
 - Result only (no Option/Promise do-notation, no `<-` outside a result block).
 - Block is an EXPRESSION (compiles to an IIFE of early returns): usable anywhere, incl. pipeline head. `await` inside → async IIFE, awaited.
 - Error types UNION automatically: bindings of `Result<_, E1>` + `Result<_, E2>` → block assignable to `Result<T, E1 | E2>`. rlc infers NO types; tsc narrows each step.
-- `return` inside the block returns from the BLOCK. So `try`/let-else are FORBIDDEN inside (located error) — use `<-`. `if let` is fine.
+- `return` inside the block returns from the BLOCK. So `try`/let-else directly in the block's statements are FORBIDDEN (located error) — use `<-`; inside a function written in the block they are fine. `if let` is fine anywhere here.
 - Final expr already a Result → nested `Result<Result<...>>`; bind it with `<-` instead.
 
 ## @rl/std
@@ -202,4 +202,4 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 
 ## Checklist
 
-`val` only in front of `const|let|var` or a parameter, same line; match parens + `_` last + object arms `({...})`; bind by field name not position; literal patterns are values (never mixed with tags, none in tuple elements); `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check-types src`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.
+`val` only in front of `const|let|var` or a parameter, same line; match parens + `_` last + object arms `({...})`; bind by field name not position; literal patterns are values (never mixed with tags, none in tuple elements); `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, and a function to sit in when inside match/`${}`/`result` (try also at top level); pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check-types src`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.

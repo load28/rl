@@ -248,6 +248,12 @@ pub(crate) struct LetElseStmt {
     /// for Rust's "the else block must diverge" rule. Computed by the
     /// parser (which stays infallible), enforced by sema.
     pub diverges: bool,
+    /// Whether the statement sits inside a function body written in the
+    /// same parse region — same fact as [`TryStmt::in_function`]. Inside
+    /// an rl construct's statement region it decides placement: the
+    /// `else`'s exits must not leave the construct's IIFE, so without a
+    /// function written there the statement is rejected.
+    pub in_function: bool,
 }
 
 /// A structurally parsed rl `if let` statement:
@@ -313,6 +319,14 @@ pub(crate) struct TryStmt {
     pub decl: Option<(String, Span)>,
     /// The expression after `try`, recursively parsed.
     pub expr: Program,
+    /// Whether the statement sits inside a function body **written in the
+    /// same parse region** (`crate::flow::in_function_body`) — the
+    /// placement fact sema judges: the emitted `return` must have a
+    /// user-written function to exit. At a module's top level there is
+    /// none; inside an rl construct's own statement region (which compiles
+    /// into an IIFE) the region boundary is the construct, so only a
+    /// function the user wrote *inside* it counts.
+    pub in_function: bool,
 }
 
 /// A structurally parsed rl `enum` declaration.

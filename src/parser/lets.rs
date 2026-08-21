@@ -100,6 +100,9 @@ pub(super) fn parse_let_else<'t>(
                 .parse_tokens(body_tokens, body_range.0, body_range.1),
             else_off,
             diverges: crate::flow::block_diverges(cur.parser.src, body_tokens),
+            // Filled by the caller, which knows the statement's token
+            // index in the parse region.
+            in_function: false,
         },
     ))
 }

@@ -369,9 +369,10 @@ impl Parser<'_> {
             // structurally excluded by the sub-parser).
             if !dotted
                 && word == "try"
-                && let Some((cur, byte_end, stmt)) =
+                && let Some((cur, byte_end, mut stmt)) =
                     tries::parse_try_stmt(Cursor::new(self, tokens, i + 1, end), tok.span)
             {
+                stmt.in_function = crate::flow::in_function_body(self.src, tokens, i);
                 flush_verbatim(&mut segments, seg_start, tok.span.start);
                 segments.push(Segment::Try(stmt));
                 seg_start = byte_end;
@@ -385,9 +386,10 @@ impl Parser<'_> {
             // declaration keyword is never followed by `<ident>(` in
             // valid TypeScript.
             if !dotted && (word == "const" || word == "let" || word == "var") {
-                if let Some((cur, byte_end, stmt)) =
+                if let Some((cur, byte_end, mut stmt)) =
                     tries::parse_try_decl(Cursor::new(self, tokens, i + 1, end), tok.span)
                 {
+                    stmt.in_function = crate::flow::in_function_body(self.src, tokens, i);
                     flush_verbatim(&mut segments, seg_start, tok.span.start);
                     segments.push(Segment::Try(stmt));
                     seg_start = byte_end;
@@ -395,9 +397,10 @@ impl Parser<'_> {
                     expr = (i, false);
                     continue;
                 }
-                if let Some((cur, byte_end, stmt)) =
+                if let Some((cur, byte_end, mut stmt)) =
                     lets::parse_let_else(Cursor::new(self, tokens, i + 1, end), tok.span)
                 {
+                    stmt.in_function = crate::flow::in_function_body(self.src, tokens, i);
                     flush_verbatim(&mut segments, seg_start, tok.span.start);
                     segments.push(Segment::LetElse(stmt));
                     seg_start = byte_end;

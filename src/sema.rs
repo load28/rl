@@ -30,14 +30,20 @@
 //!   Whether a literal match is exhaustive is a question about the
 //!   scrutinee's TypeScript type and is deliberately left to the
 //!   `--types` pipeline ([`crate::literal_matches`]).
-//! - `try`: only allowed in the top-level statement stream — inside a match
-//!   expression, a `result` block, a template interpolation, or another
-//!   try's expression its emitted `return` would not exit the enclosing
-//!   function, so it is an error there.
-//! - let-else: same placement rule as `try` (it emits statements into the
-//!   enclosing scope), plus the `else` block must end with a diverging
-//!   statement (`return`/`throw`/`break`/`continue`) — otherwise the
-//!   destructuring after the block would run with the case unproven.
+//! - `try`: must sit inside a function written in its parse region
+//!   ([`crate::flow::in_function_body`], carried on the statement by the
+//!   parser) — its emitted `return` needs a user function to exit. That
+//!   rules out the module's top level, and the statement regions of rl
+//!   constructs (a match arm, a `result` block, a template interpolation)
+//!   *except* where the user wrote a function there: a `try` inside an
+//!   arrow inside an arm is Rust's `?` inside a closure, and is fine.
+//! - let-else: the same flow fact decides placement, except the module's
+//!   top level is fine (the lowering emits no `return` of its own; a
+//!   `throw`-diverging `else` is valid anywhere) — only rl constructs'
+//!   statement regions need a user function around it. And the `else`
+//!   block must diverge on every path (`return`/`throw`/`break`/
+//!   `continue`; a CFG answer) — otherwise the destructuring after the
+//!   block would run with the case unproven.
 //! - exhaustiveness: a wildcard-free match whose arm tags all belong to an
 //!   enum declared in this file, an imported declaration
 //!   ([`crate::Options::extern_enums`], collected by the CLI from direct
@@ -329,32 +335,49 @@ impl Checker {
         }
     }
 
+    /// `try` placement is a **flow** fact, not a nesting rule: the lowering
+    /// emits a `return`, so the statement must sit inside a function the
+    /// user wrote in the same region — then the `return` exits that
+    /// function, wherever the region is (a match arm, a scrutinee, a
+    /// pipeline step: a `try` inside an arrow written there is fine,
+    /// exactly like `?` inside a closure in Rust). Without one, the
+    /// `return` would exit the construct's own IIFE (`ctx != Top`) or fall
+    /// at the module's top level, where there is nothing to return from.
     fn check_try(&mut self, stmt: &TryStmt, ctx: Ctx) {
-        if ctx != Ctx::Top {
+        if !stmt.in_function {
+            let message = if ctx == Ctx::Top {
+                "`try` must be inside a function — it compiles to a `return` that \
+                 propagates the `Err`, and at the top level of a module there is no \
+                 function to return from"
+            } else {
+                "`try` cannot be used here — it compiles to a `return`, which would exit \
+                 this construct's own IIFE instead of the enclosing function. Extract the \
+                 logic into a function (a `try` inside a function written here is fine), \
+                 or use a `<-` binding in a `result` block"
+            };
             self.error(
-                RlError::span(
-                    stmt.span.start,
-                    stmt.span.end,
-                    "`try` cannot be used inside a match expression, a `result` block, a \
-                     template interpolation, or another `try` — it compiles to a `return` \
-                     from the enclosing function"
-                        .to_string(),
-                )
-                .code(DiagnosticCode::TryPlacement),
+                RlError::span(stmt.span.start, stmt.span.end, message.to_string())
+                    .code(DiagnosticCode::TryPlacement),
             );
         }
         self.visit_program(&stmt.expr, Ctx::Expr);
     }
 
+    /// let-else placement is the same flow fact as `try`'s, except the
+    /// module's top level is fine: the lowering emits no `return` of its
+    /// own (a `throw`-diverging `else` is valid anywhere), so only the
+    /// statement regions of rl constructs — where the `else`'s exits would
+    /// leave the construct's IIFE — need a function written in the region.
     fn check_let_else(&mut self, stmt: &LetElseStmt, ctx: Ctx) {
-        if ctx != Ctx::Top {
+        if ctx != Ctx::Top && !stmt.in_function {
             self.error(
                 RlError::span(
                     stmt.head_span.start,
                     stmt.head_span.end,
-                    "let-else cannot be used inside a match expression, a `result` block, a \
-                     template interpolation, or a `try` — it compiles to statements in the \
-                     enclosing function"
+                    "let-else cannot be used here — its `else` block's exit (`return`, \
+                     `break`, `continue`) would leave this construct's own IIFE instead of \
+                     the enclosing function. Extract the logic into a function (a let-else \
+                     inside a function written here is fine), or match the value instead"
                         .to_string(),
                 )
                 .code(DiagnosticCode::LetElsePlacement),

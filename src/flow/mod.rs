@@ -344,6 +344,203 @@ fn find_close(tokens: &[Token], open: usize) -> Option<usize> {
     None
 }
 
+/// Whether a `return` emitted at token index `at` of this statement
+/// stream would leave a **user-written function inside the stream** — the
+/// placement question `try` asks: its lowering emits a `return`, and that
+/// `return` must have a function of the user's to exit. At the top level
+/// of a module (or of an rl construct's own statement region, which
+/// compiles into an IIFE) there is none; inside a `function`, a method, or
+/// an arrow body written in the region there is.
+///
+/// The classification is per opening brace, from its immediate left
+/// context: `=> {` is an arrow body; `) {` is a function or method body
+/// unless the parenthesis belongs to a control head (`if`/`for`/`while`/
+/// `switch`/`catch`/`with`, `for await`) or a `class ... extends call()`
+/// heritage clause. Everything else — object literals, class and
+/// namespace bodies, control-statement bodies, bare blocks — is
+/// transparent or irrelevant: it never *provides* a function to return
+/// from, and never blocks an outer one from counting.
+pub(crate) fn in_function_body(src: &str, tokens: &[Token], at: usize) -> bool {
+    let mut stack: Vec<bool> = Vec::new();
+    for (k, t) in tokens.iter().enumerate().take(at) {
+        match t.kind {
+            TokenKind::Punct(b'{') => stack.push(function_body_brace(src, tokens, k)),
+            TokenKind::Punct(b'}') => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    stack.iter().any(|&is_function| is_function)
+}
+
+/// Heads whose parenthesized clause is followed by a *control* body, not a
+/// function body.
+const CONTROL_PAREN_WORDS: &[&str] = &["if", "for", "while", "switch", "catch", "with"];
+
+/// Statement-position words a return-type walk aborts on: meeting one at
+/// the top level means the walk left the annotation and entered the
+/// preceding statement (or the brace never had an annotation at all).
+const NON_TYPE_WORDS: &[&str] = &[
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "declare",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "module",
+    "namespace",
+    "new",
+    "of",
+    "return",
+    "switch",
+    "throw",
+    "try",
+    "var",
+    "while",
+    "with",
+    "yield",
+];
+
+/// Whether the `{` at token index `k` opens a function body (see
+/// [`in_function_body`]).
+fn function_body_brace(src: &str, tokens: &[Token], k: usize) -> bool {
+    let Some(prev) = k.checked_sub(1) else {
+        return false;
+    };
+    match tokens[prev].kind {
+        // `=> {` — an arrow body.
+        TokenKind::Arrow => true,
+        // `) {` — a parameter list's body, unless the parenthesis is a
+        // control head or a heritage-clause call.
+        TokenKind::Punct(b')') => paren_heads_function(src, tokens, prev),
+        // Anything else may still be `) : <type> {` — a return-type
+        // annotation between the parameter list and the body. Walk back
+        // over the type (balanced brackets; names, operators and function
+        // arrows at its top level); the `:` straight after a `)` is the
+        // annotation's colon and the parenthesis decides as above. A token
+        // no type contains at its top level ends the walk: the brace is
+        // not a body.
+        _ => {
+            let mut depth = 0usize;
+            let mut j = k;
+            while j > 0 {
+                j -= 1;
+                let t = &tokens[j];
+                match t.kind {
+                    TokenKind::Punct(b'>' | b')' | b']' | b'}') => depth += 1,
+                    TokenKind::Punct(b'<' | b'(' | b'[' | b'{') => {
+                        if depth == 0 {
+                            return false;
+                        }
+                        depth -= 1;
+                    }
+                    TokenKind::Punct(b':') if depth == 0 => {
+                        return j >= 1
+                            && matches!(tokens[j - 1].kind, TokenKind::Punct(b')'))
+                            && paren_heads_function(src, tokens, j - 1);
+                    }
+                    TokenKind::Ident if depth == 0 => {
+                        if NON_TYPE_WORDS.contains(&&src[t.span.start..t.span.end]) {
+                            return false;
+                        }
+                    }
+                    TokenKind::Str | TokenKind::Arrow => {}
+                    TokenKind::Punct(b'.' | b'|' | b'&') => {}
+                    TokenKind::Punct(c) if c.is_ascii_digit() => {}
+                    _ => {
+                        if depth == 0 {
+                            return false;
+                        }
+                    }
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Whether the parameter list closed at token index `close` heads a
+/// function body — i.e. it is not a control head (`if (…)`, `for (…)`,
+/// `for await (…)`, …) and not a `class … extends call(…)` heritage
+/// clause.
+fn paren_heads_function(src: &str, tokens: &[Token], close: usize) -> bool {
+    let word = |i: usize| match tokens.get(i) {
+        Some(t) if matches!(t.kind, TokenKind::Ident) => Some(&src[t.span.start..t.span.end]),
+        _ => None,
+    };
+    let Some(open) = find_open(tokens, close) else {
+        return false;
+    };
+    let Some(before) = open.checked_sub(1) else {
+        return false;
+    };
+    match tokens[before].kind {
+        TokenKind::Ident => {
+            let name = word(before).unwrap_or_default();
+            if CONTROL_PAREN_WORDS.contains(&name) {
+                return false;
+            }
+            // `for await (…) {` — still a control body.
+            if name == "await" && word(before.wrapping_sub(1)) == Some("for") {
+                return false;
+            }
+            // `class A extends mixin(B) {` — a class body: walk back over
+            // the (possibly dotted) callee to the word before it.
+            let mut j = before;
+            while j >= 2
+                && matches!(tokens[j - 1].kind, TokenKind::Punct(b'.'))
+                && matches!(tokens[j - 2].kind, TokenKind::Ident)
+            {
+                j -= 2;
+            }
+            !(j >= 1 && word(j - 1) == Some("extends"))
+        }
+        // `function* (…) {` — an anonymous generator.
+        TokenKind::Punct(b'*') => word(before.wrapping_sub(1)) == Some("function"),
+        // `f<T>(…) {` — a generic parameter list's body.
+        TokenKind::Punct(b'>') => true,
+        _ => false,
+    }
+}
+
+/// The index of the token opening the bracket closed at `close`.
+fn find_open(tokens: &[Token], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for k in (0..=close).rev() {
+        match tokens[k].kind {
+            TokenKind::Punct(b')' | b']' | b'}') => depth += 1,
+            TokenKind::Punct(b'(' | b'[' | b'{') => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Words that head a statement whose braces are a *body* (their `}` ends
 /// the statement).
 const BLOCK_STMT_WORDS: &[&str] = &[
@@ -474,5 +671,61 @@ mod tests {
         assert!(!check("for (;;) { return 1; }"));
         assert!(!check("while (c) { return 1; }"));
         assert!(!check("try { return 1; } catch (e) { return 2; }"));
+    }
+
+    /// Whether the byte at `needle`'s position sits inside a function body.
+    fn inside(src: &str, needle: &str) -> bool {
+        let offset = src.find(needle).expect("needle");
+        let tokens = crate::lexer::lex(src, 0, src.len());
+        let at = tokens
+            .iter()
+            .position(|t| t.span.start >= offset)
+            .unwrap_or(tokens.len());
+        in_function_body(src, &tokens, at)
+    }
+
+    #[test]
+    fn function_method_and_arrow_bodies_are_returnable() {
+        assert!(inside("function f() { HERE; }", "HERE"));
+        assert!(inside("const f = function () { HERE; };", "HERE"));
+        assert!(inside("const f = function* () { HERE; };", "HERE"));
+        assert!(inside("const f = () => { HERE; };", "HERE"));
+        assert!(inside("const o = { m() { HERE; } };", "HERE"));
+        assert!(inside("class A { m() { HERE; } }", "HERE"));
+        assert!(inside("class A { constructor() { HERE; } }", "HERE"));
+        assert!(inside("class A { get x() { HERE; } }", "HERE"));
+        assert!(inside("function f<T>(x: T) { HERE; }", "HERE"));
+        // Return-type annotations sit between the parameter list and the
+        // body; the walk crosses them.
+        assert!(inside("function f(): void { HERE; }", "HERE"));
+        assert!(inside("function f(): Promise<void> { HERE; }", "HERE"));
+        assert!(inside("function f(): { a: number } { HERE; }", "HERE"));
+        assert!(inside("function f(): X[] | null { HERE; }", "HERE"));
+        assert!(inside("const o = { m(): number { HERE; } };", "HERE"));
+        // Nested in control flow inside the function — the `return` still
+        // exits the function.
+        assert!(inside(
+            "function f() { if (c) { for (;;) { HERE; } } }",
+            "HERE"
+        ));
+    }
+
+    #[test]
+    fn module_and_non_function_braces_are_not() {
+        assert!(!inside("HERE;", "HERE"));
+        assert!(!inside("{ HERE; }", "HERE"));
+        assert!(!inside("if (c) { HERE; }", "HERE"));
+        assert!(!inside("for (;;) { HERE; }", "HERE"));
+        assert!(!inside("for await (const x of y) { HERE; }", "HERE"));
+        assert!(!inside("while (c) { HERE; }", "HERE"));
+        assert!(!inside("switch (x) { default: HERE; }", "HERE"));
+        assert!(!inside("try { HERE; } catch (e) {}", "HERE"));
+        assert!(!inside("do { HERE; } while (c);", "HERE"));
+        assert!(!inside("namespace N { HERE; }", "HERE"));
+        assert!(!inside("class A extends mixin(B) { HERE; }", "HERE"));
+        assert!(!inside("class A { static { HERE; } }", "HERE"));
+        assert!(!inside("class A<T> { x = HERE; }", "HERE"));
+        // A function body *closed before* the position provides nothing.
+        assert!(!inside("function f() {} HERE;", "HERE"));
     }
 }

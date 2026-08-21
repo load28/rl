@@ -42,6 +42,9 @@ pub(super) fn parse_try_stmt<'t>(
             },
             decl: None,
             expr,
+            // Filled by the caller, which knows the statement's token
+            // index in the parse region.
+            in_function: false,
         },
     ))
 }
@@ -111,6 +114,7 @@ pub(super) fn parse_try_decl<'t>(
                 binding_span,
             )),
             expr,
+            in_function: false,
         },
     ))
 }

@@ -473,14 +473,15 @@ fn wildcard_with_guard_is_not_rl_syntax() {
 }
 
 #[test]
-fn try_inside_guard_is_an_error() {
-    let e = err(
+fn try_inside_a_function_inside_a_guard_is_allowed() {
+    // Rust's `?` inside a closure: the emitted `return` exits the arrow
+    // the user wrote, not the match's IIFE — placement is a flow fact.
+    let out = ok(
         "const r = match (x) {\n  A(v) if run(() => { try g(); return true; }) => v,\n  _ => 0,\n};\n",
     );
     assert!(
-        e.message.contains("`try` cannot be used inside"),
-        "{}",
-        e.message
+        out.contains("if ($rl_t0.kind !== \"Ok\") return $rl_t0;"),
+        "{out}"
     );
 }
 
@@ -705,11 +706,14 @@ fn try_without_semicolon_is_not_recognized() {
 
 #[test]
 fn try_inside_match_arm_is_an_error() {
+    // Directly in an arm's statement stream the emitted `return` would
+    // exit the switch IIFE — the match would *evaluate to* the `Err`
+    // instead of propagating it.
     let e = err(
         "const x = match (r) {\n  Ok(value) => { const y = try f(value); return y; },\n  Err(error) => fallback(error),\n};\n",
     );
     assert!(
-        e.message.contains("`try` cannot be used inside"),
+        e.message.contains("`try` cannot be used here"),
         "{}",
         e.message
     );
@@ -719,24 +723,62 @@ fn try_inside_match_arm_is_an_error() {
 }
 
 #[test]
-fn try_inside_match_scrutinee_is_an_error() {
-    let e = err(
-        "const x = match (run(() => { try g(); return h(); })) {\n  Ok(value) => value,\n  Err(error) => 0,\n};\n",
-    );
+fn try_at_module_top_level_is_an_error() {
+    // The lowering's `return` would have no function to exit — before the
+    // flow answer this fell through to the output self-check's "invalid
+    // TypeScript or an rlc bug" backstop.
+    let e = err("function f(): void {}\ntry g();\n");
     assert!(
-        e.message.contains("`try` cannot be used inside"),
+        e.message.contains("`try` must be inside a function"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (2, 1));
+
+    let e = err("const x = try g();\n");
+    assert!(
+        e.message.contains("`try` must be inside a function"),
+        "{}",
+        e.message
+    );
+
+    // A namespace body is not a function body either.
+    let e = err("namespace N {\n  try g();\n}\n");
+    assert!(
+        e.message.contains("`try` must be inside a function"),
         "{}",
         e.message
     );
 }
 
 #[test]
-fn try_inside_template_interpolation_is_an_error() {
-    let e = err("const s = `${run(() => { try g(); return h(); })}`;\n");
+fn try_inside_a_function_inside_a_scrutinee_is_allowed() {
+    let out = ok(
+        "const x = match (run(() => { try g(); return h(); })) {\n  Ok(value) => value,\n  Err(error) => 0,\n};\n",
+    );
     assert!(
-        e.message.contains("`try` cannot be used inside"),
-        "{}",
-        e.message
+        out.contains("if ($rl_t0.kind !== \"Ok\") return $rl_t0;"),
+        "{out}"
+    );
+}
+
+#[test]
+fn try_inside_a_function_inside_an_arm_body_is_allowed() {
+    let out = ok(
+        "const x = match (r) {\n  Ok(value) => { const f = () => { try g(value); return 1; }; return f(); },\n  Err(error) => 0,\n};\n",
+    );
+    assert!(
+        out.contains("if ($rl_t0.kind !== \"Ok\") return $rl_t0;"),
+        "{out}"
+    );
+}
+
+#[test]
+fn try_inside_a_function_inside_a_template_interpolation_is_allowed() {
+    let out = ok("const s = `${run(() => { try g(); return h(); })}`;\n");
+    assert!(
+        out.contains("if ($rl_t0.kind !== \"Ok\") return $rl_t0;"),
+        "{out}"
     );
 }
 
@@ -914,10 +956,20 @@ fn let_else_inside_match_arm_is_error() {
         "const x = match (r) {\n  Ok(value) => { const Some(v) = h(value) else { return 0; }; return v; },\n  _ => 0,\n};\n",
     );
     assert!(
-        e.message.contains("let-else cannot be used inside"),
+        e.message.contains("let-else cannot be used here"),
         "{}",
         e.message
     );
+}
+
+#[test]
+fn let_else_inside_a_function_inside_an_arm_body_is_allowed() {
+    // The `else`'s `return` exits the arrow the user wrote — the same
+    // flow fact that places `try`.
+    let out = ok(
+        "const x = match (r) {\n  Ok(value) => { const f = () => { const Some(v) = h(value) else { return 0; }; return v; }; return f(); },\n  _ => 0,\n};\n",
+    );
+    assert!(out.contains("if ($rl_t0.kind !== \"Some\")"), "{out}");
 }
 
 #[test]
@@ -1446,9 +1498,12 @@ fn optional_chain_step_is_an_error() {
 }
 
 #[test]
-fn try_inside_a_pipeline_step_is_an_error() {
-    let e = err("const a = x |> (n => { const b = try f(n); return b; });\n");
-    assert!(e.message.contains("`try` cannot be used"), "{}", e.message);
+fn try_inside_a_function_inside_a_pipeline_step_is_allowed() {
+    let out = ok("const a = x |> (n => { const b = try f(n); return b; });\n");
+    assert!(
+        out.contains("if ($rl_t0.kind !== \"Ok\") return $rl_t0;"),
+        "{out}"
+    );
 }
 
 /* ------------------------------------------------------------------ */
@@ -2173,17 +2228,17 @@ const a = result {
 fn try_and_let_else_are_rejected_inside_a_result_block() {
     let e = err("const a = result {\n  const x <- f();\n  const y = try g();\n  x + y\n};\n");
     assert!(
-        e.message.contains("`try` cannot be used inside"),
+        e.message.contains("`try` cannot be used here"),
         "{}",
         e.message
     );
-    assert!(e.message.contains("a `result` block"), "{}", e.message);
+    assert!(e.message.contains("`<-` binding"), "{}", e.message);
 
     let e = err(
         "const a = result {\n  const x <- f();\n  const Some(v) = o else { return 0; };\n  v\n};\n",
     );
     assert!(
-        e.message.contains("let-else cannot be used inside"),
+        e.message.contains("let-else cannot be used here"),
         "{}",
         e.message
     );
