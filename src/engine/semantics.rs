@@ -544,6 +544,9 @@ pub(crate) fn report(
             });
             continue;
         };
+        if projection::diagnostic_intersects_recovery(file, diagnostic) {
+            continue;
+        }
         // Glue is not the user's code. When rlc can say what the construct
         // meant, it says that — over the construct's own text. The
         // declaration table its wording names types from is built only for

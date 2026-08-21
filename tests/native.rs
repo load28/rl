@@ -480,6 +480,45 @@ fn a_pattern_typo_suppresses_typed_exhaustiveness_for_that_match() {
 }
 
 #[test]
+fn parser_errors_do_not_hide_an_independent_type_error_in_the_same_file() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/recovery.rl",
+        "import { Result } from \"@rl/std\";\n\
+         function read(value: number): Result<number, string> {\n\
+         \x20 return Result.Ok(value);\n\
+         }\n\
+         export function nested(value: number): Result<number, string> {\n\
+         \x20 return result {\n\
+         \x20   const first <- read(value);\n\
+         \x20   if (first > 0) { const second <- read(first); }\n\
+         \x20   first\n\
+         \x20 };\n\
+         }\n\
+         const wrong = (): Result<string, number> => Result.Err(10);\n\
+         export function bindNonResult(): Result<number, string> {\n\
+         \x20 return result { const value <- wrong(); value };\n\
+         }\n\
+         export const malformed = match value { Missing => 0 };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("result-nested-binding")
+            || out.contains("`<-` binding must be a top-level statement"),
+        "the first rl error remains visible: {out}"
+    );
+    assert!(
+        out.contains("`match` could not be parsed here"),
+        "the malformed construct remains visible: {out}"
+    );
+    assert!(
+        out.contains("ts(2322)") && out.contains("Err<number>"),
+        "the independent bindNonResult type error survives recovery: {out}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_ts_file_and_an_rl_file_share_one_project_graph() {
     let root = require_tsgo!();
     let dir = project(&[

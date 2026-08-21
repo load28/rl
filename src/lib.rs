@@ -805,6 +805,125 @@ pub struct CompileReport {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// The project engine's recovering form of [`CompileReport`]. Recovery is
+/// intentionally not part of normal compilation: only the typed projection
+/// may substitute parser-owned error nodes so later independent code remains
+/// checkable.
+pub(crate) struct ProjectionReport {
+    pub emit: Option<MappedEmit>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub recovered: Vec<(usize, usize)>,
+}
+
+fn overwrite_recovery(source: &mut [u8], start: usize, end: usize, replacement: &str) {
+    let start = start.min(source.len());
+    let end = end.min(source.len()).max(start);
+    source[start..end].fill(b' ');
+    let bytes = replacement.as_bytes();
+    let count = bytes.len().min(end - start);
+    source[start..start + count].copy_from_slice(&bytes[..count]);
+}
+
+/// Builds a valid TypeScript projection in the presence of parser-owned
+/// error nodes. Replacements are byte-length preserving, so every mapping
+/// outside the recovered node remains in the original source coordinate
+/// space.
+pub(crate) fn compile_projection_report(source: &str, options: &Options) -> ProjectionReport {
+    let ordinary = compile_report(source, options);
+    if ordinary.emit.is_some() {
+        return ProjectionReport {
+            emit: ordinary.emit,
+            diagnostics: ordinary.diagnostics,
+            recovered: Vec::new(),
+        };
+    }
+
+    let program = parser::parse(source);
+    let mut nodes = parser::projection_recoveries(&program);
+    for diagnostic in &ordinary.diagnostics {
+        let (Some(start), Some(end)) = (diagnostic.start, diagnostic.end) else {
+            continue;
+        };
+        match diagnostic.code {
+            DiagnosticCode::TryPlacement => nodes.push(ast::RecoveryNode {
+                span: ast::Span { start, end },
+                kind: ast::RecoveryKind::Expression,
+            }),
+            DiagnosticCode::EnumInvalidFieldType => nodes.push(ast::RecoveryNode {
+                span: ast::Span { start, end },
+                kind: ast::RecoveryKind::Type,
+            }),
+            _ => {}
+        }
+    }
+    nodes.sort_by_key(|node| (node.span.start, std::cmp::Reverse(node.span.end)));
+
+    // Keep the outer error node when parser recovery found nested symptoms
+    // inside it. This is the same synchronization rule as an error AST node:
+    // one placeholder owns one malformed construct.
+    let mut selected: Vec<ast::RecoveryNode> = Vec::new();
+    for node in nodes {
+        if selected
+            .last()
+            .is_some_and(|outer| node.span.end <= outer.span.end)
+        {
+            continue;
+        }
+        selected.push(node);
+    }
+    if selected.is_empty() {
+        return ProjectionReport {
+            emit: None,
+            diagnostics: ordinary.diagnostics,
+            recovered: Vec::new(),
+        };
+    }
+
+    let mut recovered = source.as_bytes().to_vec();
+    for node in &selected {
+        let replacement = match &node.kind {
+            ast::RecoveryKind::Expression => {
+                let replacement =
+                    if node.span.end.saturating_sub(node.span.start) >= "undefined as any".len() {
+                        "undefined as any"
+                    } else {
+                        "0"
+                    };
+                overwrite_recovery(&mut recovered, node.span.start, node.span.end, replacement);
+                continue;
+            }
+            ast::RecoveryKind::Statement => ";",
+            ast::RecoveryKind::Type => "any",
+            ast::RecoveryKind::EnumDecl { name, exported } => {
+                let declaration = if *exported {
+                    format!("export class {name} {{}}")
+                } else {
+                    format!("class {name} {{}}")
+                };
+                let replacement =
+                    if declaration.len() <= node.span.end.saturating_sub(node.span.start) {
+                        declaration.as_str()
+                    } else {
+                        ";"
+                    };
+                overwrite_recovery(&mut recovered, node.span.start, node.span.end, replacement);
+                continue;
+            }
+        };
+        overwrite_recovery(&mut recovered, node.span.start, node.span.end, replacement);
+    }
+    let recovered_source = String::from_utf8(recovered).expect("recovery preserves UTF-8 source");
+    let recovered_report = compile_report(&recovered_source, options);
+    ProjectionReport {
+        emit: recovered_report.emit,
+        diagnostics: ordinary.diagnostics,
+        recovered: selected
+            .into_iter()
+            .map(|node| (node.span.start, node.span.end))
+            .collect(),
+    }
+}
+
 /// Compiles `source` and reports everything — the multi-diagnostic,
 /// still-emitting form of [`compile_mapped`]. See [`CompileReport`].
 pub fn compile_report(source: &str, options: &Options) -> CompileReport {

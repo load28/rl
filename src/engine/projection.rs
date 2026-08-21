@@ -51,6 +51,10 @@ pub struct ProjectedDocument {
     /// its own answers, so one rl error no longer hides a file's type
     /// errors and exhaustiveness holes (TASK-117 symptom 3).
     pub(crate) rl_diagnostics: Vec<crate::Diagnostic>,
+    /// Source ranges replaced by parser-owned error placeholders in the
+    /// typed projection. Diagnostics originating inside these ranges are
+    /// recovery effects; diagnostics elsewhere remain reportable.
+    pub(crate) recovered: Vec<(usize, usize)>,
     /// The file's enum declaration symbols, parsed once per content
     /// version — what an importer's extern collection reads, so a file
     /// that did not change is never re-parsed for its exports
@@ -115,7 +119,7 @@ impl ProjectedDocument {
             rewrite_imports: crate::ImportRewrite::Off,
             ..Options::default()
         };
-        let report = crate::compile_report(&source, &options);
+        let report = crate::compile_projection_report(&source, &options);
         let Some(emit) = report.emit else {
             return Err(BlockedFile::new(
                 source_path.to_path_buf(),
@@ -134,6 +138,7 @@ impl ProjectedDocument {
             source,
             emit,
             rl_diagnostics: report.diagnostics,
+            recovered: report.recovered,
             enum_symbols: std::sync::OnceLock::new(),
             imports: std::sync::OnceLock::new(),
         })
@@ -202,6 +207,13 @@ pub(crate) fn assemble(
         });
 
         for probe in &file.literal_probes {
+            if file
+                .recovered
+                .iter()
+                .any(|&(start, end)| start <= probe.offset && probe.offset < end)
+            {
+                continue;
+            }
             // A BigInt is never a member of a finite literal union
             // TypeScript reports, so such a match is left unchecked.
             if probe
@@ -227,6 +239,13 @@ pub(crate) fn assemble(
         }
 
         for probe in &file.tag_probes {
+            if file
+                .recovered
+                .iter()
+                .any(|&(start, end)| start <= probe.offset && probe.offset < end)
+            {
+                continue;
+            }
             // One question per scrutinee position, in the order the
             // temporaries were emitted — which is the order of the
             // positions themselves.
@@ -574,6 +593,20 @@ pub(crate) fn diagnostic_source_offset(
     mapper::to_source_or_nearest(&file.emit.mappings, out)
 }
 
+pub(crate) fn diagnostic_intersects_recovery(
+    file: &ProjectedDocument,
+    diagnostic: &crate::typescript::backend::Diagnostic,
+) -> bool {
+    let Some((start, _)) = diagnostic_source_offset(file, diagnostic.start) else {
+        return false;
+    };
+    let end = diagnostic_source_offset(file, diagnostic.end)
+        .map_or(start.saturating_add(1), |(end, _)| end.max(start + 1));
+    file.recovered
+        .iter()
+        .any(|&(recovery_start, recovery_end)| start < recovery_end && recovery_start < end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +636,22 @@ mod tests {
 
     fn project(source: &str) -> ProjectedDocument {
         ProjectedDocument::project(Path::new("/p/src/a.rl"), source.to_string()).expect("projects")
+    }
+
+    #[test]
+    fn parser_error_nodes_recover_only_their_own_source_ranges() {
+        let source = "const broken = 1 |> ;\n\
+            const independent: string = 1;\n\
+            const malformed = match value { Missing => 0 };\n";
+        let file = project(source);
+        assert_eq!(file.recovered.len(), 2, "{:#?}", file.recovered);
+        assert!(file.emit.code.contains("const independent: string = 1;"));
+        let independent = source.find("independent").unwrap();
+        assert!(
+            file.recovered
+                .iter()
+                .all(|&(start, end)| independent < start || independent >= end)
+        );
     }
 
     #[test]
@@ -690,11 +739,15 @@ mod tests {
     }
 
     #[test]
-    fn text_that_cannot_lower_still_blocks_the_projection() {
-        let err =
-            ProjectedDocument::project(Path::new("/p/src/a.rl"), "const x = 1 |> ;\n".to_string())
-                .expect_err("a stray pipe cannot be lowered");
-        assert!(err.message.contains("`|>` could not be parsed"), "{err}");
+    fn text_that_cannot_lower_gets_an_engine_only_error_node() {
+        let file = project("const x = 1 |> ;\n");
+        assert_eq!(file.recovered, [(10, 14)]);
+        assert!(file.emit.code.contains("const x = 0"), "{}", file.emit.code);
+        assert_eq!(file.rl_diagnostics.len(), 1);
+        assert_eq!(
+            file.rl_diagnostics[0].code,
+            crate::DiagnosticCode::StrayPipe
+        );
     }
 
     #[test]

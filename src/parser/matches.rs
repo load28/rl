@@ -11,8 +11,8 @@ use super::cursor::Cursor;
 use super::is_reserved;
 use super::literals::{at_literal, parse_literal_alternatives};
 use crate::ast::{
-    Arm, Binding, GuardExpr, MatchExpr, Pattern, Span, TagPattern, TupleArm, TupleMatchExpr,
-    TuplePattern,
+    Arm, Binding, GuardExpr, MatchExpr, Pattern, RecoveryKind, RecoveryNode, Span, TagPattern,
+    TupleArm, TupleMatchExpr, TuplePattern,
 };
 use crate::lexer::TokenKind;
 
@@ -71,10 +71,22 @@ pub(super) fn parse_match<'t>(
              tuple patterns must match the scrutinee arity)"
                 .to_string()
         };
-        Claim::Malformed(
-            crate::error::RlError::span(kw_span.start, kw_span.end, message)
+        let end = (cur.idx..cur.tokens.len())
+            .find(|&idx| matches!(cur.tokens[idx].kind, TokenKind::Punct(b'{')))
+            .and_then(|open| super::cursor::find_close_at(cur.tokens, open))
+            .and_then(|close| cur.tokens.get(close))
+            .map_or(cur.range_end, |token| token.span.end);
+        Claim::Malformed {
+            error: crate::error::RlError::span(kw_span.start, kw_span.end, message)
                 .code(crate::DiagnosticCode::MalformedMatch),
-        )
+            recovery: RecoveryNode {
+                span: Span {
+                    start: kw_span.start,
+                    end,
+                },
+                kind: RecoveryKind::Expression,
+            },
+        }
     } else {
         Claim::NotRl
     }

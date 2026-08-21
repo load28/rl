@@ -24,6 +24,11 @@ pub(crate) struct Span {
 #[derive(Debug)]
 pub(crate) struct Program {
     pub segments: Vec<Segment>,
+    /// Structurally identified rl syntax that cannot be emitted as written.
+    /// Normal compilation still copies it verbatim; the project engine uses
+    /// these nodes to build a type-checkable recovery projection without
+    /// hiding independent diagnostics elsewhere in the file.
+    pub recoveries: Vec<RecoveryNode>,
     /// Candidates committed to rl syntax but malformed. Unlike a failed
     /// lookalike parse, these cannot be valid TypeScript passthrough.
     pub malformed: Vec<crate::error::RlError>,
@@ -52,6 +57,29 @@ pub(crate) struct Program {
     /// reporting story as [`Self::stray_pipes`]: the shape is never valid
     /// TypeScript, so it cannot pass through either.
     pub result_nested_binds: Vec<usize>,
+}
+
+/// A parser-owned error node used only by the typed projection.
+///
+/// This mirrors a compiler AST error expression: the diagnostic remains the
+/// source of truth, while the node records the complete syntactic region and
+/// the category of placeholder that keeps later phases running.
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryNode {
+    pub span: Span,
+    pub kind: RecoveryKind,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum RecoveryKind {
+    /// Replace an invalid expression with `undefined`.
+    Expression,
+    /// Replace an invalid statement with an empty statement.
+    Statement,
+    /// Replace an invalid TypeScript type fragment with a literal type.
+    Type,
+    /// Replace an invalid enum declaration with a value-and-type placeholder.
+    EnumDecl { name: String, exported: bool },
 }
 
 /// One top-level piece of a [`Program`], in source order.

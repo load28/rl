@@ -52,7 +52,10 @@ pub(crate) use cursor::{dotted_at, find_close_at};
 pub(super) enum Claim<T> {
     Parsed(T),
     NotRl,
-    Malformed(crate::error::RlError),
+    Malformed {
+        error: crate::error::RlError,
+        recovery: RecoveryNode,
+    },
 }
 
 // Words that can never be a variant tag, match pattern tag, or binding name.
@@ -167,6 +170,93 @@ pub(crate) fn lex_and_parse(src: &str) -> (Program, Vec<Token>) {
     (program, tokens)
 }
 
+/// Collects parser-owned recovery nodes from the recursively nested AST.
+pub(crate) fn projection_recoveries(program: &Program) -> Vec<RecoveryNode> {
+    fn visit(program: &Program, out: &mut Vec<RecoveryNode>) {
+        out.extend(program.recoveries.iter().cloned());
+        for segment in &program.segments {
+            match segment {
+                Segment::Verbatim(_)
+                | Segment::Enum(_)
+                | Segment::RlImport(_)
+                | Segment::ValModifier(_) => {}
+                Segment::Match(expr) => {
+                    visit(&expr.scrutinee, out);
+                    for arm in &expr.arms {
+                        if let Some(guard) = &arm.guard {
+                            visit(&guard.expr, out);
+                        }
+                        visit(&arm.body, out);
+                    }
+                }
+                Segment::TupleMatch(expr) => {
+                    for (_, scrutinee) in &expr.scrutinees {
+                        visit(scrutinee, out);
+                    }
+                    for arm in &expr.arms {
+                        if let Some(guard) = &arm.guard {
+                            visit(&guard.expr, out);
+                        }
+                        visit(&arm.body, out);
+                    }
+                }
+                Segment::Try(stmt) => visit(&stmt.expr, out),
+                Segment::LetElse(stmt) => {
+                    visit(&stmt.expr, out);
+                    visit(&stmt.else_body, out);
+                }
+                Segment::IfLet(stmt) => {
+                    visit(&stmt.expr, out);
+                    visit(&stmt.body, out);
+                    let mut next = stmt.else_part.as_ref();
+                    while let Some(else_part) = next {
+                        match else_part {
+                            IfLetElse::Block(block) => {
+                                visit(block, out);
+                                break;
+                            }
+                            IfLetElse::IfLet(chained) => {
+                                visit(&chained.expr, out);
+                                visit(&chained.body, out);
+                                next = chained.else_part.as_ref();
+                            }
+                        }
+                    }
+                }
+                Segment::Template(template) => {
+                    for chunk in &template.chunks {
+                        if let TemplateChunk::Interp(interp) = chunk {
+                            visit(interp, out);
+                        }
+                    }
+                }
+                Segment::Pipe(pipe) => {
+                    if let Some(head) = &pipe.head {
+                        visit(head, out);
+                    }
+                    for step in &pipe.steps {
+                        visit(&step.body, out);
+                    }
+                }
+                Segment::ResultBlock(block) => {
+                    for item in &block.items {
+                        match item {
+                            ResultItem::Stmts(stmts) => visit(stmts, out),
+                            ResultItem::Bind(bind) => visit(&bind.expr, out),
+                        }
+                    }
+                    visit(&block.value, out);
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    visit(program, &mut out);
+    out.sort_by_key(|node| (node.span.start, std::cmp::Reverse(node.span.end)));
+    out
+}
+
 /// Shared state for one parse: the source in both views. The parser holds no
 /// mutable state — recursion carries explicit token slices and byte ranges.
 pub(crate) struct Parser<'a> {
@@ -238,6 +328,48 @@ fn rewind_segments(segments: &mut Vec<Segment>, boundary: usize, seg_start: usiz
     cover
 }
 
+/// Bounds the expression containing an unclaimed operator and stops before
+/// the enclosing statement or delimiter. This parser-owned synchronization
+/// point prevents recovery from consuming the next independent construct.
+fn recovery_expression_span(
+    tokens: &[Token],
+    start_idx: usize,
+    operator_idx: usize,
+    range_end: usize,
+) -> Span {
+    let mut depth = 0usize;
+    let mut recovery_end = tokens
+        .get(operator_idx)
+        .map_or(range_end, |token| token.span.end);
+    for token in tokens.iter().skip(operator_idx + 1) {
+        match token.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') if depth == 0 => break,
+            TokenKind::Punct(b')' | b']' | b'}') => depth -= 1,
+            TokenKind::Punct(b';' | b',') if depth == 0 => break,
+            _ => recovery_end = token.span.end,
+        }
+    }
+    Span {
+        start: tokens
+            .get(start_idx)
+            .map_or(tokens[operator_idx].span.start, |token| token.span.start),
+        end: recovery_end,
+    }
+}
+
+fn recovery_statement_span(tokens: &[Token], start_idx: usize, range_end: usize) -> Span {
+    let recovery_end = (start_idx..tokens.len())
+        .find(|&idx| matches!(tokens[idx].kind, TokenKind::Punct(b'{')))
+        .and_then(|open| find_close_at(tokens, open))
+        .and_then(|close| tokens.get(close))
+        .map_or(range_end, |token| token.span.end);
+    Span {
+        start: tokens[start_idx].span.start,
+        end: recovery_end,
+    }
+}
+
 impl Parser<'_> {
     /// Parses a lexed token range covering `bytes[start..end]` into a
     /// [`Program`] whose segments cover the byte range exactly, in source
@@ -245,6 +377,7 @@ impl Parser<'_> {
     /// verbatim segments.
     pub(crate) fn parse_tokens(&self, tokens: &[Token], start: usize, end: usize) -> Program {
         let mut segments: Vec<Segment> = Vec::new();
+        let mut recoveries: Vec<RecoveryNode> = Vec::new();
         let mut malformed = Vec::new();
         let mut stray_pipes: Vec<usize> = Vec::new();
         let mut stray_if_lets: Vec<usize> = Vec::new();
@@ -292,6 +425,10 @@ impl Parser<'_> {
                         continue;
                     }
                     stray_pipes.push(tok.span.start);
+                    recoveries.push(RecoveryNode {
+                        span: recovery_expression_span(tokens, expr.0.min(i), i, end),
+                        kind: RecoveryKind::Expression,
+                    });
                     i += 1;
                     continue;
                 }
@@ -338,7 +475,10 @@ impl Parser<'_> {
                             expr = (i, false);
                             continue;
                         }
-                        Claim::Malformed(error) => malformed.push(error),
+                        Claim::Malformed { error, recovery } => {
+                            malformed.push(error);
+                            recoveries.push(recovery);
+                        }
                         Claim::NotRl => {}
                     }
                 }
@@ -372,7 +512,10 @@ impl Parser<'_> {
                         i = cur.idx;
                         continue;
                     }
-                    Claim::Malformed(error) => malformed.push(error),
+                    Claim::Malformed { error, recovery } => {
+                        malformed.push(error);
+                        recoveries.push(recovery);
+                    }
                     Claim::NotRl => {}
                 }
             }
@@ -444,6 +587,10 @@ impl Parser<'_> {
                     continue;
                 }
                 stray_if_lets.push(tok.span.start);
+                recoveries.push(RecoveryNode {
+                    span: recovery_statement_span(tokens, i, end),
+                    kind: RecoveryKind::Statement,
+                });
             }
 
             // `result { ... }` — a computation block. Only a block that
@@ -457,7 +604,11 @@ impl Parser<'_> {
             {
                 let (attempt, nested) =
                     results::parse_result_block(Cursor::new(self, tokens, i + 1, end), tok.span);
-                result_nested_binds.extend(nested);
+                result_nested_binds.extend(nested.iter().map(|span| span.start));
+                recoveries.extend(nested.into_iter().map(|span| RecoveryNode {
+                    span,
+                    kind: RecoveryKind::Statement,
+                }));
                 match attempt {
                     results::Attempt::Claimed(cur, byte_end, block) => {
                         flush_verbatim(&mut segments, seg_start, tok.span.start);
@@ -466,8 +617,20 @@ impl Parser<'_> {
                         i = cur.idx;
                         continue;
                     }
-                    results::Attempt::Malformed => stray_results.push(tok.span.start),
-                    results::Attempt::MissingKeyword(at) => result_missing_kw.push(at),
+                    results::Attempt::Malformed(span) => {
+                        stray_results.push(tok.span.start);
+                        recoveries.push(RecoveryNode {
+                            span,
+                            kind: RecoveryKind::Expression,
+                        });
+                    }
+                    results::Attempt::MissingKeyword { at, recovery } => {
+                        result_missing_kw.push(at);
+                        recoveries.push(RecoveryNode {
+                            span: recovery,
+                            kind: RecoveryKind::Expression,
+                        });
+                    }
                     results::Attempt::Pass => {}
                 }
             }
@@ -498,6 +661,7 @@ impl Parser<'_> {
         flush_verbatim(&mut segments, seg_start, end);
         Program {
             segments,
+            recoveries,
             malformed,
             stray_pipes,
             stray_if_lets,

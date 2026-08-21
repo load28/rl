@@ -8,7 +8,7 @@
 use super::Claim;
 use super::cursor::Cursor;
 use super::is_reserved;
-use crate::ast::{EnumCase, EnumDecl, Field};
+use crate::ast::{EnumCase, EnumDecl, Field, RecoveryKind, RecoveryNode, Span};
 use crate::lexer::TokenKind;
 
 /// `cur` is positioned just past the `enum` keyword. On success returns
@@ -22,20 +22,42 @@ pub(super) fn parse_enum<'t>(
         return Claim::Parsed(parsed);
     }
     if enum_committed(cur) {
-        let start = cur
+        let keyword = cur
             .idx
             .checked_sub(1)
             .and_then(|idx| cur.tokens.get(idx))
             .map_or(0, |token| token.span.start);
-        return Claim::Malformed(
-            crate::error::RlError::span(
-                start,
-                start + "enum".len(),
+        let start = if exported {
+            cur.idx
+                .checked_sub(2)
+                .and_then(|idx| cur.tokens.get(idx))
+                .map_or(keyword, |token| token.span.start)
+        } else {
+            keyword
+        };
+        let name = cur
+            .tokens
+            .get(cur.idx)
+            .map(|token| cur.text(token).to_string())
+            .unwrap_or_else(|| "$rl_invalid_enum".to_string());
+        let end = (cur.idx + 1..cur.tokens.len())
+            .find(|&idx| matches!(cur.tokens[idx].kind, TokenKind::Punct(b'{')))
+            .and_then(|open| super::cursor::find_close_at(cur.tokens, open))
+            .and_then(|close| cur.tokens.get(close))
+            .map_or(cur.range_end, |token| token.span.end);
+        return Claim::Malformed {
+            error: crate::error::RlError::span(
+                keyword,
+                keyword + "enum".len(),
                 "rl `enum` could not be parsed (cases are `Case` or `Case(field: Type)`)"
                     .to_string(),
             )
             .code(crate::DiagnosticCode::MalformedEnum),
-        );
+            recovery: RecoveryNode {
+                span: Span { start, end },
+                kind: RecoveryKind::EnumDecl { name, exported },
+            },
+        };
     }
     Claim::NotRl
 }

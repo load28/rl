@@ -118,7 +118,7 @@ fn an_unchanged_projection_is_shared_across_snapshots() {
 }
 
 #[test]
-fn a_blocked_file_does_not_stop_other_files_from_being_checked() {
+fn an_error_node_keeps_its_file_and_other_files_checkable() {
     let dir = tmpdir("partial-snapshot");
     let blocked = dir.join("a-blocked.rl");
     let valid = dir.join("b-valid.rl");
@@ -151,7 +151,7 @@ fn a_blocked_file_does_not_stop_other_files_from_being_checked() {
         )
         .unwrap();
 
-    assert_eq!(snapshot.files().len(), 1);
+    assert_eq!(snapshot.files().len(), 2);
     assert_eq!(checked.diagnostics.len(), 2, "{:#?}", checked.diagnostics);
     assert!(checked.diagnostics.iter().any(|d| d.path == blocked));
     assert!(checked.diagnostics.iter().any(|d| d.path == valid));

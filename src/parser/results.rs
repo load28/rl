@@ -42,11 +42,11 @@ pub(super) enum Attempt<'t> {
     Claimed(Cursor<'t>, usize, Box<ResultBlock>),
     /// The block carries a Result binding but does not parse as a whole —
     /// recorded for the semantic phase (it cannot pass through either).
-    Malformed,
+    Malformed(Span),
     /// A binding that forgot its declaration keyword (`b <- f();`), at the
     /// byte offset of the name. Only reported where the text cannot be
     /// TypeScript — see [`no_keyword_is_certain`].
-    MissingKeyword(usize),
+    MissingKeyword { at: usize, recovery: Span },
     /// Not an rl construct: an ordinary `result` identifier and a block.
     Pass,
 }
@@ -60,7 +60,7 @@ pub(super) enum Attempt<'t> {
 pub(super) fn parse_result_block<'t>(
     mut cur: Cursor<'t>,
     kw_span: Span,
-) -> (Attempt<'t>, Vec<usize>) {
+) -> (Attempt<'t>, Vec<Span>) {
     let open = cur.idx;
     let Some(close) = cur.find_close() else {
         return (Attempt::Pass, Vec::new()); // unbalanced braces — nothing to claim
@@ -69,6 +69,10 @@ pub(super) fn parse_result_block<'t>(
     let body_span = Span {
         start: cur.tokens[open].span.end,
         end: cur.tokens[close].span.start,
+    };
+    let recovery = Span {
+        start: kw_span.start,
+        end: cur.tokens[close].span.end,
     };
 
     let mut items: Vec<ResultItem> = Vec::new();
@@ -109,7 +113,7 @@ pub(super) fn parse_result_block<'t>(
         match scan_bind(&cur, run_start, k) {
             BindRun::NotBind => {} // ordinary statements — keep accumulating
             BindRun::NoKeyword { at } => missing.push(at),
-            BindRun::Malformed => return (Attempt::Malformed, nested),
+            BindRun::Malformed => return (Attempt::Malformed(recovery), nested),
             BindRun::Bind {
                 kw,
                 binding_start,
@@ -154,7 +158,9 @@ pub(super) fn parse_result_block<'t>(
     if run_start < close {
         match scan_bind(&cur, run_start, close) {
             BindRun::NotBind | BindRun::NoKeyword { .. } => {}
-            BindRun::Bind { .. } | BindRun::Malformed => return (Attempt::Malformed, nested),
+            BindRun::Bind { .. } | BindRun::Malformed => {
+                return (Attempt::Malformed(recovery), nested);
+            }
         }
     }
     if !saw_bind {
@@ -164,7 +170,9 @@ pub(super) fn parse_result_block<'t>(
         // letting the output fail to parse.
         return (
             match missing.first() {
-                Some(&at) if no_keyword_is_certain(&cur, open) => Attempt::MissingKeyword(at),
+                Some(&at) if no_keyword_is_certain(&cur, open) => {
+                    Attempt::MissingKeyword { at, recovery }
+                }
                 _ => Attempt::Pass,
             },
             nested,
@@ -173,16 +181,16 @@ pub(super) fn parse_result_block<'t>(
     // The block is claimed, so the file is not TypeScript and a
     // keyword-less binding here is a mistake rlc can name.
     if let Some(&at) = missing.first() {
-        return (Attempt::MissingKeyword(at), nested);
+        return (Attempt::MissingKeyword { at, recovery }, nested);
     }
     if run_start == close {
-        return (Attempt::Malformed, nested); // nothing after the last `;`
+        return (Attempt::Malformed(recovery), nested); // nothing after the last `;`
     }
     let value_start = cur.tokens[run_start].span.start;
     if let TokenKind::Ident = cur.tokens[run_start].kind
         && super::tries::STMT_ONLY_WORDS.contains(&cur.text(&cur.tokens[run_start]))
     {
-        return (Attempt::Malformed, nested); // a statement, not the block's value
+        return (Attempt::Malformed(recovery), nested); // a statement, not the block's value
     }
     items.push(ResultItem::Stmts(cur.parser.parse_tokens(
         &cur.tokens[tok_cut..run_start],
@@ -222,7 +230,7 @@ pub(super) fn parse_result_block<'t>(
 ///
 /// A nested `match`/`result` region is skipped — it is re-parsed as its
 /// own construct, and an inner `result` block answers for its own runs.
-fn nested_binds(cur: &Cursor<'_>, open: usize, close: usize) -> Vec<usize> {
+fn nested_binds(cur: &Cursor<'_>, open: usize, close: usize) -> Vec<Span> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut k = open + 1;
@@ -243,7 +251,10 @@ fn nested_binds(cur: &Cursor<'_>, open: usize, close: usize) -> Vec<usize> {
                     && let Some(semi) = run_end(cur, k, close)
                     && matches!(scan_bind(cur, k, semi), BindRun::Bind { .. })
                 {
-                    out.push(t.span.start);
+                    out.push(Span {
+                        start: t.span.start,
+                        end: cur.tokens[semi].span.end,
+                    });
                     k = semi + 1;
                     continue;
                 }

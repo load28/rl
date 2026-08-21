@@ -199,6 +199,10 @@ fact를 `Unknown`으로 두고 독립적으로 판정 가능한 rl 오류는 계
   진단 API를 소비한다.
 - 에러 복구 경계: 해석 실패한 match는 그 match의 소진성 보고만 억제한다
   (파일 단위 억제 → match 단위 억제).
+- TASK-142에서 파서가 완성하지 못한 rl 구문을 span과 placeholder 종류를 가진
+  오류 노드로 보존한다. 정상 방출은 원문 통과 계약을 유지하고, typed projection만
+  오류 노드를 같은 길이의 유효 TypeScript로 바꾼다. 억제 범위도 이 span으로
+  한정해 같은 파일의 독립적인 TypeScript 진단을 계속 보고한다.
 
 ## 9. Flow IR (Phase 5)
 
