@@ -266,13 +266,14 @@ INDEX 상태에 따라 조정될 수 있다 — 확정 번호는 INDEX가 진실
   alphabet이 한 enum으로 고정된 뒤의 비교라 의미론적 결함은 아니고
   (TASK-123 정산), Table 구축이 resolver 위로 이동한 지금(TASK-129)은
   identity 표현만 남은 정리다.
-- **Phase 5 잔여** — 분기별 초기화의 flow 이동, flow의 HIR body 연동
-  (`Branch { condition: ExprId }`). `try`(와 let-else)의 배치는
-  TASK-131에서 flow 사실(`in_function_body`)로 이동 완료 — 중첩 규칙이
-  아니라 "방출되는 `return`이 나갈 사용자 함수가 있는가"로 판정한다.
-  `result` 바인딩의 early-return 범위는 TASK-132에서 확정 — 최상위
-  문장만 바인딩이고, 아래 깊이의 바인딩은 위치 있는 진단
-  (`result-nested-binding`)이다.
+- **Phase 5 잔여** — flow의 HIR body 연동(`Branch { condition: ExprId }`).
+  배치 판정은 TASK-131·134·135로 완결(세 문 모두 flow 사실
+  `in_function_body` + sema의 `Place` 상속 — 인라인/IIFE/모듈 구분);
+  `result` 바인딩의 early-return 범위는 TASK-132로 확정. **분기별
+  초기화는 소비 구문이 없어 보류**: `val let`은 재대입이 설계상
+  허용이라(§10.2 표) 지연 초기화가 이미 성립하고, 불변 지연 초기화
+  (`val const x;` + 분기별 1회 대입)는 새 언어 표면 제안이 필요하다 —
+  flow가 판정할 준비는 되어 있다.
 - **Phase 6 잔여** — query 세분화(pattern_analysis/flow_body 단위).
   에디터 semantic API의 cache 소비는 TASK-130에서 완료(typed 패스와
   에디터 폴백이 `Project`의 한 캐시를 공유).
