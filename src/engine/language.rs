@@ -322,7 +322,8 @@ impl Project {
         position: Position,
     ) -> Result<Option<HoverInfo>, String> {
         let byte = source_byte(&doc.source, position);
-        let analyses = analyses_of(&self.overlays, path, &doc.source);
+        let semantics = self.semantic_analyses(path, &doc.source);
+        let analyses = &semantics.analyses;
         if let Some(binding) = analyses.binding_at(byte) {
             let range = source_range(
                 &doc.source,
@@ -415,8 +416,8 @@ impl Project {
             None => std::fs::read_to_string(&canonical).ok()?,
         };
         let byte = source_byte(&source, position);
-        let analyses = analyses_of(&self.overlays, &canonical, &source);
-        let binding = analyses.binding_at(byte)?;
+        let semantics = self.semantic_analyses(&canonical, &source);
+        let binding = semantics.analyses.binding_at(byte)?;
         let range = source_range(
             &source,
             mapper::to_utf16(&source, binding.start),
@@ -453,7 +454,8 @@ impl Project {
     ) -> Result<Vec<Location>, String> {
         let (doc, path) = self.serve(path)?;
         let byte = source_byte(&doc.source, position);
-        let analyses = analyses_of(&self.overlays, &path, &doc.source);
+        let semantics = self.semantic_analyses(&path, &doc.source);
+        let analyses = &semantics.analyses;
         let spans = match analyses.binding_at(byte) {
             Some(binding) => vec![(binding.start, binding.end)],
             None => analyses.body_definitions(&doc.source, byte),
@@ -820,7 +822,10 @@ impl Project {
                 let to = mapper::to_utf16(&doc.source, anchor.src_end).max(from + 1);
                 let range = source_range(&doc.source, from, to);
                 let declared = declarations.get_or_insert_with(|| {
-                    analyses_of(&self.overlays, &path, &doc.source).declarations
+                    self.semantic_analyses(&path, &doc.source)
+                        .analyses
+                        .declarations
+                        .clone()
                 });
                 let entry =
                     match crate::engine::semantics::translate(anchor.kind, code, &raw, declared) {
@@ -1010,17 +1015,15 @@ pub(super) fn source_byte(source: &str, position: Position) -> usize {
     mapper::from_utf16(source, u16_offset(source, position))
 }
 
-/// The match analysis of one document, its imported declarations collected
-/// the way the CLI collects them for sema: the file's direct relative `.rl`
-/// imports, one hop, under their in-scope names — except the sources come
-/// from the overlays first, as everywhere in the engine. Carried as
-/// [`crate::EnumSymbol`]s because the analysis wants field types, not just
-/// tags.
-/// The analysis of one file as a stand-alone question: imported
-/// declarations come from disk, since no project session is involved.
-/// This is what the parse-only surfaces ([`super::names`]) ask.
+/// The match analysis of one file as a stand-alone question: imported
+/// declarations are the CLI's 1-hop collection, read from disk, since no
+/// project session is involved. This is what the parse-only surfaces
+/// ([`super::names`], [`super::hints`], [`super::completions`]) ask; a
+/// surface with a [`Project`] asks [`Project::semantic_analyses`] instead
+/// and shares the typed pass's cross-snapshot cache.
 pub(super) fn analyses_for(path: &Path, source: &str) -> crate::PatternAnalyses {
-    analyses_of(&HashMap::new(), path, source)
+    let externs = externs_of(path, source, &|target| std::fs::read_to_string(target).ok());
+    crate::pattern_analyses(source, &externs)
 }
 
 /// A byte span of `text` as a [`Range`] — the byte↔UTF-16 conversion every
@@ -1031,20 +1034,6 @@ pub(super) fn span_range(text: &str, start: usize, end: usize) -> Range {
         mapper::to_utf16(text, start),
         mapper::to_utf16(text, end),
     )
-}
-
-fn analyses_of(
-    overlays: &HashMap<PathBuf, String>,
-    path: &Path,
-    source: &str,
-) -> crate::PatternAnalyses {
-    let externs = externs_of(path, source, &|target| {
-        overlays
-            .get(target)
-            .cloned()
-            .or_else(|| std::fs::read_to_string(target).ok())
-    });
-    crate::pattern_analyses(source, &externs)
 }
 
 /// The enum declarations a file's direct relative `.rl` imports bring into
@@ -1615,26 +1604,75 @@ mod tests {
         let source = "import { Token as T } from \"./token.rl\";\nconst v = match (t) { Num(value) | Eof => 0 };\n";
         let main = dir.join("main.rl");
         std::fs::write(&main, source).unwrap();
+        let main = main.canonicalize().unwrap();
+
+        let engine = crate::engine::Engine::new(None);
+        let mut project = engine
+            .open_project(
+                &[dir.to_string_lossy().to_string()],
+                &crate::engine::ProjectOptions::default(),
+            )
+            .unwrap();
 
         // The disk copy answers...
-        let analyses = analyses_of(&HashMap::new(), &main, source);
-        let binding = analyses
+        let semantics = project.semantic_analyses(&main, source);
+        let binding = semantics
+            .analyses
             .binding_at(source.find("Num(value)").unwrap() + 4)
             .unwrap();
         assert_eq!(binding.ty.as_deref(), Some("number"));
         assert_eq!(binding.enum_name.as_deref(), Some("T"));
 
-        // ...and an overlay of the imported file wins over its disk copy.
-        let mut overlays = HashMap::new();
-        overlays.insert(
+        // ...the same question again is answered by the cache...
+        assert_eq!(project.semantic_cache_hits(), 0);
+        project.semantic_analyses(&main, source);
+        assert_eq!(project.semantic_cache_hits(), 1);
+
+        // ...and an overlay of the imported file wins over its disk copy —
+        // the changed externs invalidate the cached entry, so this is a
+        // recompute, not a stale hit.
+        project.open_document(
             dir.join("token.rl").canonicalize().unwrap(),
             "export enum Token { Num(value: string), Eof }\n".to_string(),
         );
-        let analyses = analyses_of(&overlays, &main, source);
-        let binding = analyses
+        let semantics = project.semantic_analyses(&main, source);
+        let binding = semantics
+            .analyses
             .binding_at(source.find("Num(value)").unwrap() + 4)
             .unwrap();
         assert_eq!(binding.ty.as_deref(), Some("string"));
+        assert_eq!(project.semantic_cache_hits(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_editor_and_the_typed_pass_share_one_semantic_cache() {
+        let dir = std::env::temp_dir().join(format!("rl-shared-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.rl");
+        let source = "enum E { A(x: number), B }\nconst v = match (e) { A(x) | B => 0 };\n";
+        std::fs::write(&file, source).unwrap();
+
+        let engine = crate::engine::Engine::new(None);
+        let mut project = engine
+            .open_project(
+                &[dir.to_string_lossy().to_string()],
+                &crate::engine::ProjectOptions::default(),
+            )
+            .unwrap();
+        let files = project.initial_files();
+
+        // The typed pass computes the file's semantics...
+        let snapshot = project.update(&files).unwrap();
+        project
+            .check(&snapshot, &crate::engine::CheckRequest::default())
+            .unwrap();
+        assert_eq!(project.semantic_cache_hits(), 0);
+
+        // ...and the editor's fallback question is a hit on that entry,
+        // not a second computation of the same answer.
+        project.semantic_analyses(&files[0], source);
+        assert_eq!(project.semantic_cache_hits(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

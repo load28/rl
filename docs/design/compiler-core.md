@@ -268,8 +268,9 @@ INDEX 상태에 따라 조정될 수 있다 — 확정 번호는 INDEX가 진실
   identity 표현만 남은 정리다.
 - **Phase 5 잔여** — `try` 배치·`result` early-return 범위·분기별 초기화의
   flow 이동, flow의 HIR body 연동(`Branch { condition: ExprId }`).
-- **Phase 6 잔여** — 에디터 semantic API(`language.rs`)의 semantic cache
-  소비, query 세분화(pattern_analysis/flow_body 단위).
+- **Phase 6 잔여** — query 세분화(pattern_analysis/flow_body 단위).
+  에디터 semantic API의 cache 소비는 TASK-130에서 완료(typed 패스와
+  에디터 폴백이 `Project`의 한 캐시를 공유).
 - **Phase 7 실체** — 안정화된 HIR node의 codegen 이동(검증된 lowering
   plan 소비의 실질 형태).
 - let-else·`if let`의 or-패턴(언어 표면 확장 — rust-parity-analysis GAP-6).

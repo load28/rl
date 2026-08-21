@@ -12,12 +12,12 @@
 //! rl-specific shape: rustc's resolver knows the scrutinee's type before
 //! it resolves a pattern's path; rlc does not (types are TypeScript's).
 //! So resolution here starts with **subject identification** — which enum
-//! a site's tags collectively name — using exactly the rules
-//! [`crate::analysis`] established (all-tags candidate first, then the
+//! a site's tags collectively name (all-tags candidate first, then the
 //! unique best-overlap holder; silence on a tie or no overlap, because tag
 //! patterns legitimately match hand-written unions rl has no declaration
-//! for). The two implementations are pinned to each other by equivalence
-//! tests until Phase 3 moves the analysis onto this one.
+//! for). This is the *only* implementation of those rules: [`crate::analysis`]
+//! consumes this resolution — its declaration table, subjects and
+//! unresolved reports are all views of it (Phase 3, TASK-123·129).
 //!
 //! Like [`crate::hir`], this surface is exported for language tooling but
 //! is not a stable API.

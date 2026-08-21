@@ -232,33 +232,80 @@ impl Project {
     fn file_semantics(&self, snapshot: &Snapshot) -> HashMap<PathBuf, Arc<FileSemantics>> {
         let files = snapshot.files();
         let mut out = HashMap::with_capacity(files.len());
-        let mut cache = self.semantics_cache.borrow_mut();
         for file in files {
             let externs = semantics::externs_of(files, file);
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            file.source.hash(&mut hasher);
-            let source_hash = hasher.finish();
-            if let Some(cached) = cache.get(&file.source_path)
-                && cached.source_hash == source_hash
-                && cached.value.externs == externs
-            {
-                self.semantic_cache_hits
-                    .set(self.semantic_cache_hits.get() + 1);
-                out.insert(file.source_path.clone(), cached.value.clone());
-                continue;
-            }
-            let analyses = crate::pattern_analyses(&file.source, &externs);
-            let value = Arc::new(FileSemantics { externs, analyses });
-            cache.insert(
-                file.source_path.clone(),
-                CachedSemantics {
-                    source_hash,
-                    value: value.clone(),
-                },
-            );
+            let value = self.cached_semantics(&file.source_path, &file.source, externs);
             out.insert(file.source_path.clone(), value);
         }
         out
+    }
+
+    /// One file's semantics, computed only when the cross-snapshot cache
+    /// has no entry for this (content, imported declarations) pair — the
+    /// single lookup both the typed pass ([`Project::check`]) and the
+    /// editor's semantic fallbacks ([`Project::semantic_analyses`]) go
+    /// through, so the two surfaces share one cache instead of each
+    /// recomputing the other's answer.
+    fn cached_semantics(
+        &self,
+        path: &Path,
+        source: &str,
+        externs: Vec<crate::EnumSymbol>,
+    ) -> Arc<FileSemantics> {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        let source_hash = hasher.finish();
+        let mut cache = self.semantics_cache.borrow_mut();
+        if let Some(cached) = cache.get(path)
+            && cached.source_hash == source_hash
+            && cached.value.externs == externs
+        {
+            self.semantic_cache_hits
+                .set(self.semantic_cache_hits.get() + 1);
+            return cached.value.clone();
+        }
+        let analyses = crate::pattern_analyses(source, &externs);
+        let value = Arc::new(FileSemantics { externs, analyses });
+        cache.insert(
+            path.to_path_buf(),
+            CachedSemantics {
+                source_hash,
+                value: value.clone(),
+            },
+        );
+        value
+    }
+
+    /// The semantics of one document as the editor sees it (overlay text
+    /// first), served from the same cross-snapshot cache as the typed pass.
+    /// Imported declarations are read from open overlays, then from the
+    /// projection cache (an unchanged import target is not re-parsed), then
+    /// from disk.
+    pub(crate) fn semantic_analyses(&self, path: &Path, source: &str) -> Arc<FileSemantics> {
+        let externs = super::language::externs_from(path, &crate::rl_imports(source), &|target| {
+            let text = match self.overlays.get(target) {
+                Some(text) => text.clone(),
+                None => std::fs::read_to_string(target).ok()?,
+            };
+            if let Some(doc) = self.cache.get(target)
+                && doc.source == text
+            {
+                return Some(
+                    doc.enum_symbols()
+                        .iter()
+                        .filter(|d| d.exported)
+                        .cloned()
+                        .collect(),
+                );
+            }
+            Some(
+                crate::enum_symbols(&text)
+                    .into_iter()
+                    .filter(|d| d.exported)
+                    .collect(),
+            )
+        });
+        self.cached_semantics(path, source, externs)
     }
 
     /// Checks a snapshot: asks the running compiler about it and returns

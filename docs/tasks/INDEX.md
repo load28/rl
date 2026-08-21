@@ -137,7 +137,8 @@
 | TASK-127 | 서버 declarations 표면 — 에디터 shadow 대체 재료 (D6 1/2) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-127](./TASK-127-declarations-surface.md) |
 | TASK-128 | 에디터가 declarations를 소비, shadow 삭제 (D6 2/2) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-128](./TASK-128-editor-consumes-declarations.md) |
 | TASK-129 | Table 구축을 resolver 위로 (Phase 3 2/2, D5 종결) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-129](./TASK-129-table-from-resolver.md) |
+| TASK-130 | 에디터 semantic API가 semantic cache를 소비 (Phase 6 2/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-130](./TASK-130-editor-consumes-semantic-cache.md) |
 
 ## 다음 태스크 번호
 
-**TASK-130**
+**TASK-131**
