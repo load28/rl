@@ -90,6 +90,8 @@ pub struct RlFieldDecl {
 pub struct RlMatchSite {
     /// Byte offset of the `match` keyword.
     pub keyword: usize,
+    /// Byte offset of the body's opening `{`.
+    pub body_open: usize,
     /// Byte offset of the body's closing `}`.
     pub body_close: usize,
 }
@@ -200,6 +202,7 @@ fn collect_matches(program: &crate::ast::Program, out: &mut Vec<RlMatchSite>) {
             Segment::Match(expr) => {
                 out.push(RlMatchSite {
                     keyword: expr.keyword_off,
+                    body_open: expr.body_open,
                     body_close: expr.body_close,
                 });
                 collect_matches(&expr.scrutinee, out);
@@ -213,6 +216,7 @@ fn collect_matches(program: &crate::ast::Program, out: &mut Vec<RlMatchSite>) {
             Segment::TupleMatch(expr) => {
                 out.push(RlMatchSite {
                     keyword: expr.keyword_off,
+                    body_open: expr.body_open,
                     body_close: expr.body_close,
                 });
                 for (_, scrutinee) in &expr.scrutinees {

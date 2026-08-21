@@ -19,11 +19,18 @@
  *   second opinion here would answer differently from the compiler
  *   (TASK-107). Those requests are text-based, so they work on a buffer
  *   mid-keystroke and with no TypeScript toolchain installed.
- * - The **rl syntax layer** (analysis.ts) is what is left after that: the
- *   structure this process still reads for itself — where a `match`
- *   keyword is, whether a `.` is a member access, document symbols, the
- *   missing-arms quick fix. It is deliberately diagnostic-free — a
- *   near-miss can lose a convenience, never invent an error.
+ * - The **declaration surface** — which enums are visible (local,
+ *   imported, built-in), their cases and fields, and where the `match`
+ *   sites are — is the compiler's answer too (`declarations`,
+ *   `declarationsOf`): completion lists, document symbols and the
+ *   missing-arms quick fix all read it, so this process holds no second
+ *   implementation of the compiler's rules (TASK-128; the old regex layer
+ *   could disagree with the compiler and is gone).
+ * - The **text-shape layer** (analysis.ts) is what is left after that:
+ *   cursor context over raw text — whether a `.` is a member access,
+ *   the word under the cursor, masking. It is deliberately
+ *   diagnostic-free — a near-miss can lose a convenience, never invent an
+ *   error.
  * - Diagnostics run the real compiler through rlc.ts (`--check`, and the
  *   typed layer via the engine's `typedCheck`).
  * ----------------------------------------------------------------------- */
@@ -173,26 +180,61 @@ interface Analyzed {
   version: number;
   text: string;
   masked: string;
-  enums: analysis.EnumInfo[];
-  matches: analysis.MatchInfo[];
 }
 
 const analysisCache = new Map<string, Analyzed>();
 
+/** The text-shape half: the masked buffer for cursor-context questions
+ * (member access, word boundaries). rl *semantics* — which enums are
+ * visible, where the match sites are — are the compiler's answer
+ * ([declarationsOf]), not this file's. */
 function analyze(doc: TextDocument): Analyzed {
   const cached = analysisCache.get(doc.uri);
   if (cached && cached.version === doc.version) return cached;
   const text = doc.getText();
   const masked = analysis.maskNonCode(text);
-  const result: Analyzed = {
-    version: doc.version,
-    text,
-    masked,
-    enums: analysis.parseEnums(text, masked),
-    matches: analysis.parseMatches(masked),
-  };
+  const result: Analyzed = { version: doc.version, text, masked };
   analysisCache.set(doc.uri, result);
   return result;
+}
+
+const declCache = new Map<
+  string,
+  { version: number; decls: engine.EngineDeclarations }
+>();
+
+/** The compiler's declaration surface for the buffer: visible enums
+ * (local, imported, built-in — the compiler's shadowing) and match sites.
+ * One implementation of the rules, the compiler's; empty when the engine
+ * cannot answer, and every consumer degrades quietly. */
+async function declarationsOf(
+  doc: TextDocument,
+): Promise<engine.EngineDeclarations> {
+  const cached = declCache.get(doc.uri);
+  if (cached && cached.version === doc.version) return cached.decls;
+  const fsPath = enginePath(doc);
+  const decls = fsPath
+    ? await engine.declarations(
+        currentCompiler(),
+        fsPath,
+        doc.getText(),
+        logEngine,
+      )
+    : { enums: [], matches: [] };
+  declCache.set(doc.uri, { version: doc.version, decls });
+  return decls;
+}
+
+/** Render a case the way completion shows it: `Enum.Tag(field: ty, ...)`. */
+function caseSignature(
+  e: engine.EngineEnumDecl,
+  c: engine.EngineCaseDecl,
+): string {
+  if (c.unit && c.fields.length === 0) return `${e.name}.${c.tag}`;
+  const fields = c.fields
+    .map((f) => `${f.name}${f.optional ? "?" : ""}: ${f.ty}`)
+    .join(", ");
+  return `${e.name}.${c.tag}(${fields})`;
 }
 
 // ------------------------------------------------------------- the engine
@@ -225,83 +267,6 @@ engine.setOnSessionStart(() => {
 function enginePath(doc: TextDocument): string | null {
   const uri = URI.parse(doc.uri);
   return uri.scheme === "file" ? uri.fsPath : null;
-}
-
-// ------------------------------------------------- imported declarations
-
-/* Cross-file declarations come from the compiler (`rlc --symbols`,
- * cli.md): the file's direct `.rl` imports and the referenced files'
- * exported enums, with positions. Only named imports (aliases applied)
- * are merged — mirroring the compiler's collection — and the compiler is
- * run on the saved file, so a not-yet-saved edit to the import lines can
- * lag one save behind. */
-
-const importedCache = new Map<
-  string,
-  { version: number; enums: analysis.EnumInfo[] }
->();
-
-async function importedEnums(doc: TextDocument): Promise<analysis.EnumInfo[]> {
-  const cached = importedCache.get(doc.uri);
-  if (cached && cached.version === doc.version) return cached.enums;
-  let enums: analysis.EnumInfo[] = [];
-  const uri = URI.parse(doc.uri);
-  if (uri.scheme === "file") {
-    const settings = await getSettings(doc.uri);
-    const compiler = rlc.findCompiler(settings.compilerPath, workspaceRoots);
-    const symbols = await rlc.runSymbols(compiler, uri.fsPath);
-    if (symbols) enums = toImportedEnumInfos(symbols);
-  }
-  importedCache.set(doc.uri, { version: doc.version, enums });
-  return enums;
-}
-
-/** Convert the compiler's symbol report into EnumInfo entries for merging
- * (named imports only; aliases applied; offsets are -1 — positions live in
- * the declaring file via `imported`). */
-function toImportedEnumInfos(symbols: rlc.SymbolsFile): analysis.EnumInfo[] {
-  const out: analysis.EnumInfo[] = [];
-  for (const imp of symbols.imports) {
-    if (imp.resolved === null || imp.names.kind !== "named") continue;
-    for (const entry of imp.names.entries) {
-      const e = imp.enums.find((x) => x.name === entry.name);
-      if (!e) continue;
-      const casePositions: Record<string, { line: number; col: number }> = {};
-      for (const c of e.cases) {
-        casePositions[c.tag] = { line: c.line, col: c.col };
-      }
-      out.push({
-        name: entry.alias ?? entry.name,
-        nameStart: -1,
-        nameEnd: -1,
-        generics: e.generics,
-        exported: true,
-        builtin: false,
-        start: -1,
-        end: -1,
-        cases: e.cases.map((c) => ({
-          tag: c.tag,
-          tagStart: -1,
-          tagEnd: -1,
-          fields: (c.fields ?? []).map((f) => ({
-            name: f.name,
-            optional: f.optional,
-            type: f.type,
-          })),
-          hasParens: c.fields !== null,
-        })),
-        imported: {
-          path: imp.resolved,
-          specifier: imp.specifier,
-          name: e.name,
-          line: e.line,
-          col: e.col,
-          cases: casePositions,
-        },
-      });
-    }
-  }
-  return out;
 }
 
 // ------------------------------------------------------------- diagnostics
@@ -645,10 +610,10 @@ documents.onDidChangeContent((e) => {
     engine.updateDocument(currentCompiler(), fsPath, e.document.getText());
   }
   // Editing one file can change what its siblings import — drop their
-  // cached imported declarations (the edited doc's own entry refreshes by
+  // cached declaration surfaces (the edited doc's own entry refreshes by
   // version).
-  for (const uri of importedCache.keys()) {
-    if (uri !== e.document.uri) importedCache.delete(uri);
+  for (const uri of declCache.keys()) {
+    if (uri !== e.document.uri) declCache.delete(uri);
   }
   scheduleValidation(e.document);
 });
@@ -658,7 +623,7 @@ documents.onDidClose((e) => {
     engine.closeDocument(currentCompiler(), fsPath);
   }
   analysisCache.delete(e.document.uri);
-  importedCache.delete(e.document.uri);
+  declCache.delete(e.document.uri);
   forget(e.document.uri);
   const pending = pendingValidation.get(e.document.uri);
   if (pending !== undefined) {
@@ -829,9 +794,9 @@ async function tsCompletions(
 connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
-  const { masked, enums, matches } = analyze(doc);
+  const { masked } = analyze(doc);
   const offset = doc.offsetAt(params.position);
-  const visible = analysis.visibleEnums(enums, await importedEnums(doc));
+  const visible = (await declarationsOf(doc)).enums;
 
   // `Enum.` member access → the enum's case constructors, then everything
   // else TypeScript offers on that same object. Both halves are needed:
@@ -896,11 +861,12 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const items: CompletionItem[] = visible.map((e) => ({
     label: e.name,
     kind: CompletionItemKind.Enum,
-    detail: e.builtin
-      ? `내장 enum ${e.name}${e.generics}`
-      : e.imported
-        ? `enum ${e.name}${e.generics} — ${e.imported.specifier}`
-        : `enum ${e.name}${e.generics}`,
+    detail:
+      e.origin === "builtin"
+        ? `내장 enum ${e.name}${e.generics}`
+        : e.origin === "imported"
+          ? `enum ${e.name}${e.generics}${e.specifier ? ` — ${e.specifier}` : ""}`
+          : `enum ${e.name}${e.generics}`,
     sortText: `0${e.name}`,
   }));
   const rlItems = items.concat(KEYWORD_SNIPPETS);
@@ -989,14 +955,14 @@ connection.onSignatureHelp(async (params): Promise<SignatureHelp | null> => {
 });
 
 function constructorItem(
-  e: analysis.EnumInfo,
-  c: analysis.CaseInfo,
+  e: engine.EngineEnumDecl,
+  c: engine.EngineCaseDecl,
 ): CompletionItem {
-  const unit = !c.hasParens && c.fields.length === 0;
+  const unit = c.unit && c.fields.length === 0;
   const item: CompletionItem = {
     label: c.tag,
     kind: unit ? CompletionItemKind.EnumMember : CompletionItemKind.Constructor,
-    detail: analysis.caseSignature(e, c),
+    detail: caseSignature(e, c),
     sortText: `0${c.tag}`,
   };
   if (!unit) {
@@ -1014,13 +980,15 @@ function constructorItem(
 connection.onHover(async (params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
-  const { text, masked, enums, matches } = analyze(doc);
+  const { text } = analyze(doc);
   const offset = doc.offsetAt(params.position);
 
   const w = analysis.wordAt(text, offset);
   if (w && w.word === "match") {
-    const m = analysis.matchKeywordAt(matches, offset);
-    if (m && m.start === w.start) {
+    const m = (await declarationsOf(doc)).matches.find(
+      (site) => site.keyword === w.start,
+    );
+    if (m) {
       return {
         contents: {
           kind: MarkupKind.Markdown,
@@ -1191,41 +1159,48 @@ connection.onRenameRequest(async (params) => {
 
 // ----------------------------------------------------------------- symbols
 
-connection.onDocumentSymbol((params): DocumentSymbol[] => {
+connection.onDocumentSymbol(async (params): Promise<DocumentSymbol[]> => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
-  const { enums } = analyze(doc);
-  return enums.map((e) => {
+  const decls = await declarationsOf(doc);
+  const out: DocumentSymbol[] = [];
+  for (const e of decls.enums) {
+    // Only this file's declarations belong in its outline.
+    if (e.origin !== "local" || !e.span || !e.nameSpan) continue;
     const range = {
-      start: doc.positionAt(e.start),
-      end: doc.positionAt(e.end),
+      start: doc.positionAt(e.span.start),
+      end: doc.positionAt(e.span.end),
     };
-    return {
+    out.push({
       name: `${e.name}${e.generics}`,
       kind: SymbolKind.Enum,
       range,
       selectionRange: {
-        start: doc.positionAt(e.nameStart),
-        end: doc.positionAt(e.nameEnd),
+        start: doc.positionAt(e.nameSpan.start),
+        end: doc.positionAt(e.nameSpan.end),
       },
-      children: e.cases.map((c) => ({
-        name: c.tag,
-        detail:
-          c.fields.length > 0
-            ? `(${c.fields.map((f) => f.name).join(", ")})`
-            : undefined,
-        kind: SymbolKind.EnumMember,
-        range: {
-          start: doc.positionAt(c.tagStart),
-          end: doc.positionAt(c.tagEnd),
-        },
-        selectionRange: {
-          start: doc.positionAt(c.tagStart),
-          end: doc.positionAt(c.tagEnd),
-        },
-      })),
-    };
-  });
+      children: e.cases.flatMap((c) => {
+        if (!c.span) return [];
+        const tagRange = {
+          start: doc.positionAt(c.span.start),
+          end: doc.positionAt(c.span.end),
+        };
+        return [
+          {
+            name: c.tag,
+            detail:
+              c.fields.length > 0
+                ? `(${c.fields.map((f) => f.name).join(", ")})`
+                : undefined,
+            kind: SymbolKind.EnumMember,
+            range: tagRange,
+            selectionRange: tagRange,
+          },
+        ];
+      }),
+    });
+  }
+  return out;
 });
 
 // ------------------------------------------------------------ code actions
@@ -1245,13 +1220,13 @@ connection.onCodeAction(async (params): Promise<CodeAction[]> => {
     const missing = [...m[2].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
     if (missing.length === 0) continue;
 
-    const { enums, matches } = analyze(doc);
+    const decls = await declarationsOf(doc);
     const offset = doc.offsetAt(diag.range.start);
-    const match = analysis.matchKeywordAt(matches, offset);
+    const match = decls.matches.find(
+      (site) => offset >= site.keyword && offset <= site.keyword + 5,
+    );
     if (!match) continue;
-    const e = analysis
-      .visibleEnums(enums, await importedEnums(doc))
-      .find((x) => x.name === m[1]);
+    const e = decls.enums.find((x) => x.name === m[1]);
 
     const armFor = (tag: string): string => {
       const c = e?.cases.find((x) => x.tag === tag);
@@ -1289,15 +1264,15 @@ connection.onCodeAction(async (params): Promise<CodeAction[]> => {
 /** Insert arm lines just before the match body's closing brace. */
 function insertArms(
   doc: TextDocument,
-  match: analysis.MatchInfo,
+  match: engine.EngineMatchSite,
   arms: string[],
 ): TextEdit {
   const text = doc.getText();
   const closePos = doc.positionAt(match.bodyClose);
-  const matchPos = doc.positionAt(match.start);
+  const matchPos = doc.positionAt(match.keyword);
   const matchLineStart = doc.offsetAt({ line: matchPos.line, character: 0 });
   const baseIndent = /^[ \t]*/.exec(
-    text.slice(matchLineStart, match.start),
+    text.slice(matchLineStart, match.keyword),
   )![0];
   const armIndent = `${baseIndent}  `;
 

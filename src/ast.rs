@@ -356,6 +356,8 @@ pub(crate) struct Field {
 pub(crate) struct MatchExpr {
     /// Byte offset of the `match` keyword, for error reporting.
     pub keyword_off: usize,
+    /// Byte offset of the body's opening `{`.
+    pub body_open: usize,
     /// Byte offset of the body's closing `}` — where an editor inserts a
     /// missing arm ([`crate::engine::rl_declarations`]).
     pub body_close: usize,
@@ -377,6 +379,8 @@ pub(crate) struct MatchExpr {
 pub(crate) struct TupleMatchExpr {
     /// Byte offset of the `match` keyword, for error reporting.
     pub keyword_off: usize,
+    /// Byte offset of the body's opening `{`.
+    pub body_open: usize,
     /// Byte offset of the body's closing `}` — same role as
     /// [`MatchExpr::body_close`].
     pub body_close: usize,

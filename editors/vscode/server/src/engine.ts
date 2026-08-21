@@ -487,6 +487,67 @@ export async function rlHints(
   return result?.hints ?? [];
 }
 
+/** A byte span in the buffer. */
+export interface EngineSpan {
+  start: number;
+  end: number;
+}
+
+/** One enum visible in a buffer, from the compiler's own declaration
+ * table (`declarations`, cli.md) — local, imported (aliases applied) and
+ * built-in, under exactly the compiler's shadowing. */
+export interface EngineEnumDecl {
+  name: string;
+  generics: string;
+  origin: "local" | "imported" | "builtin";
+  specifier: string | null;
+  nameSpan: EngineSpan | null;
+  span: EngineSpan | null;
+  cases: EngineCaseDecl[];
+}
+
+/** One case of an [EngineEnumDecl]. */
+export interface EngineCaseDecl {
+  tag: string;
+  span: EngineSpan | null;
+  unit: boolean;
+  fields: { name: string; optional: boolean; ty: string }[];
+}
+
+/** One `match` site of the buffer: its keyword and the byte of the body's
+ * closing `}` — the arm-insertion point. */
+export interface EngineMatchSite {
+  keyword: number;
+  bodyOpen: number;
+  bodyClose: number;
+}
+
+/** The compiler's declaration surface for one buffer. */
+export interface EngineDeclarations {
+  enums: EngineEnumDecl[];
+  matches: EngineMatchSite[];
+}
+
+/** The declarations visible in a buffer — what used to be re-derived here
+ * by regexes (parseEnums/visibleEnums/BUILTIN_ENUMS) is now the compiler's
+ * single answer. Text-based and parse-only; empty when the engine (or a
+ * pre-`declarations` rlc) cannot answer, and the callers degrade the same
+ * way every other engine surface does. */
+export async function declarations(
+  compiler: string,
+  path: string,
+  text: string,
+  onError?: (message: string) => void,
+): Promise<EngineDeclarations> {
+  const result = await semantic<EngineDeclarations>(
+    compiler,
+    "declarations",
+    { path, text },
+    onError,
+  );
+  return result ?? { enums: [], matches: [] };
+}
+
 export async function tsDiagnostics(
   compiler: string,
   path: string,

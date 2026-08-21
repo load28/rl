@@ -39,7 +39,7 @@
 //! → { "id": 8, "method": "declarations", "params": { "path", "text" } }
 //! ← { "id": 8, "result": { "enums": [{ "name", "generics", "origin",
 //!        "specifier", "nameSpan", "span", "cases" }],
-//!        "matches": [{ "keyword", "bodyClose" }] } }
+//!        "matches": [{ "keyword", "bodyOpen", "bodyClose" }] } }
 //!
 //! ← { "id": N, "error": "sentence" }   // the request failed; the session lives
 //! ```
@@ -432,7 +432,13 @@ fn declarations(params: &serde_json::Value) -> Result<serde_json::Value, String>
     let matches: Vec<_> = decls
         .matches
         .iter()
-        .map(|m| json!({ "keyword": m.keyword, "bodyClose": m.body_close }))
+        .map(|m| {
+            json!({
+                "keyword": m.keyword,
+                "bodyOpen": m.body_open,
+                "bodyClose": m.body_close,
+            })
+        })
         .collect();
     Ok(json!({ "enums": enums, "matches": matches }))
 }
