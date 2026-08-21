@@ -365,8 +365,9 @@ impl Checker {
                 RlError::span(
                     stmt.else_off,
                     stmt.else_off + "else".len(),
-                    "let-else: the `else` block must end with a `return`, `throw`, `break`, or \
-                     `continue` statement"
+                    "let-else: every path through the `else` block must diverge — end it \
+                     with `return`, `throw`, `break`, or `continue` (an `if`/`else` counts \
+                     when both branches do)"
                         .to_string(),
                 )
                 .code(DiagnosticCode::LetElseNotDiverging),

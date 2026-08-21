@@ -861,22 +861,36 @@ fn let_else_divergence_still_sees_block_statements() {
 
 #[test]
 fn let_else_non_diverging_else_ending_in_a_brace_is_still_an_error() {
-    // The fix must not turn every trailing `}` into a divergence. None of
-    // these ends with one of the four keywords.
+    // The flow answer must not turn every trailing `}` into a divergence:
+    // an `if` without an `else` can fall through, a loop can run zero
+    // times, an object literal is no statement at all.
     for body in [
         "const o = { n: 1 };",
         "if (c) { return 1; }",
         "for (const x of xs) { log(x); }",
-        "{ return 1; }",
     ] {
         let e = err(&format!(
             "function f(): number {{\n  const Some(v) = find() else {{ {body} }};\n  return v;\n}}\n"
         ));
-        assert!(
-            e.message.contains("must end with a `return`"),
-            "{body}: {}",
-            e.message
-        );
+        assert!(e.message.contains("must diverge"), "{body}: {}", e.message);
+    }
+}
+
+#[test]
+fn let_else_divergence_is_a_flow_answer_not_a_last_keyword_check() {
+    // The CFG (TASK-125) accepts what the last-keyword heuristic wrongly
+    // rejected: both-branch if/else, a diverging bare block, and code
+    // after a `return` (unreachable, not a hole).
+    for body in [
+        "if (c) { return 1; } else { return 2; }",
+        "if (c) { return 1; } else if (d) { throw e; } else { return 2; }",
+        "if (c) return 1; else return 2;",
+        "{ return 1; }",
+        "return 0; log(\"never\");",
+    ] {
+        ok(&format!(
+            "function f(): number {{\n  const Some(v) = find() else {{ {body} }};\n  return v;\n}}\n"
+        ));
     }
 }
 
@@ -884,22 +898,14 @@ fn let_else_non_diverging_else_ending_in_a_brace_is_still_an_error() {
 fn let_else_non_diverging_else_is_error() {
     let e =
         err("function f(): number {\n  const Some(v) = find() else { log(); };\n  return v;\n}\n");
-    assert!(
-        e.message.contains("must end with a `return`"),
-        "{}",
-        e.message
-    );
+    assert!(e.message.contains("must diverge"), "{}", e.message);
     assert_eq!((e.line, e.col), (2, 26)); // points at the `else` keyword
 }
 
 #[test]
 fn let_else_empty_else_block_is_error() {
     let e = err("function f(): number {\n  const Some(v) = find() else { };\n  return v;\n}\n");
-    assert!(
-        e.message.contains("must end with a `return`"),
-        "{}",
-        e.message
-    );
+    assert!(e.message.contains("must diverge"), "{}", e.message);
 }
 
 #[test]

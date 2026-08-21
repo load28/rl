@@ -59,6 +59,7 @@ mod codegen;
 mod diagnostics;
 pub mod engine;
 mod error;
+pub mod flow;
 pub mod hir;
 mod lexer;
 mod parser;

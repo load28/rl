@@ -79,7 +79,7 @@ try validateRange(parsed);          // propagate-only; `try await f();` ok
 const Some(value: user) = findUser(id) else { return "who?"; };
 ```
 - Pattern parens AND trailing `;` mandatory (else passthrough).
-- else block must diverge SYNTACTICALLY: last top-level stmt starts with return/throw/break/continue (`if (c) return a; else return b;` ending rejected — restructure). Statement boundaries are top-level `;` and a block statement's `}`; an object literal's / arrow body's `}` is not one, so `else { return { kind: "Err", error: e }; };` counts as diverging.
+- else block must diverge — a CONTROL-FLOW check: every path leaves via return/throw/break/continue. Accepts a diverging final statement, an `if`/`else` (chains too) whose branches ALL diverge (`if (c) return a; else return b;` is fine), a diverging bare block, and unreachable code after a diverge. Loops/`switch`/`try` count as fall-through (conservative); a nested function's `return` doesn't count. An object literal's / arrow body's `}` ends no statement, so `else { return { kind: "Err", error: e }; };` is one diverging `return`.
 - Single tag pattern only: no or/guard/nested; no `= try expr else`. Position limits same as try.
 
 ## if let
