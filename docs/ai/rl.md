@@ -4,7 +4,7 @@ rl = TypeScript + 7 constructs + 1 binding modifier; `rlc` compiles `.rl` → pl
 
 CONTRACTS:
 - Every valid TS file is a valid `.rl` file. rlc transforms only text parsing COMPLETELY as an rl construct; all else passes through byte-for-byte.
-- Output is plain TS (`kind`-tagged unions, switch/if chains), no runtime lib, no type tricks. rl-level errors: `rlc: file:line:col: msg` (the position is the construct's start; diagnostics also carry the end, which is what an editor underlines — `try <expr>`, `match (scrutinee)`). Type errors in pass-through code: tsc's job.
+- Output is plain TS (`kind`-tagged unions, switch/if chains), no runtime lib, no type tricks. rl-level errors: `rlc: file:line:col: msg` (the position is the construct's start; diagnostics also carry the end, which is what an editor underlines — `try <expr>`, `match (scrutinee)`). One run reports **every** rl diagnostic of a file, in source order (each with a stable code, e.g. `match-not-exhaustive`); a recoverable rl error doesn't hide the file's type diagnostics on the typed path. Type errors in pass-through code: tsc's job.
 - Type errors that tsc raises *inside code rlc generated* (e.g. `try` on a non-Result, `match` on a plain TS enum) are restated by rlc in rl's words OVER THE CONSTRUCT (`try <expr>`, `match (scrutinee)`), with the original in parentheses: `` `try` needs a `Result` — this expression is not one (ts2339: ...) ``. Only a whitelist of (construct, TS code) pairs is restated; anything else passes through with `(in code rlc generated for this construct)`. A restated message that mentions a lowered case (`{ kind: "OutOfRange"; value: number; }`) also carries the sentence in rl's names — `` (in rl's names: Type 'Err<Wire.OutOfRange>' is not assignable to type 'Result<number, ParseError>'.) `` — but only where the declaration table points at exactly one case (tag AND payload field names); a union covering a whole enum collapses to the enum's name, and the original always rides along.
 - TRAP: a slightly-wrong rl construct (missing `;`, reserved-word tag, unparenthesized ternary) is NOT an rl error — it passes through, then the output self-check (or tsc) fails on the raw `match`/`try` text. rlc reports that AT THE KEYWORD in the `.rl`: `` `match` here did not parse as an rl `match`, so it was passed through as TypeScript ... `` → your syntax didn't fully parse. Exceptions: malformed `if let` and `|>` DO error with location (impossible in valid TS).
 - Identifiers inside rl constructs: ASCII `[A-Za-z_$][A-Za-z0-9_$]*` only. TS reserved words (new, default, if, in, of, static, class, ...) can't be tags/fields/bindings — construct silently passes through. `.tsx` unsupported.
@@ -39,7 +39,7 @@ const area = match (shape) {
 - or-pattern: `A | B => body` (never `||`); all alternatives must bind same (field,name) set.
 - guard: `Some(v) if v > 0 => v`; guard false → falls to next arm; guarded arms may repeat a tag; re-matching a tag already covered by an unguarded arm = duplicate-arm error. A dead arm the duplicate rule misses (nested pattern or tuple combination already covered) is NOT an error — it compiles, and the editor dims it (engine `rlHints`).
 - nested: `Ok(value: Some(v)) => v`; inner UNIT case needs parens `field: None()` (`field: name` = alias); no combining with or-patterns; same binding name twice in a pattern = error (alias one); inner mismatch falls through.
-- Name resolution: pattern tags and field names are checked against the declaration — but ONLY when rlc can name what you meant (case-insensitive or near-miss; a transposition counts as one edit), because tag patterns also match hand-written `kind` unions whose tags are in no table. `Circel(r)` → `enum Shape has no case \`Circel\` — did you mean \`Circle\`?`; `Circle(radiuz)` → `case \`Circle\` has no field \`radiuz\` — did you mean \`radius\`?`. Same rule in let-else / `if let` (single-tag sites need a ONE-edit match to report the tag; fields are checked once the tag resolves) and in nested patterns (resolved against the outer field's declared type). A wrong-but-not-typo name is NOT reported (needs types). A reported typo suppresses that match's exhaustiveness error.
+- Name resolution: pattern tags and field names are checked against the declaration — but ONLY when rlc can name what you meant (case-insensitive or near-miss; a transposition counts as one edit), because tag patterns also match hand-written `kind` unions whose tags are in no table. `Circel(r)` → `enum Shape has no case \`Circel\` — did you mean \`Circle\`?`; `Circle(radiuz)` → `case \`Circle\` has no field \`radiuz\` — did you mean \`radius\`?`. Same rule in let-else / `if let` (a single-tag site needs a ONE-edit match to report the tag; an or-pattern's several tags are match-grade evidence and use the match rule; fields are checked once the tag resolves) and in nested patterns (resolved against the outer field's declared type). A wrong-but-not-typo name is NOT reported (needs types). A reported typo suppresses that match's exhaustiveness error.
 - Exhaustiveness: match without `_` is checked; missing case = compile error. Enum resolution: local decl > direct (1-hop) relative-`.rl`-import > built-in Option/Result. GUARDED arms NEVER count as covering (add an unguarded arm or `_`); NESTED patterns DO — the check descends into payloads, so `Ok(value: Some(v))` + `Ok(value: None())` + `Err(e)` is exhaustive, and a hole is reported as a PATTERN you can paste back (`missing "Ok(value: None)"`). Inner position's enum comes from the field's declared type, else from the patterns written there (so generic `T` payloads still work); if neither names an enum, only `_` covers that position. With `_`: unchecked. Unknown union: compiles unchecked, runtime default throws on unexpected kind.
 - await allowed in scrutinee/guards/bodies → async IIFE, awaited. Detection is token-level: await inside a nested callback also triggers async — avoid in non-async contexts.
 
@@ -70,7 +70,7 @@ try validateRange(parsed);          // propagate-only; `try await f();` ok
 - Result only (Ok unwraps `.value`; Err returned from enclosing fn). Option unsupported → `Option.okOr(o, err)` first.
 - Enclosing fn return type must be Result compatible with expr's Err type; no auto conversion.
 - UNANNOTATED fn: tsc infers the union of the return paths, so several `try`s with different Err types give `Ok<T> | Err<E1> | Err<E2>` = `Result<T, E1 | E2>`. rlc never collects/unions error types — leave inference to tsc.
-- FORBIDDEN (compile error): inside match (scrutinee/arm), template interpolation, another try, module top level → extract helper fn.
+- FORBIDDEN (compile error): module top level / namespace body (no function for the emitted `return` to exit), and statement positions directly inside match (scrutinee/arm), template interpolation, `result` block, another try (`return` would exit the construct's IIFE). ALLOWED inside a function you write there — `run(() => { try g(); ... })` in a guard/step/arm is Rust's `?` in a closure — and inside if-let bodies / let-else else blocks whose statement sits in a function (inline contexts inherit the function). Placement is a control-flow fact, not a nesting rule.
 - Expr can't start with `(` or `<`: `try f(x);` not `try (f(x));`.
 
 ## let-else
@@ -79,8 +79,8 @@ try validateRange(parsed);          // propagate-only; `try await f();` ok
 const Some(value: user) = findUser(id) else { return "who?"; };
 ```
 - Pattern parens AND trailing `;` mandatory (else passthrough).
-- else block must diverge SYNTACTICALLY: last top-level stmt starts with return/throw/break/continue (`if (c) return a; else return b;` ending rejected — restructure). Statement boundaries are top-level `;` and a block statement's `}`; an object literal's / arrow body's `}` is not one, so `else { return { kind: "Err", error: e }; };` counts as diverging.
-- Single tag pattern only: no or/guard/nested; no `= try expr else`. Position limits same as try.
+- else block must diverge — a CONTROL-FLOW check: every path leaves via return/throw/break/continue. Accepts a diverging final statement, an `if`/`else` (chains too) whose branches ALL diverge (`if (c) return a; else return b;` is fine), a diverging bare block, and unreachable code after a diverge. Loops/`switch`/`try` count as fall-through (conservative); a nested function's `return` doesn't count. An object literal's / arrow body's `}` ends no statement, so `else { return { kind: "Err", error: e }; };` is one diverging `return`.
+- Or-patterns OK (`const Circle(r) | Square(r) = s else {...};` — first alternative needs parens, all alternatives must bind the same (field,name) set, shared destructuring); no guard/nested; no `= try expr else`. Position limits same as try (module top level allowed — no `return` of its own).
 
 ## if let
 
@@ -89,8 +89,8 @@ if let Some(value: user) = findUser(id) { greet(user); }
 else if let Some(value: c) = cache.get(id) { greet(c); }
 else { prompt(); }
 ```
-- Statement position only (incl. match block-arm bodies); never expression position.
-- Pattern parens mandatory; nested ok (`if let Ok(value: Some(value: v)) = r {}`); no or/guards.
+- Statement position only (incl. match block-arm bodies); in expression regions only inside a function you write there (same flow rule as try).
+- Pattern parens mandatory (first alternative); nested ok (`if let Ok(value: Some(value: v)) = r {}`); or-patterns ok (`if let Circle(r) | Square(r) = s {}` — same-binding-set rule, no nested inside or); no guards.
 - else = block or another if-let ONLY; plain `else if (cond)` must go inside an else block.
 - Malformed if let = located compile error (not passthrough).
 
@@ -121,10 +121,10 @@ const data = result {
 - Flat replacement for nested `Result.andThen(r, user => ... )` callbacks; every earlier binding stays in scope.
 - `result` is contextual: block is claimed ONLY if it has ≥1 `<-` binding, else plain identifier + block statement (passthrough). Write `<-` with no space.
 - Binding = `const|let|var <name|destructuring|: type> <- expr;` — `;` MANDATORY on bindings, FORBIDDEN on the final value expr (else located compile error). A top-level `>` in the bound expr needs parens (generic-type-argument ambiguity). Forgetting the keyword (`y <- g();`) is a located error (`` `result` binding is missing its declaration keyword ``) wherever the text cannot be TS — which is any claimed block; for an actual `y < -g()` comparison, put a space between `<` and `-`.
-- Result only (no Option/Promise do-notation, no `<-` outside a result block).
+- Result only (no Option/Promise do-notation, no `<-` outside a result block). Bindings must be TOP-LEVEL statements of the block — `<-` inside an `if`/loop/function within the block is a located error (it cannot early-return the block); hoist it or `match`.
 - Block is an EXPRESSION (compiles to an IIFE of early returns): usable anywhere, incl. pipeline head. `await` inside → async IIFE, awaited.
 - Error types UNION automatically: bindings of `Result<_, E1>` + `Result<_, E2>` → block assignable to `Result<T, E1 | E2>`. rlc infers NO types; tsc narrows each step.
-- `return` inside the block returns from the BLOCK. So `try`/let-else are FORBIDDEN inside (located error) — use `<-`. `if let` is fine.
+- `return` inside the block returns from the BLOCK. So `try`/let-else directly in the block's statements are FORBIDDEN (located error) — use `<-`; inside a function written in the block they are fine. `if let` is fine anywhere here.
 - Final expr already a Result → nested `Result<Result<...>>`; bind it with `<-` instead.
 
 ## @rl/std
@@ -202,4 +202,4 @@ Bundler alternative: `unplugin-rl` (`import rl from "unplugin-rl/vite"`, also `/
 
 ## Checklist
 
-`val` only in front of `const|let|var` or a parameter, same line; match parens + `_` last + object arms `({...})`; bind by field name not position; literal patterns are values (never mixed with tags, none in tuple elements); `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, never inside match/`${}`/top-level; pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check-types src`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.
+`val` only in front of `const|let|var` or a parameter, same line; match parens + `_` last + object arms `({...})`; bind by field name not position; literal patterns are values (never mixed with tags, none in tuple elements); `_`-less match covers all (guards/nested don't count); `try`/`let-else` need `;` and diverging else, and a function to sit in when inside match/`${}`/`result` (try also at top level); pipelines parenthesize ternaries/arrows, use `*P`; `result` blocks need ≥1 `<-` binding, `;` on bindings and none on the final expr; relative imports keep `.rl`; verify with `npx rlc --check-types src`, re-run `npx rlc --types src` after enum changes; never edit generated `.ts`.

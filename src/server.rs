@@ -36,6 +36,11 @@
 //! → { "id": 7, "method": "rlHints", "params": { "path", "text" } }
 //! ← { "id": 7, "result": { "hints": [{ "kind", "range", "message" }] } }
 //!
+//! → { "id": 8, "method": "declarations", "params": { "path", "text" } }
+//! ← { "id": 8, "result": { "enums": [{ "name", "generics", "origin",
+//!        "specifier", "nameSpan", "span", "cases" }],
+//!        "matches": [{ "keyword", "bodyOpen", "bodyClose" }] } }
+//!
 //! ← { "id": N, "error": "sentence" }   // the request failed; the session lives
 //! ```
 //!
@@ -211,6 +216,7 @@ fn respond(sessions: &mut Sessions, line: &str) -> serde_json::Value {
             })
         }),
         "semanticTokens" => semantic_tokens(params),
+        "declarations" => declarations(params),
         "rlSymbol" => rl_symbol(params),
         "rlCompletions" => rl_completions(params),
         "rlHints" => rl_hints(params),
@@ -342,19 +348,25 @@ fn check(params: &serde_json::Value) -> Result<serde_json::Value, String> {
         verify: params["verify"].as_bool().unwrap_or(true),
         ..rlc::Options::default()
     };
-    let diagnostics = match rlc::compile(text, &options) {
-        Ok(_) => Vec::new(),
-        // `endLine`/`endCol` close the range the diagnostic covers — the
-        // construct as written. Zero means "position only": the consumer
-        // decides the width.
-        Err(e) => vec![json!({
-            "line": e.line,
-            "col": e.col,
-            "endLine": e.end_line,
-            "endCol": e.end_col,
-            "message": e.message,
-        })],
-    };
+    // Every rl-level diagnostic of the buffer, in source order (TASK-120).
+    // `endLine`/`endCol` close the range the diagnostic covers — the
+    // construct as written. Zero means "position only": the consumer
+    // decides the width. `code` is the rule's stable identity.
+    let diagnostics: Vec<_> = rlc::compile_report(text, &options)
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let e = d.to_compile_error(text, filename);
+            json!({
+                "line": e.line,
+                "col": e.col,
+                "endLine": e.end_line,
+                "endCol": e.end_col,
+                "message": e.message,
+                "code": d.code.as_str(),
+            })
+        })
+        .collect();
     Ok(json!({ "diagnostics": diagnostics }))
 }
 
@@ -362,6 +374,75 @@ fn check(params: &serde_json::Value) -> Result<serde_json::Value, String> {
 /// ambiguous surface, in the buffer's coordinates. Like `check`, this is
 /// stateless and parse-only — it needs no project and no TypeScript
 /// toolchain, so the editor's colors stay exact in every environment.
+/// The declarations visible in a buffer — the compiler's own enum table
+/// (local, imported, built-in, under the compiler's shadowing) plus the
+/// buffer's `match` sites. This is the surface that replaces the editor's
+/// regex re-implementation of rl semantics (`engine::rl_declarations`).
+/// Text-only; `path` resolves the buffer's relative `.rl` imports.
+fn declarations(params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?;
+    let decls = rlc::engine::rl_declarations(Path::new(path), text_param(params)?);
+    let enums: Vec<_> = decls
+        .enums
+        .iter()
+        .map(|e| {
+            let (origin, specifier, name_span, span) = match &e.origin {
+                rlc::engine::RlEnumOrigin::Local { name_span, span } => (
+                    "local",
+                    serde_json::Value::Null,
+                    Some(*name_span),
+                    Some(*span),
+                ),
+                rlc::engine::RlEnumOrigin::Imported { specifier } => (
+                    "imported",
+                    specifier
+                        .clone()
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                    None,
+                    None,
+                ),
+                rlc::engine::RlEnumOrigin::Builtin => {
+                    ("builtin", serde_json::Value::Null, None, None)
+                }
+            };
+            json!({
+                "name": e.name,
+                "generics": e.generics,
+                "origin": origin,
+                "specifier": specifier,
+                "nameSpan": name_span.map(|(start, end)| json!({ "start": start, "end": end })),
+                "span": span.map(|(start, end)| json!({ "start": start, "end": end })),
+                "cases": e.cases.iter().map(|c| json!({
+                    "tag": c.tag,
+                    "span": c.span.map(|(start, end)| json!({ "start": start, "end": end })),
+                    "unit": c.unit,
+                    "fields": c.fields.iter().map(|f| json!({
+                        "name": f.name,
+                        "optional": f.optional,
+                        "ty": f.ty,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let matches: Vec<_> = decls
+        .matches
+        .iter()
+        .map(|m| {
+            json!({
+                "keyword": m.keyword,
+                "bodyOpen": m.body_open,
+                "bodyClose": m.body_close,
+            })
+        })
+        .collect();
+    Ok(json!({ "enums": enums, "matches": matches }))
+}
+
 /// The rl name at a position — an enum, a case tag, a payload field.
 ///
 /// Text-only like `semanticTokens`: the answer needs no project and no
@@ -551,10 +632,17 @@ fn typed_check(
                                 "endLine": end_line,
                                 "endCol": end_col,
                                 "message": d.message,
+                                "code": d.code,
                             })
                         })
                         .collect();
-                    json!({ "blocked": false, "diagnostics": diagnostics })
+                    // `backendError`: the TypeScript layer could not run —
+                    // the rl diagnostics above are still complete.
+                    json!({
+                        "blocked": false,
+                        "diagnostics": diagnostics,
+                        "backendError": checked.backend_error,
+                    })
                 }
             }
         }

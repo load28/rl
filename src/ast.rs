@@ -42,6 +42,13 @@ pub(crate) struct Program {
     /// Byte offsets of `result` bindings written without a declaration
     /// keyword (`b <- f();`), reported by the semantic phase.
     pub result_missing_kw: Vec<usize>,
+    /// Byte offsets of `result` bindings written **below** a block's top
+    /// level (inside an `if` body, a loop, a function written in the
+    /// block) — a binding early-returns the block's IIFE, and only a
+    /// top-level statement can (`docs/reference/language.md` §8). Same
+    /// reporting story as [`Self::stray_pipes`]: the shape is never valid
+    /// TypeScript, so it cannot pass through either.
+    pub result_nested_binds: Vec<usize>,
 }
 
 /// One top-level piece of a [`Program`], in source order.
@@ -215,10 +222,12 @@ pub(crate) enum RlImportNames {
 }
 
 /// A structurally parsed rl let-else statement:
-/// `const|let|var Tag(bindings...) = <expr> else { ... };`. Like
-/// [`TryStmt`] it compiles to statements in the enclosing function scope:
-/// evaluate once, run the (diverging) `else` block unless the value's
-/// `kind` is the pattern's tag, then destructure the bindings.
+/// `const|let|var Tag(bindings...) (| Tag(bindings...))* = <expr> else
+/// { ... };`. Like [`TryStmt`] it compiles to statements in the enclosing
+/// function scope: evaluate once, run the (diverging) `else` block unless
+/// the value's `kind` is one of the pattern's tags, then destructure the
+/// bindings (shared across alternatives — sema enforces the same
+/// (field, name) set, exactly as in a match or-arm).
 #[derive(Debug)]
 pub(crate) struct LetElseStmt {
     /// Byte offset of the declaration keyword, for error reporting.
@@ -229,14 +238,10 @@ pub(crate) struct LetElseStmt {
     pub head_span: Span,
     /// The declaration keyword: `const`, `let`, or `var`.
     pub kw: String,
-    /// The pattern's case tag.
-    pub tag: String,
-    /// Byte offset of the tag, for error reporting — the same role
-    /// [`TagPattern::tag_off`] plays for a match arm's pattern.
-    pub tag_off: usize,
-    /// The pattern's bindings. Possibly empty — the parens are mandatory
-    /// (`const Tag() = ... else ...;` checks the case without binding).
-    pub bindings: Vec<Binding>,
+    /// The `|`-separated pattern alternatives, non-empty. The first always
+    /// carries parens (that is what claims the construct); later ones may
+    /// be bare tags. Bindings are alias-only (no nested patterns).
+    pub alternatives: Vec<TagPattern>,
     /// The expression after `=`, recursively parsed.
     pub expr: Program,
     /// The `else { ... }` block body, recursively parsed (braces excluded).
@@ -248,6 +253,12 @@ pub(crate) struct LetElseStmt {
     /// for Rust's "the else block must diverge" rule. Computed by the
     /// parser (which stays infallible), enforced by sema.
     pub diverges: bool,
+    /// Whether the statement sits inside a function body written in the
+    /// same parse region — same fact as [`TryStmt::in_function`]. Inside
+    /// an rl construct's statement region it decides placement: the
+    /// `else`'s exits must not leave the construct's IIFE, so without a
+    /// function written there the statement is rejected.
+    pub in_function: bool,
 }
 
 /// A structurally parsed rl `if let` statement:
@@ -267,15 +278,24 @@ pub(crate) struct IfLetStmt {
     /// expression, the then-block excluded — the span a diagnostic about
     /// the binding belongs on (`crate::EmitAnchor`).
     pub head_span: Span,
-    /// The pattern (parens mandatory; nested patterns allowed, or-patterns
-    /// not — same binding grammar as a match arm's single alternative).
-    pub pattern: TagPattern,
+    /// The `|`-separated pattern alternatives, non-empty — the same
+    /// pattern grammar as a match arm's: nested patterns allowed in a
+    /// single alternative, and (sema-enforced) not combinable with
+    /// or-patterns; the first alternative's parens are mandatory, later
+    /// ones may be bare tags.
+    pub alternatives: Vec<TagPattern>,
     /// The expression after `=`, recursively parsed.
     pub expr: Program,
     /// The then-block body, recursively parsed (braces excluded).
     pub body: Program,
     /// The `else` continuation, if any.
     pub else_part: Option<IfLetElse>,
+    /// Whether the statement sits inside a function body written in the
+    /// same parse region — same fact as [`TryStmt::in_function`]. An
+    /// `if let` emits a block statement (no `return` of its own), so the
+    /// fact only matters in expression regions: a function written there
+    /// provides the statement position the construct needs.
+    pub in_function: bool,
 }
 
 /// The `else` continuation of an [`IfLetStmt`].
@@ -313,6 +333,14 @@ pub(crate) struct TryStmt {
     pub decl: Option<(String, Span)>,
     /// The expression after `try`, recursively parsed.
     pub expr: Program,
+    /// Whether the statement sits inside a function body **written in the
+    /// same parse region** (`crate::flow::in_function_body`) — the
+    /// placement fact sema judges: the emitted `return` must have a
+    /// user-written function to exit. At a module's top level there is
+    /// none; inside an rl construct's own statement region (which compiles
+    /// into an IIFE) the region boundary is the construct, so only a
+    /// function the user wrote *inside* it counts.
+    pub in_function: bool,
 }
 
 /// A structurally parsed rl `enum` declaration.
@@ -356,6 +384,11 @@ pub(crate) struct Field {
 pub(crate) struct MatchExpr {
     /// Byte offset of the `match` keyword, for error reporting.
     pub keyword_off: usize,
+    /// Byte offset of the body's opening `{`.
+    pub body_open: usize,
+    /// Byte offset of the body's closing `}` — where an editor inserts a
+    /// missing arm ([`crate::engine::rl_declarations`]).
+    pub body_close: usize,
     /// Raw span of the scrutinee (used for `await` detection).
     pub scrutinee_span: Span,
     /// The scrutinee, recursively parsed.
@@ -374,6 +407,11 @@ pub(crate) struct MatchExpr {
 pub(crate) struct TupleMatchExpr {
     /// Byte offset of the `match` keyword, for error reporting.
     pub keyword_off: usize,
+    /// Byte offset of the body's opening `{`.
+    pub body_open: usize,
+    /// Byte offset of the body's closing `}` — same role as
+    /// [`MatchExpr::body_close`].
+    pub body_close: usize,
     /// The scrutinees, in source order (always two or more): raw span for
     /// `await` detection plus the recursively parsed expression.
     pub scrutinees: Vec<(Span, Program)>,

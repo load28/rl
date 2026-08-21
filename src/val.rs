@@ -460,33 +460,36 @@ fn offset_in(src: &str, part: &str) -> usize {
 /// Where collected output goes, which is also what the walk is for.
 #[derive(Clone, Copy)]
 enum Sink<'a> {
-    /// Report the first violation (the compile path).
-    Report,
+    /// Report every violation (the compile path) — the walk keeps going
+    /// after each one, like sema's (TASK-120).
+    Report(&'a RefCell<Vec<RlError>>),
     /// Collect bindings and mutations without pairing them ([`probes`]).
     Probes(&'a RefCell<ValProbes>),
 }
 
-/// Runs the `val` analysis over a whole file's token stream. Returns the
-/// first violation, like every other rl-level check.
-pub(crate) fn check(src: &str, tokens: &[Token]) -> Result<(), RlError> {
-    run(src, tokens, Sink::Report).map(|_| ())
+/// Runs the `val` analysis over a whole file's token stream and returns
+/// **every** violation, in walk order (statement order).
+pub(crate) fn check_all(src: &str, tokens: &[Token]) -> Vec<RlError> {
+    let sink = RefCell::new(Vec::new());
+    run(src, tokens, Sink::Report(&sink));
+    sink.into_inner()
 }
 
 /// Collects the file's `val` bindings and its mutations, unpaired — the
 /// input a checker pairs by symbol identity ([`ValProbes`]). Never reports.
 pub(crate) fn probes(src: &str, tokens: &[Token]) -> ValProbes {
     let sink = RefCell::new(ValProbes::default());
-    let _ = run(src, tokens, Sink::Probes(&sink));
+    run(src, tokens, Sink::Probes(&sink));
     sink.into_inner()
 }
 
-/// The one walk both halves share. With a sink the walk is in probe mode:
-/// it reports nothing and collects instead.
-fn run(src: &str, tokens: &[Token], sink: Sink) -> Result<(), RlError> {
+/// The one walk both halves share. With a probe sink the walk is in probe
+/// mode: it reports nothing and collects instead.
+fn run(src: &str, tokens: &[Token], sink: Sink) {
     // Files that do not use the modifier — the overwhelming majority —
     // pay one linear scan and nothing else.
     if !uses_val(src, tokens) {
-        return Ok(());
+        return;
     }
     let mut declarations = Vec::new();
     collect_declarations(src, tokens, &mut declarations);
@@ -522,7 +525,7 @@ fn run(src: &str, tokens: &[Token], sink: Sink) -> Result<(), RlError> {
         end: usize::MAX,
         vars: Vec::new(),
     }];
-    checker.walk(tokens, &mut frames)
+    checker.walk(tokens, &mut frames);
 }
 
 /// Whether the file uses `val` as a binding modifier anywhere.
@@ -946,16 +949,13 @@ impl<'a> Checker<'a> {
     /// pushing and popping scopes as it goes. Frames pushed here are
     /// dropped on the way out, so an interpolation cannot leak scopes into
     /// the stream that contains it.
-    fn walk(&self, tokens: &'a [Token], frames: &mut Vec<Frame<'a>>) -> Result<(), RlError> {
+    fn walk(&self, tokens: &'a [Token], frames: &mut Vec<Frame<'a>>) {
         let base = frames.len();
         // Parameter scopes, activated when the walk reaches the function
         // body they belong to: (body start, body end, bindings).
         let mut pending: Vec<(usize, usize, Vec<Var<'a>>)> = Vec::new();
         let mut i = 0usize;
-        let result = loop {
-            if i >= tokens.len() {
-                break Ok(());
-            }
+        while i < tokens.len() {
             while frames.len() > base && frames[frames.len() - 1].end <= i {
                 frames.pop();
             }
@@ -967,17 +967,10 @@ impl<'a> Checker<'a> {
             let tok = &tokens[i];
             match &tok.kind {
                 TokenKind::Template(parts) => {
-                    let mut failed = None;
                     for part in parts.iter() {
-                        if let TplPart::Interp { tokens: inner, .. } = part
-                            && let Err(e) = self.walk(inner, frames)
-                        {
-                            failed = Some(e);
-                            break;
+                        if let TplPart::Interp { tokens: inner, .. } = part {
+                            self.walk(inner, frames);
                         }
-                    }
-                    if let Some(e) = failed {
-                        break Err(e);
                     }
                 }
                 TokenKind::Punct(b'{') => {
@@ -1008,40 +1001,28 @@ impl<'a> Checker<'a> {
                 TokenKind::Punct(b'+' | b'-') if incdec_at(tokens, i) => {
                     if matches!(tokens.get(i + 2).map(|t| &t.kind), Some(TokenKind::Ident))
                         && !dotted_at(tokens, 0, i + 2)
-                        && let Err(e) = self.check_mutation(tokens, i + 2, frames, true)
                     {
-                        break Err(e);
+                        self.check_mutation(tokens, i + 2, frames, true);
                     }
                 }
                 TokenKind::Ident => {
-                    match self.visit_ident(tokens, i, frames) {
-                        Ok(next) => {
-                            i = next;
-                            continue;
-                        }
-                        Err(e) => break Err(e),
-                    };
+                    i = self.visit_ident(tokens, i, frames);
+                    continue;
                 }
                 _ => {}
             }
             i += 1;
-        };
+        }
         frames.truncate(base);
-        result
     }
 
     /// Handles one identifier token: declarations register bindings, uses
     /// are checked for mutation and for call-site capability. Returns the
     /// index to continue from.
-    fn visit_ident(
-        &self,
-        tokens: &'a [Token],
-        i: usize,
-        frames: &mut Vec<Frame<'a>>,
-    ) -> Result<usize, RlError> {
+    fn visit_ident(&self, tokens: &'a [Token], i: usize, frames: &mut Vec<Frame<'a>>) -> usize {
         let word = self.text(&tokens[i]);
         if dotted_at(tokens, 0, i) {
-            return Ok(i + 1);
+            return i + 1;
         }
 
         if word == "val"
@@ -1049,11 +1030,11 @@ impl<'a> Checker<'a> {
         {
             return match kind {
                 // the parameter's scope is registered at its `(`
-                ValModifier::Parameter => Ok(i + 1),
+                ValModifier::Parameter => i + 1,
                 ValModifier::Declaration => {
                     let names = collect_decl_names(self.src, tokens, i + 2);
                     self.declare(frames, names, Some(tokens[i].span.start));
-                    Ok(i + 2)
+                    i + 2
                 }
             };
         }
@@ -1062,7 +1043,7 @@ impl<'a> Checker<'a> {
             "const" | "let" | "var" => {
                 let names = collect_decl_names(self.src, tokens, i + 1);
                 self.declare(frames, names, None);
-                return Ok(i + 1);
+                return i + 1;
             }
             "function" | "class" => {
                 if let Some(t) = tokens.get(i + 1)
@@ -1070,7 +1051,7 @@ impl<'a> Checker<'a> {
                 {
                     self.declare(frames, vec![self.text(t)], None);
                 }
-                return Ok(i + 1);
+                return i + 1;
             }
             // a `for` head's bindings belong to the loop, not to the
             // enclosing block
@@ -1083,20 +1064,20 @@ impl<'a> Checker<'a> {
                         vars: Vec::new(),
                     });
                 }
-                return Ok(i + 1);
+                return i + 1;
             }
             "delete" => {
                 if matches!(tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Ident))
                     && !dotted_at(tokens, 0, i + 1)
                 {
-                    self.check_mutation(tokens, i + 1, frames, true)?;
+                    self.check_mutation(tokens, i + 1, frames, true);
                 }
-                return Ok(i + 1);
+                return i + 1;
             }
             _ => {}
         }
 
-        self.check_mutation(tokens, i, frames, false)?;
+        self.check_mutation(tokens, i, frames, false);
         if punct_at(tokens, i + 1, b'(') {
             match self.sink {
                 // Which declaration a call names is the checker's question:
@@ -1110,12 +1091,12 @@ impl<'a> Checker<'a> {
                 }
                 _ => {
                     if let Some(Some(params)) = self.signatures.get(word) {
-                        self.check_call(tokens, i + 1, word, params, frames)?;
+                        self.check_call(tokens, i + 1, word, params, frames);
                     }
                 }
             }
         }
-        Ok(i + 1)
+        i + 1
     }
 
     /// Registers bindings in the innermost scope.
@@ -1250,42 +1231,39 @@ impl<'a> Checker<'a> {
     /// `mutates` is set by callers that already know the path is being
     /// mutated by an operator *in front* of it (`delete x.p`, `++x.p`);
     /// otherwise the operator after the path decides.
-    fn check_mutation(
-        &self,
-        tokens: &[Token],
-        root: usize,
-        frames: &[Frame<'a>],
-        mutates: bool,
-    ) -> Result<(), RlError> {
+    fn check_mutation(&self, tokens: &[Token], root: usize, frames: &[Frame<'a>], mutates: bool) {
         let name = self.text(&tokens[root]);
         // In probe mode the root is *not* resolved here: which binding it
         // names is the checker's answer, from the symbol at this identifier.
         if !matches!(self.sink, Sink::Probes(_)) && self.lookup(frames, name).is_none() {
-            return Ok(());
+            return;
         }
         let path = parse_path(self.src, tokens, root);
         if path.steps == 0 {
             // replacing the binding's value is `const`'s business
-            return Ok(());
+            return;
         }
         let offset = tokens[root].span.start;
         if mutates || assignment_op_at(tokens, path.end).is_some() || incdec_at(tokens, path.end) {
-            if let Sink::Probes(sink) = self.sink {
-                sink.borrow_mut().mutations.push(Mutation {
+            match self.sink {
+                Sink::Probes(sink) => sink.borrow_mut().mutations.push(Mutation {
                     root: offset,
                     name: name.to_string(),
                     method: None,
-                });
-                return Ok(());
-            }
-            return Err(RlError::span(
-                offset,
-                offset + name.len(),
-                format!(
-                    "cannot mutate through val binding `{name}` \
-                     (the binding is declared with `val`, so every access path from it is read-only)"
+                }),
+                Sink::Report(sink) => sink.borrow_mut().push(
+                    RlError::span(
+                        offset,
+                        offset + name.len(),
+                        format!(
+                            "cannot mutate through val binding `{name}` \
+                             (the binding is declared with `val`, so every access path from it is read-only)"
+                        ),
+                    )
+                    .code(crate::DiagnosticCode::ValMutation),
                 ),
-            ));
+            }
+            return;
         }
         // A method call is a *question*: `q.set(k)` mutates only if `q` is
         // a built-in with a mutating `set`, which needs the receiver's
@@ -1303,10 +1281,9 @@ impl<'a> Checker<'a> {
                     name: name.to_string(),
                     method: Some((method.to_string(), tokens[tok].span.start)),
                 }),
-                Sink::Report => {}
+                Sink::Report(_) => {}
             }
         }
-        Ok(())
     }
 
     /// Checks the arguments of a call to a function declared in this file:
@@ -1320,10 +1297,10 @@ impl<'a> Checker<'a> {
         callee: &str,
         params: &[ParamSig],
         frames: &[Frame<'a>],
-    ) -> Result<(), RlError> {
-        if !matches!(self.sink, Sink::Report) {
-            return Ok(()); // probes go through `probe_call`; Calls asks nothing
-        }
+    ) {
+        let Sink::Report(report) = self.sink else {
+            return; // probes go through `probe_call`; Calls asks nothing
+        };
         for (idx, (start, end)) in list_entries(tokens, open).into_iter().enumerate() {
             if !matches!(tokens[start].kind, TokenKind::Ident) || dotted_at(tokens, 0, start) {
                 continue;
@@ -1347,17 +1324,19 @@ impl<'a> Checker<'a> {
                 Some(n) => format!("`{n}`"),
                 None => format!("#{}", idx + 1),
             };
-            return Err(RlError::span(
-                tokens[start].span.start,
-                tokens[start].span.end,
-                format!(
-                    "cannot pass val binding `{name}` to mutable parameter {described} of \
-                     `{callee}` (the parameter is not declared with `val`, so the function \
-                     may mutate through it)"
-                ),
-            ));
+            report.borrow_mut().push(
+                RlError::span(
+                    tokens[start].span.start,
+                    tokens[start].span.end,
+                    format!(
+                        "cannot pass val binding `{name}` to mutable parameter {described} of \
+                         `{callee}` (the parameter is not declared with `val`, so the function \
+                         may mutate through it)"
+                    ),
+                )
+                .code(crate::DiagnosticCode::ValPass),
+            );
         }
-        Ok(())
     }
 
     /// Collects the plain-path arguments of a call to a name the file

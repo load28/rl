@@ -2,7 +2,7 @@
 //! binding):
 //!
 //! ```text
-//! const|let|var Tag(bindings...) = <expr> else { ... };
+//! const|let|var Tag(bindings...) (| Tag[(bindings...)])* = <expr> else { ... };
 //! ```
 //!
 //! Contract safety: in valid TypeScript a `const`/`let`/`var` keyword is
@@ -14,8 +14,10 @@
 //! followed by `(`, not an identifier, so it never gets here. Anything
 //! that deviates passes through verbatim, as always.
 //!
-//! The "else block must diverge" rule is *computed* here (a bool on the AST
-//! node) but *enforced* by [`crate::sema`] — the parser stays infallible.
+//! The "else block must diverge" rule is *computed* by the flow layer
+//! ([`crate::flow::block_diverges`] — a real CFG answer, `if`/`else` and
+//! unreachable code included) as a bool on the AST node, and *enforced* by
+//! [`crate::sema`] — the parser stays infallible.
 
 use super::cursor::{Cursor, dotted_at, skip_braced_construct};
 use crate::ast::{LetElseStmt, Span};
@@ -29,7 +31,10 @@ pub(super) fn parse_let_else<'t>(
     mut cur: Cursor<'t>,
     kw_span: crate::ast::Span,
 ) -> Option<(Cursor<'t>, usize, LetElseStmt)> {
-    // pattern: `Tag(bindings...)`
+    // pattern: `Tag(bindings...) (| Tag[(bindings...)])*` — the first
+    // alternative's parens claim the construct (a declaration keyword is
+    // never followed by `<ident>(` in valid TypeScript); later ones may be
+    // bare. `||` lexes as one OrOr token, so it never separates.
     let (tag, tag_span) = cur.eat_ident()?;
     if super::is_reserved(tag) {
         return None; // `const enum E { ... }` and friends
@@ -44,6 +49,16 @@ pub(super) fn parse_let_else<'t>(
         false, // let-else bindings stay alias-only (no nested patterns)
     )?;
     cur.idx = close + 1;
+    let mut alternatives = vec![crate::ast::TagPattern {
+        tag: tag.to_string(),
+        tag_off: tag_span.start,
+        end: cur.tokens[close].span.end,
+        bindings: Some(bindings),
+    }];
+    while cur.at_punct(b'|') {
+        cur.bump();
+        alternatives.push(super::matches::parse_alternative(&mut cur, false)?);
+    }
 
     // `=` (but not `==` / `=>`; `=>` lexes as a fused Arrow token)
     let eq = cur.eat_punct(b'=')?;
@@ -87,9 +102,7 @@ pub(super) fn parse_let_else<'t>(
                 end: expr_end,
             },
             kw: cur.parser.src[kw_span.start..kw_span.end].to_string(),
-            tag: tag.to_string(),
-            tag_off: tag_span.start,
-            bindings,
+            alternatives,
             expr: cur
                 .parser
                 .parse_tokens(&cur.tokens[expr_from..else_idx], expr_start, expr_end),
@@ -97,7 +110,10 @@ pub(super) fn parse_let_else<'t>(
                 .parser
                 .parse_tokens(body_tokens, body_range.0, body_range.1),
             else_off,
-            diverges: block_diverges(cur.parser, body_tokens),
+            diverges: crate::flow::block_diverges(cur.parser.src, body_tokens),
+            // Filled by the caller, which knows the statement's token
+            // index in the parse region.
+            in_function: false,
         },
     ))
 }
@@ -164,122 +180,4 @@ fn expr_until_else(cur: &Cursor) -> Option<(usize, usize)> {
         k += 1;
     }
     None
-}
-
-/// Statements whose body is a *block*, so a `{` inside one can close a
-/// statement. Everything else that reaches a top-level `{` — a
-/// declaration's initializer, an assignment, an expression statement —
-/// holds it as an object literal or an arrow body, which closes nothing.
-const BLOCK_STMT_WORDS: &[&str] = &[
-    "if",
-    "else",
-    "for",
-    "while",
-    "do",
-    "try",
-    "catch",
-    "finally",
-    "switch",
-    "function",
-    "class",
-    "async",
-    "declare",
-    "namespace",
-    "module",
-    "interface",
-    "enum",
-    "with",
-];
-
-/// Words a `{` may directly follow while still being an *expression*:
-/// `return { ... }`, `case { ... }`, `await { ... }`. Without this,
-/// `if (c) return { k: 1 };` would read its object literal as the `if`'s
-/// block.
-const EXPR_BRACE_WORDS: &[&str] = &[
-    "return",
-    "throw",
-    "case",
-    "typeof",
-    "instanceof",
-    "in",
-    "of",
-    "new",
-    "delete",
-    "void",
-    "await",
-    "yield",
-];
-
-/// True when the top-level `{` at `k` opens a statement — a bare block or
-/// the body of the statement starting at `last` — rather than an
-/// expression's braces. Only the first kind ends a statement when it
-/// closes: an object literal or an arrow body leaves its statement running
-/// until the `;`.
-fn brace_opens_statement(
-    parser: &super::Parser,
-    tokens: &[crate::lexer::Token],
-    last: usize,
-    k: usize,
-) -> bool {
-    if k == last {
-        return true; // the statement *is* a block
-    }
-    let word = |i: usize| &parser.src[tokens[i].span.start..tokens[i].span.end];
-    if !matches!(tokens[last].kind, TokenKind::Ident) || !BLOCK_STMT_WORDS.contains(&word(last)) {
-        return false;
-    }
-    // Inside such a statement the body brace follows its head: `) {` for
-    // the parenthesized ones, a name or the keyword itself for the rest.
-    match tokens[k - 1].kind {
-        TokenKind::Punct(b')') => true,
-        TokenKind::Ident => !EXPR_BRACE_WORDS.contains(&word(k - 1)),
-        _ => false,
-    }
-}
-
-/// True when the block's last top-level statement starts with `return`,
-/// `throw`, `break`, or `continue` — the syntactic stand-in for Rust's
-/// "the else block must diverge" rule (rlc does no type analysis, so e.g.
-/// an `if`/`else` where both branches return is *not* recognized; end the
-/// block with one of the four keywords instead).
-///
-/// Statements are separated by a top-level `;` or by the `}` of a block
-/// statement. An object literal's `}` separates nothing — see
-/// [`brace_opens_statement`] — which is what keeps `return { ... };`
-/// recognized as a `return`.
-fn block_diverges(parser: &super::Parser, tokens: &[crate::lexer::Token]) -> bool {
-    let mut last = 0usize;
-    let mut depth = 0usize;
-    // Whether the outermost `{` currently open began a statement.
-    let mut in_block_stmt = false;
-    for (k, t) in tokens.iter().enumerate() {
-        match t.kind {
-            TokenKind::Punct(b'{') => {
-                if depth == 0 {
-                    in_block_stmt = brace_opens_statement(parser, tokens, last, k);
-                }
-                depth += 1;
-            }
-            TokenKind::Punct(b'(' | b'[') => depth += 1,
-            TokenKind::Punct(b')' | b']') => depth = depth.saturating_sub(1),
-            TokenKind::Punct(b'}') => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 && in_block_stmt && k + 1 < tokens.len() {
-                    // end of a block statement (if/for/function body, ...)
-                    last = k + 1;
-                }
-            }
-            TokenKind::Punct(b';') if depth == 0 && k + 1 < tokens.len() => {
-                last = k + 1;
-            }
-            _ => {}
-        }
-    }
-    match tokens.get(last) {
-        Some(t) if matches!(t.kind, TokenKind::Ident) => matches!(
-            &parser.src[t.span.start..t.span.end],
-            "return" | "throw" | "break" | "continue"
-        ),
-        _ => false,
-    }
 }

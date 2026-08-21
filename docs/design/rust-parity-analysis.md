@@ -197,7 +197,9 @@ rust-analyzer는 이 자리 전부에서 변형·필드를 완성한다. 이 자
   (`P(j: M(k: B()))`), 튜플 위치 안의 중첩도 같다. 남은 것은 그 자리의 알파벳을
   아무도 댈 수 없을 때뿐이다 — 선언 타입도 패턴도 enum을 지목하지 못하면 그
   자리는 `_`만 커버로 인정한다(typed 경로에서는 TASK-109가 체커에게 묻는다).
-- **let-else·`if let`에 or-패턴이 없다.** rustc에는 있다(언어 표면 격차).
+- ~~**let-else·`if let`에 or-패턴이 없다.**~~ — TASK-133에서 해소. match와
+  같은 대안 문법·바인딩 집합 규칙으로 지원한다(중첩과의 조합 불가 포함).
+  구조 분해는 or-arm처럼 공유·비매핑으로 방출된다.
 - ~~**미청구(missed-claim) 진단이 없다.**~~ — TASK-112에서 해결. `x <- readNum();`처럼
   `const`를 빠뜨린 `result` 바인딩은 rl 구문으로 청구되지 않고 통과한 뒤,
   verify가 `generated TypeScript failed to parse: ... (line 12, col 18 of the

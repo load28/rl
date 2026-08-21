@@ -13,11 +13,14 @@
 //! binding — are rlc compile errors with exact positions; the emitted
 //! output is plain TypeScript.
 //!
-//! The whole public API is [`compile`] plus its [`Options`] (with
-//! [`ImportRewrite`]), error type
-//! [`CompileError`], and the standard library source [`STD_SOURCE`]
-//! (`Option`/`Result` with functional combinators, written out by
-//! `rlc --emit-std`). The `rlc` binary in this crate is a thin CLI over it.
+//! The core public API is [`compile`] plus its [`Options`] (with
+//! [`ImportRewrite`]) and error type [`CompileError`] — code, or the first
+//! error. The multi-diagnostic forms are [`analyze`] (every rl-level
+//! [`Diagnostic`], in source order) and [`compile_report`] (the same, plus
+//! the emission when one is possible); the standard library source is
+//! [`STD_SOURCE`] (`Option`/`Result` with functional combinators, written
+//! out by `rlc --emit-std`). The `rlc` binary in this crate is a thin CLI
+//! over it.
 //!
 //! # Example
 //!
@@ -53,11 +56,15 @@
 mod analysis;
 mod ast;
 mod codegen;
+mod diagnostics;
 pub mod engine;
 mod error;
+pub mod flow;
+pub mod hir;
 mod lexer;
 mod parser;
 mod probe;
+pub mod resolve;
 mod scanner;
 mod sema;
 mod sidecar;
@@ -71,6 +78,7 @@ pub use analysis::{
     NameKind, Origin, PatternAnalyses, PatternBinding, PatternSite, PayloadField, SiteKind,
     UnresolvedName, pattern_analyses,
 };
+pub use diagnostics::{Diagnostic, DiagnosticCode, Severity};
 pub use error::CompileError;
 pub use probe::{
     Literal, LiteralMatch, PayloadProbe, TagMatch, literal_matches, payload_probes, tag_matches,
@@ -679,40 +687,24 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
 ///
 /// Identical to [`compile`].
 pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, CompileError> {
-    let to_compile_error = |e: RlError| {
-        let (line, col) = match e.offset {
-            Some(off) => line_col(source, off),
-            None => (0, 0),
-        };
-        let (end_line, end_col) = match e.end {
-            Some(off) => line_col(source, off),
-            None => (0, 0),
-        };
-        CompileError {
-            message: e.message,
-            filename: options.filename.map(String::from),
-            line,
-            col,
-            end_line,
-            end_col,
-        }
-    };
-
     // The swc-style pipeline: structural parse (infallible; anything that is
     // not fully rl syntax stays a verbatim byte range) → semantic checks
     // (every rl-level error, including exhaustiveness — never delegated to
     // tsc; `val`'s binding analysis reads the token stream the parse
     // already produced) → code emission (infallible).
+    //
+    // The checks accumulate everything ([`analyze`] is the API that returns
+    // it all); this entry point keeps its historical contract — code, or
+    // the first error in source order — and skips emission when the checks
+    // already failed.
     let (program, tokens) = parser::lex_and_parse(source);
-    sema::check(
-        &program,
-        options.verify,
-        options.extern_enums,
-        options.defer_to_checker,
-    )
-    .map_err(to_compile_error)?;
-    if !options.defer_to_checker {
-        val::check(source, &tokens).map_err(to_compile_error)?;
+    if let Some(first) = rl_errors(source, &program, &tokens, options)
+        .into_iter()
+        .next()
+    {
+        return Err(
+            diagnostics::Diagnostic::from_rl(first).to_compile_error(source, options.filename)
+        );
     }
     let flat = codegen::emit_with_map(
         &program,
@@ -729,13 +721,11 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
         // the source — and where the failure fell in a construct's glue,
         // that construct is named. (Without this the error arrives with no
         // position at all and an editor pins it to line 1.)
-        return Err(to_compile_error(verify::at_source(
-            source,
-            &flat.mappings,
-            &flat.anchors,
-            &flat.code,
-            &failure,
-        )));
+        let failure =
+            verify::at_source(source, &flat.mappings, &flat.anchors, &flat.code, &failure);
+        return Err(
+            diagnostics::Diagnostic::from_rl(failure).to_compile_error(source, options.filename)
+        );
     }
     Ok(MappedEmit {
         code: flat.code,
@@ -744,4 +734,130 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
         payload_temps: flat.payload_temps,
         anchors: flat.anchors,
     })
+}
+
+/// Every rl-level violation of `source`, in source order — the semantic
+/// passes over an already-built parse. What [`analyze`] and
+/// [`compile_report`] share.
+fn rl_errors(
+    source: &str,
+    program: &ast::Program,
+    tokens: &[lexer::Token],
+    options: &Options,
+) -> Vec<RlError> {
+    let mut errors = sema::check_all(
+        program,
+        options.verify,
+        options.extern_enums,
+        options.defer_to_checker,
+    );
+    if !options.defer_to_checker {
+        errors.extend(val::check_all(source, tokens));
+    }
+    // One order for every producer: where the reader's eye goes, top to
+    // bottom. Stable, so equal positions keep their category order.
+    errors.sort_by_key(|e| e.offset.unwrap_or(usize::MAX));
+    errors
+}
+
+/// Checks `source` and returns **every** rl-level diagnostic, in source
+/// order — nothing is emitted and nothing stops at the first violation.
+///
+/// This is the multi-diagnostic form of [`compile`]'s error half: the CLI's
+/// `--check`, the `--server`, and the engine all report from it, so one
+/// broken match no longer hides the file's other problems (TASK-117).
+/// Positions are byte offsets ([`Diagnostic::to_compile_error`] converts to
+/// the CLI's line/column form). The output self-check needs an emission and
+/// is [`compile_report`]'s half.
+///
+/// ```
+/// let source = "enum E { A(x: number), B }\n\
+///     const a = match (E.A(1)) { A(x) => x };\n\
+///     const b = match (E.B) { B => 0 };\n";
+/// let diagnostics = rlc::analyze(source, &rlc::Options::default());
+/// assert_eq!(diagnostics.len(), 2);
+/// assert!(diagnostics.iter().all(|d| d.code == rlc::DiagnosticCode::MatchNotExhaustive));
+/// ```
+pub fn analyze(source: &str, options: &Options) -> Vec<Diagnostic> {
+    let (program, tokens) = parser::lex_and_parse(source);
+    rl_errors(source, &program, &tokens, options)
+        .into_iter()
+        .map(diagnostics::Diagnostic::from_rl)
+        .collect()
+}
+
+/// A full compilation's answer: everything found, and the emission when one
+/// was possible.
+///
+/// Unlike [`compile`], recoverable rl errors do not withhold the emission:
+/// codegen is infallible, so a file with a duplicate arm still lowers to
+/// plain TypeScript — which is what lets a typed pass run and report its
+/// diagnostics *alongside* the rl ones instead of losing them
+/// ([`DiagnosticCode::blocks_projection`], TASK-117 symptom 3). `emit` is
+/// `None` only when a diagnostic blocks projection: text the parser could
+/// not claim, a bad field type, or a failed output self-check.
+#[derive(Debug, Clone)]
+pub struct CompileReport {
+    /// The emitted TypeScript with its mappings, unless a diagnostic made
+    /// emission impossible.
+    pub emit: Option<MappedEmit>,
+    /// Every rl-level diagnostic, in source order.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Compiles `source` and reports everything — the multi-diagnostic,
+/// still-emitting form of [`compile_mapped`]. See [`CompileReport`].
+pub fn compile_report(source: &str, options: &Options) -> CompileReport {
+    let (program, tokens) = parser::lex_and_parse(source);
+    let mut errors = rl_errors(source, &program, &tokens, options);
+    if errors.iter().any(|e| e.code.blocks_projection()) {
+        return CompileReport {
+            emit: None,
+            diagnostics: errors
+                .into_iter()
+                .map(diagnostics::Diagnostic::from_rl)
+                .collect(),
+        };
+    }
+    let flat = codegen::emit_with_map(
+        &program,
+        source,
+        options.rewrite_imports,
+        options.std_import,
+    );
+    let mut emit = Some(MappedEmit {
+        code: flat.code,
+        mappings: flat.mappings,
+        scrutinee_temps: flat.scrutinee_temps,
+        payload_temps: flat.payload_temps,
+        anchors: flat.anchors,
+    });
+    if options.verify
+        && let Some(flat) = &emit
+        && let Err(failure) = verify::verify_output(&flat.code)
+    {
+        // A failed self-check *with rl errors already reported* is the
+        // effect, not a second cause — the emitted text reflects the
+        // invalid construct those errors name (e.g. a module-level `try`'s
+        // `return`), and the backstop's "or an rlc bug" wording would
+        // mislead. Report the causes and withhold the emit; the check
+        // reappears on its own once they are fixed.
+        if errors.is_empty() {
+            errors.push(verify::at_source(
+                source,
+                &flat.mappings,
+                &flat.anchors,
+                &flat.code,
+                &failure,
+            ));
+        }
+        emit = None;
+    }
+    CompileReport {
+        emit,
+        diagnostics: errors
+            .into_iter()
+            .map(diagnostics::Diagnostic::from_rl)
+            .collect(),
+    }
 }

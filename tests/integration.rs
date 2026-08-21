@@ -540,6 +540,106 @@ console.log(JSON.stringify(checked("4")));
 }
 
 #[test]
+fn runtime_or_patterns_in_let_else_and_if_let() {
+    require_toolchain!();
+    // tsc --strict must accept both shapes: the let-else guard narrows the
+    // temporary to the alternatives' union for the shared destructuring,
+    // and the if-let disjunction narrows inside the then-block.
+    let lines = run(r#"
+enum Shape { Circle(r: number), Square(r: number), Dot }
+
+function side(s: Shape): number {
+  const Circle(r) | Square(r) = s else { return 0; };
+  return r;
+}
+
+function tell(s: Shape): string {
+  if let Circle(r) | Square(r) = s {
+    return "sized " + r;
+  } else {
+    return "dot";
+  }
+}
+
+console.log(side(Shape.Circle(3)));
+console.log(side(Shape.Square(4)));
+console.log(side(Shape.Dot));
+console.log(tell(Shape.Square(5)));
+console.log(tell(Shape.Dot));
+"#);
+    assert_eq!(lines, vec!["3", "4", "0", "sized 5", "dot"]);
+}
+
+#[test]
+fn runtime_try_inside_an_if_let_body_propagates_from_the_function() {
+    require_toolchain!();
+    // The if-let body is inline in the enclosing function, so the `try`
+    // propagates from `f` — not from any construct in between.
+    let lines = run_with_std(
+        r#"
+import { Option, Result } from "./rl.js";
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
+}
+
+function f(o: Option<string>): Result<number, string> {
+  if let Some(value) = o {
+    const n = try parseNum(value);
+    return Result.Ok(n * 10);
+  }
+  return Result.Ok(-1);
+}
+
+console.log(JSON.stringify(f(Option.Some("7"))));
+console.log(JSON.stringify(f(Option.Some("x"))));
+console.log(JSON.stringify(f(Option.None)));
+"#,
+    );
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Ok","value":70}"#,
+            r#"{"kind":"Err","error":"not a number: x"}"#,
+            r#"{"kind":"Ok","value":-1}"#,
+        ]
+    );
+}
+
+#[test]
+fn runtime_try_inside_a_closure_propagates_from_the_closure() {
+    require_toolchain!();
+    // Rust's `?` inside a closure: the `try` inside the arrow written in a
+    // match scrutinee returns from the *arrow*, and the match sees the
+    // Result it produced.
+    let lines = run_with_std(
+        r#"
+import { Result } from "./rl.js";
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
+}
+
+function describe(raw: string): string {
+  return match (((): Result<number, string> => {
+    const n = try parseNum(raw);
+    return Result.Ok(n * 2);
+  })()) {
+    Ok(value) => "doubled: " + value,
+    Err(error) => "failed: " + error,
+  };
+}
+
+console.log(describe("21"));
+console.log(describe("x"));
+"#,
+    );
+    assert_eq!(lines, vec!["doubled: 42", "failed: not a number: x"]);
+}
+
+#[test]
 fn runtime_let_else_narrows_and_diverges() {
     require_toolchain!();
     // tsc --strict must accept the emitted destructuring: the diverging

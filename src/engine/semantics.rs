@@ -41,17 +41,30 @@ pub struct Diagnostic {
     pub end: Option<(usize, usize)>,
     /// The full message, as it is shown.
     pub message: String,
+    /// The diagnostic's stable identity: an rl rule's code
+    /// ([`crate::DiagnosticCode::as_str`], e.g. `match-not-exhaustive`) or
+    /// a TypeScript code (`ts2322`). `None` only where no rule is known.
+    /// The same rule carries the same code on every path — CLI, server,
+    /// editor, typed or untyped.
+    pub code: Option<String>,
 }
 
 /// What one checked snapshot came back with.
 #[derive(Debug, Default)]
 pub struct Checked {
-    /// Every diagnostic of the pass, in report order: the type layer first
-    /// (unless the request was rl-only), then literal exhaustiveness, tag
+    /// Every diagnostic of the pass, in report order: the rl layer first
+    /// (each file's own recoverable diagnostics), then the type layer
+    /// (unless the request was rl-only), literal exhaustiveness, tag
     /// exhaustiveness, `val` mutations, and `val` passes.
     pub diagnostics: Vec<Diagnostic>,
     /// The declarations the compiler emitted, when they were requested.
     pub declarations: Declarations,
+    /// Why the TypeScript layer could not answer, when it could not — the
+    /// backend failed to run (no toolchain, a dead process). The rl-level
+    /// diagnostics above are still complete: a missing type checker
+    /// removes the *typed* facts, not rl's own answers
+    /// (`docs/design/compiler-core.md` §7).
+    pub backend_error: Option<String>,
 }
 
 /// The declarations of one emitting pass, matched back to their sources.
@@ -78,6 +91,23 @@ pub struct ModuleDeclaration {
 /// keyword is, and each scrutinee position's constituents in position
 /// order (a single match has one).
 type MatchAlphabets = (usize, Vec<Vec<String>>);
+
+/// One file's semantic analysis, computed once and cached across
+/// snapshots by [`super::Project`] — the report consumes this instead of
+/// re-parsing the file (and everything it imports) on every pass.
+///
+/// The cache key is the pair (file content, imported declarations): a
+/// change to a dependency's *body* leaves this valid, a change to its
+/// exported declarations invalidates it — exactly the invalidation
+/// boundary the query plan names (`docs/design/compiler-core.md` §11).
+#[derive(Debug)]
+pub(crate) struct FileSemantics {
+    /// The imported declarations in this file's scope (aliases applied) —
+    /// half of the cache key, and `checked_coverage`'s input.
+    pub externs: Vec<crate::EnumSymbol>,
+    /// The file's pattern analyses over those externs.
+    pub analyses: crate::PatternAnalyses,
+}
 
 /// Turns a TypeScript diagnostic that landed on rlc's own glue into an rl
 /// one — said in rl's words, about rl's construct.
@@ -420,13 +450,27 @@ pub(crate) fn report(
     answers: &Answers,
     probes: &Probes,
     rl_only: bool,
+    semantics: &HashMap<PathBuf, Arc<FileSemantics>>,
 ) -> Vec<Diagnostic> {
     let files = snapshot.files();
     let mut out = Vec::new();
-    // A file's declaration table, built the first time a translation on
-    // that file asks for it: it costs a parse of the file and of what it
-    // imports, and most passes translate nothing at all.
-    let mut declarations: HashMap<PathBuf, Vec<DeclaredEnum>> = HashMap::new();
+
+    // The rl layer first: the diagnostics each file's projection found on
+    // its own (duplicate arms, unknown cases, misplaced constructs). They
+    // are rl's answers about rl's constructs, so they are reported on the
+    // rl-only path too — and they no longer gate the rest of this report
+    // (TASK-117 symptom 3): the typed answers below follow either way.
+    for file in files {
+        for d in &file.rl_diagnostics {
+            out.push(Diagnostic {
+                path: file.source_path.clone(),
+                position: d.start.map(|at| crate::line_col(&file.source, at)),
+                end: d.end.map(|at| crate::line_col(&file.source, at)),
+                message: d.message.clone(),
+                code: Some(d.code.as_str().to_string()),
+            });
+        }
+    }
 
     // TypeScript's own diagnostics, at the position in the `.rl` file the
     // offending code was written at.
@@ -440,6 +484,7 @@ pub(crate) fn report(
                 position: None,
                 end: None,
                 message: format!("ts({}): {}", diagnostic.code, diagnostic.message),
+                code: Some(format!("ts{}", diagnostic.code)),
             });
             continue;
         };
@@ -448,11 +493,10 @@ pub(crate) fn report(
         // declaration table its wording names types from is built only for
         // a file that has a diagnostic on glue at all, and once for it.
         if projection::glue_anchor(file, diagnostic.start).is_some() {
-            let declared = declarations
-                .entry(file.source_path.clone())
-                .or_insert_with(|| {
-                    crate::pattern_analyses(&file.source, &externs_of(files, file)).declarations
-                });
+            let declared: &[DeclaredEnum] = semantics
+                .get(&file.source_path)
+                .map(|s| s.analyses.declarations.as_slice())
+                .unwrap_or_default();
             if let Some((anchor, said)) = projection::translate_on_glue(file, diagnostic, declared)
             {
                 let entry = Diagnostic {
@@ -460,6 +504,7 @@ pub(crate) fn report(
                     position: Some(crate::line_col(&file.source, anchor.src)),
                     end: Some(crate::line_col(&file.source, anchor.src_end)),
                     message: said,
+                    code: Some(format!("ts{}", diagnostic.code)),
                 };
                 // One construct's glue can draw several TypeScript errors
                 // that all mean the same rl thing (`$rl_t.kind` and
@@ -505,6 +550,7 @@ pub(crate) fn report(
                             " (in code rlc generated for this construct)"
                         },
                     ),
+                    code: Some(format!("ts{}", diagnostic.code)),
                 });
             }
             None => out.push(Diagnostic {
@@ -512,6 +558,7 @@ pub(crate) fn report(
                 position: None,
                 end: None,
                 message: format!("ts({}): {}", diagnostic.code, diagnostic.message),
+                code: Some(format!("ts{}", diagnostic.code)),
             }),
         }
     }
@@ -529,15 +576,19 @@ pub(crate) fn report(
             path: file.source_path.clone(),
             position: Some(crate::line_col(&file.source, anchor.offset)),
             end: Some(crate::line_col(&file.source, anchor.end)),
-            message: format!(
-                "match on literal union is not exhaustive: missing {} \
-                 (add the missing arms or a final `_` arm)",
-                missing
+            message: crate::diagnostics::non_exhaustive_message(
+                Some("literal union"),
+                &missing
                     .missing
                     .iter()
                     .map(display_literal)
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                    .collect::<Vec<_>>(),
+                false,
+            ),
+            code: Some(
+                crate::DiagnosticCode::MatchNotExhaustive
+                    .as_str()
+                    .to_string(),
             ),
         });
     }
@@ -593,13 +644,16 @@ pub(crate) fn report(
         // The nested columns are resolved from declarations, so the
         // imported ones have to be collected — otherwise a payload whose
         // type is an imported enum reads as an unknown alphabet and its
-        // holes go unreported.
-        let externs = externs_of(files, file);
+        // holes go unreported. The cached semantics carry them.
+        let externs: &[crate::EnumSymbol] = semantics
+            .get(&file.source_path)
+            .map(|s| s.externs.as_slice())
+            .unwrap_or_default();
         let asked_payloads = payloads
             .get(&file.source_path)
             .map_or(&[][..], Vec::as_slice);
         for (offset, coverage) in
-            crate::analysis::checked_coverage(&file.source, &externs, asked, asked_payloads)
+            crate::analysis::checked_coverage(&file.source, externs, asked, asked_payloads)
         {
             // A single match's witness is one pattern, quoted the way the
             // default path quotes one; a tuple match's is a combination of
@@ -620,32 +674,21 @@ pub(crate) fn report(
             if uncovered.is_empty() {
                 continue;
             }
-            // A product of positions gets long fast; the default path
-            // truncates it the same way, with the same wording.
+            // The typed pass knows the alphabet but not the declaration,
+            // so the shared renderer gets no subject — one renderer, one
+            // wording, on both pipelines (TASK-120).
             let tuple = coverage.positions.len() > 1;
-            let shown = if uncovered.len() > 4 {
-                let unit = if tuple {
-                    "combinations in total"
-                } else {
-                    "in total"
-                };
-                format!(
-                    "{}, … ({} {unit})",
-                    uncovered[..3].join(", "),
-                    uncovered.len()
-                )
-            } else {
-                uncovered.join(", ")
-            };
             out.push(Diagnostic {
                 path: file.source_path.clone(),
                 position: Some(crate::line_col(&file.source, offset)),
                 end: match_ends
                     .get(&(file.source_path.clone(), offset))
                     .map(|at| crate::line_col(&file.source, *at)),
-                message: format!(
-                    "match is not exhaustive: missing {shown} \
-                     (add the missing arms or a final `_` arm)"
+                message: crate::diagnostics::non_exhaustive_message(None, &uncovered, tuple),
+                code: Some(
+                    crate::DiagnosticCode::MatchNotExhaustive
+                        .as_str()
+                        .to_string(),
                 ),
             });
         }
@@ -715,6 +758,7 @@ pub(crate) fn report(
             position: Some(crate::line_col(&file.source, mutation.anchor.offset)),
             end: Some(crate::line_col(&file.source, mutation.anchor.end)),
             message,
+            code: Some(crate::DiagnosticCode::ValMutation.as_str().to_string()),
         });
     }
 
@@ -786,6 +830,7 @@ pub(crate) fn report(
                  through it)",
                 pass.name, described, pass.callee,
             ),
+            code: Some(crate::DiagnosticCode::ValPass.as_str().to_string()),
         });
     }
 
@@ -832,16 +877,34 @@ pub(crate) fn match_declarations(
 /// preferring the snapshot's own text for a file it holds — the same
 /// 1-hop collection every other surface does, so an imported enum is known
 /// under the name the import gave it.
-fn externs_of(
+/// The imported declarations in `file`'s scope, read from the snapshot's
+/// cached per-file symbols where the import target is in the snapshot —
+/// a target that did not change is never re-parsed — and from disk
+/// otherwise.
+pub(crate) fn externs_of(
     files: &[Arc<ProjectedDocument>],
     file: &ProjectedDocument,
 ) -> Vec<crate::EnumSymbol> {
-    super::language::externs_of(&file.source_path, &file.source, &|target| {
+    super::language::externs_from(&file.source_path, file.rl_imports(), &|target| {
         files
             .iter()
             .find(|f| f.source_path == target)
-            .map(|f| f.source.clone())
-            .or_else(|| std::fs::read_to_string(target).ok())
+            .map(|f| {
+                f.enum_symbols()
+                    .iter()
+                    .filter(|d| d.exported)
+                    .cloned()
+                    .collect()
+            })
+            .or_else(|| {
+                let text = std::fs::read_to_string(target).ok()?;
+                Some(
+                    crate::enum_symbols(&text)
+                        .into_iter()
+                        .filter(|d| d.exported)
+                        .collect(),
+                )
+            })
     })
 }
 

@@ -124,7 +124,7 @@ pub(super) fn binding_list<'a, 'b>(
 /// several patterns at once and belong to none of them. Claiming one would
 /// point the editor at an arbitrary alternative and let a rename rewrite
 /// that one alone.
-fn binding_list_lit(bindings: &[Binding]) -> String {
+pub(super) fn binding_list_lit(bindings: &[Binding]) -> String {
     bindings
         .iter()
         .map(|b| match &b.alias {
@@ -210,6 +210,30 @@ pub(super) fn pattern_conds_binds<'a>(
             }
             None => cond.push_lit(text),
         }
+    }
+    (cond, binds)
+}
+
+/// The condition and shared destructuring of a multi-alternative pattern
+/// (an `if let` or-pattern): a disjunction of `kind` tests, and the first
+/// alternative's bindings written unmapped ([`binding_list_lit`]) — the
+/// one destructuring stands for every alternative at once, so it maps to
+/// none of them, the same rule as a match or-arm's.
+pub(super) fn or_conds_binds<'a>(alts: &[TagPattern], root: &str) -> (Rope<'a>, Rope<'a>) {
+    let mut cond = Rope::new();
+    cond.push_lit(
+        alts.iter()
+            .map(|alt| format!("{root}.kind === \"{}\"", alt.tag))
+            .collect::<Vec<_>>()
+            .join(" || "),
+    );
+    let mut binds = Rope::new();
+    let bindings = alts[0].bindings.as_deref().unwrap_or_default();
+    if !bindings.is_empty() {
+        binds.push_lit(format!(
+            "const {{ {} }} = {root}; ",
+            binding_list_lit(bindings)
+        ));
     }
     (cond, binds)
 }

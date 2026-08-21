@@ -7,6 +7,18 @@
 //! A query is a **batch**. One round trip carries every question about a
 //! project, because the transport is a real IPC channel and asking a hundred
 //! questions one at a time costs a hundred round trips.
+//!
+//! In the compiler core's vocabulary (`docs/design/compiler-core.md` §7)
+//! [`Query`] **is** the type-request set and [`Answers`] **is** the typed
+//! facts: the snapshot's questions are collected first (the engine's
+//! `projection::assemble`), sent as one batch, and the answers are rl-owned
+//! — constructor domains as tag lists ([`TagMembers`]), symbol identity as
+//! a snapshot-wide id ([`Resolution`]), mutation verdicts as the `builtin`
+//! flag the `val` report interprets. There is deliberately no per-expression
+//! oracle: a chatty ask-per-node interface would put a round trip inside
+//! every analysis loop. A backend that cannot run degrades every typed fact
+//! to unknown ([`Answers::default`]) — it never takes the rl layer down
+//! with it (`engine::Project::check`).
 
 use std::path::PathBuf;
 

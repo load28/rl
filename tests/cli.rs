@@ -745,3 +745,36 @@ fn the_server_resolves_rl_names_without_a_toolchain() {
     // ...and points at the declaration on line 0.
     assert_eq!(answer["result"]["definition"]["range"]["start"]["line"], 0);
 }
+
+/* ------------------------------------------------------------------ */
+/* typed check without a backend (TASK-124)                            */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn a_missing_backend_still_reports_rl_diagnostics() {
+    // The TypeScript layer failing to run removes the typed facts, not
+    // the pass: rl's own diagnostics are still reported in full, the
+    // failure is named, and the exit code stays "could not check" (2).
+    let dir = tmpdir();
+    fs::write(
+        dir.join("a.rl"),
+        "enum E { A(x: number), B }\n\
+         const v = match (E.A(1)) { A(x) => x, A(x) => 0, B => 1 };\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .args(["--check-types", dir.to_str().unwrap()])
+        // Point the toolchain at nothing: the backend cannot run.
+        .env("RLC_TSGO_API", dir.join("nonexistent-api.js"))
+        .env_remove("RLC_TSGO_ROOT")
+        .output()
+        .expect("failed to run rlc");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("duplicate arm"), "{stderr}");
+    assert!(
+        stderr.contains("only rl-level diagnostics are shown"),
+        "{stderr}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}

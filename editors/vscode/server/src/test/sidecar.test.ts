@@ -169,10 +169,13 @@ test("a file that no longer compiles keeps its last good sidecar", { skip }, asy
   await refreshSidecar(COMPILER, rl, "always");
   const before = fs.readFileSync(`${rl}.d.ts`, "utf8");
 
-  // A duplicate case is an rl-level error: there is nothing to lower, so
-  // there are no declarations to emit, and the editor should keep showing
-  // the last good ones rather than lose them mid-edit.
-  fs.writeFileSync(rl, SOURCE.replace("  Warn(text: string),", "  Warn(text: string),\n  Info(text: string),"));
+  // Recoverable rl errors (a duplicate case, a missing arm) still lower
+  // and still refresh (TASK-120); what blocks a refresh is a file that
+  // cannot become TypeScript at all — a stray `|>` passes through
+  // verbatim, so there is nothing to emit declarations from, and the
+  // editor should keep showing the last good ones rather than lose them
+  // mid-edit.
+  fs.writeFileSync(rl, `${SOURCE}const broken = 1 |> ;\n`);
   const result = await refreshSidecar(COMPILER, rl, "refresh");
 
   assert.equal(result.kind, "failed", JSON.stringify(result));

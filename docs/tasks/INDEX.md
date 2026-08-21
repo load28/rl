@@ -124,9 +124,26 @@
 | TASK-114 | GAP-6 기록 정정 — 중첩 내부 소진성 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-114](./TASK-114-parity-gap6-correction.md) |
 | TASK-115 | CI 복구 — 새 clippy 린트와 테스트 개수 guard | 완료 | 2026-08-21 | 2026-08-21 | [TASK-115](./TASK-115-ci-green.md) |
 | TASK-116 | 진단을 정확한 구문 범위로 — 스팬 있는 에러 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-116](./TASK-116-diagnostic-spans.md) |
-| TASK-117 | 한 파일의 rl 에러를 여러 개 보고한다 (문제 기록) | 대기 | — | — | [TASK-117](./TASK-117-multiple-rl-diagnostics.md) |
+| TASK-117 | 한 파일의 rl 에러를 여러 개 보고한다 (문제 기록) | 완료 | — | 2026-08-21 | [TASK-117](./TASK-117-multiple-rl-diagnostics.md) |
 | TASK-118 | 타입 에러 문안에서 구조적 타입을 선언 이름으로 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-118](./TASK-118-named-error-types-in-messages.md) |
+| TASK-119 | 컴파일러 중심부 전환 설계 (umbrella) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-119](./TASK-119-compiler-core-design.md) |
+| TASK-120 | 구조화 다중 진단 — Phase 0 (TASK-117 흡수) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-120](./TASK-120-structured-diagnostics.md) |
+| TASK-121 | HIR 기반 — Phase 1 (ID 체계, arena, lowering, source map) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-121](./TASK-121-hir-foundation.md) |
+| TASK-122 | 선언 수집과 이름 해석 — Phase 2 (resolve) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-122](./TASK-122-name-resolution.md) |
+| TASK-123 | 이름 해석의 단일화 — analysis가 resolver를 소비 (Phase 3 1/2) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-123](./TASK-123-resolver-owns-names.md) |
+| TASK-124 | typed facts의 경계 확정 — 백엔드 실패 강등 (Phase 4) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-124](./TASK-124-typed-facts-degradation.md) |
+| TASK-125 | flow IR — let-else 발산을 제어 흐름으로 (Phase 5 1/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-125](./TASK-125-flow-ir.md) |
+| TASK-126 | cross-snapshot semantic cache와 의존성 무효화 (Phase 6 1/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-126](./TASK-126-semantic-cache.md) |
+| TASK-127 | 서버 declarations 표면 — 에디터 shadow 대체 재료 (D6 1/2) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-127](./TASK-127-declarations-surface.md) |
+| TASK-128 | 에디터가 declarations를 소비, shadow 삭제 (D6 2/2) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-128](./TASK-128-editor-consumes-declarations.md) |
+| TASK-129 | Table 구축을 resolver 위로 (Phase 3 2/2, D5 종결) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-129](./TASK-129-table-from-resolver.md) |
+| TASK-130 | 에디터 semantic API가 semantic cache를 소비 (Phase 6 2/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-130](./TASK-130-editor-consumes-semantic-cache.md) |
+| TASK-131 | try·let-else 배치를 flow 사실로 (Phase 5 2/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-131](./TASK-131-try-placement-on-flow.md) |
+| TASK-132 | result 바인딩의 early-return 범위 확정 (Phase 5 3/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-132](./TASK-132-result-binding-scope.md) |
+| TASK-133 | let-else·`if let`의 or-패턴 (GAP-6 마지막 항목) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-133](./TASK-133-or-patterns-in-let-else-if-let.md) |
+| TASK-134 | `if let` 배치도 flow 사실로 (TASK-131 잔여) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-134](./TASK-134-if-let-placement-on-flow.md) |
+| TASK-135 | 인라인 문맥의 배치 상속 (Place) + verify 원인-결과 억제 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-135](./TASK-135-inline-context-inheritance.md) |
 
 ## 다음 태스크 번호
 
-**TASK-119**
+**TASK-136**

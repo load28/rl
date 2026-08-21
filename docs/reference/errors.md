@@ -14,6 +14,29 @@ rl 구문으로 완전히 파싱되지 않는 텍스트는 에러가 아니라 �
 에러는 **rl 구문임이 확정된 뒤의 규칙 위반**에만 발생합니다. 통과 영역의 타입
 에러는 tsc의 몫입니다.
 
+## 다중 보고
+
+한 파일의 rl 진단은 **전부, 소스 순서로** 보고됩니다 — tsc·rustc처럼
+한 번의 실행이 파일의 문제를 다 보여 줍니다. 한 구문의 에러는 다음 독립
+구문의 검사를 막지 않습니다. 복구 경계는 구문 단위입니다: 이름이 해석되지
+않은 match는 **자기** 소진성 질문만 침묵하고(원인 위에 결과를 쌓지 않기
+위해), 이웃 match는 제 답을 그대로 냅니다. 태그·리터럴이 섞인 match도
+같은 이유로 자기 소진성만 침묵합니다.
+
+`--check-types`/`--types`/에디터에서도 같습니다: 복구 가능한 rl 에러(중복
+암, 미지의 태그 등)는 그 파일의 타입 진단·`val` 진단과 **함께** 보고됩니다.
+파일 전체가 막히는 것은 산출물이 TypeScript일 수 없는 경우뿐입니다(청구되지
+못한 `|>`·`if let`·`result`, 깨진 필드 타입, 출력 자가 검사 실패).
+
+모든 진단은 안정된 **코드**를 가집니다(예: `match-not-exhaustive`,
+`unknown-case`, `val-mutation`). 코드는 규칙의 식별자이고 모든
+소비자(CLI·`--server`·에디터, 기본·typed 경로)에서 같습니다. `--server`의
+응답에 `code` 필드로 실립니다.
+
+라이브러리의 `compile()`은 계약("코드를 내놓거나 실패하거나")을 유지합니다 —
+소스 순서의 **첫** 에러를 돌려줍니다. 전체 목록은 `analyze()` /
+`compile_report()`가 답합니다.
+
 ## 진단의 범위
 
 CLI는 시작 위치만 찍지만, 진단은 그 안에 **범위**를 함께 담습니다 — 그
@@ -78,9 +101,10 @@ const b = match (s) { Circle(radiuz) => radiuz, Empty => 0 };
 
 - **`match`**: 암들의 태그를 가장 많이 포함하는 유일한 enum. 후보가 없거나
   동점이면 검사하지 않습니다.
-- **let-else·`if let`**: 태그가 하나뿐이라 근거가 얇으므로 **편집 한 번** 거리의
-  케이스를 가진 enum이 유일할 때만 보고합니다. 태그가 정확히 해석되면 그
-  케이스의 필드는 match와 똑같이 검사합니다.
+- **let-else·`if let`**: 태그가 **하나**뿐이면 근거가 얇으므로 편집 한 번
+  거리의 케이스를 가진 enum이 유일할 때만 보고합니다. or-패턴의 여러 태그는
+  match와 같은 근거라 match의 규칙을 그대로 씁니다. 태그가 정확히 해석되면
+  그 케이스의 필드는 match와 똑같이 검사합니다.
 - **중첩 패턴**: 바깥 필드의 **선언된 타입**이 가리키는 enum에 대조합니다.
 
 태그가 해석되지 않아 보고된 match는 **소진성을 함께 보고하지 않습니다** —
@@ -92,8 +116,8 @@ const b = match (s) { Circle(radiuz) => radiuz, Empty => 0 };
 |--------|-------------|
 | ``match: the wildcard arm `_` must be the last arm`` | `_` 뒤의 암은 도달 불가능. `_`를 마지막으로 옮깁니다 |
 | `match: duplicate arm "<태그>"` | **무가드 암이 이미 덮은 태그**가 다시 나옴 — `A \| A`, `A \| B => .., B => ..`, `A => .., A if c => ..`. 가드 암끼리의 반복은 에러가 아닙니다. 위치는 두 번째 태그 |
-| `match: or-pattern alternatives must bind the same names — <detail>` | 대안들이 하나의 구조 분해를 공유하므로 같은 (필드, 이름) 집합을 바인딩해야 합니다. `A(x) \| B(x)`·`A(x, y) \| B(y, x)`는 되고 `A(x) \| B(y)`·`A \| B(x)`는 안 됩니다. `<detail>`은 어긋난 바인딩을 지목합니다 — 한쪽에만 있는 이름은 `` `y` is bound in `B(...)` but not in `A(...)` ``, 같은 이름을 다른 필드에서 가져오면 `` `v` is bound from field `v` in `A(...)` but from field `w` in `B(...)` `` |
-| `match: nested patterns cannot be combined with or-patterns` | 중첩 패턴(`Tag(field: Inner(...))`)은 대안별 경로 조건이 필요해 공유 구조 분해와 양립하지 않습니다. 암을 나눕니다 |
+| `match: or-pattern alternatives must bind the same names — <detail>` (let-else·`if let`에서는 접두사가 `let-else:`/`if let:`) | 대안들이 하나의 구조 분해를 공유하므로 같은 (필드, 이름) 집합을 바인딩해야 합니다. `A(x) \| B(x)`·`A(x, y) \| B(y, x)`는 되고 `A(x) \| B(y)`·`A \| B(x)`는 안 됩니다. `<detail>`은 어긋난 바인딩을 지목합니다 — 한쪽에만 있는 이름은 `` `y` is bound in `B(...)` but not in `A(...)` ``, 같은 이름을 다른 필드에서 가져오면 `` `v` is bound from field `v` in `A(...)` but from field `w` in `B(...)` `` |
+| `match: nested patterns cannot be combined with or-patterns` (`if let`에서는 접두사가 `if let:`) | 중첩 패턴(`Tag(field: Inner(...))`)은 대안별 경로 조건이 필요해 공유 구조 분해와 양립하지 않습니다. 암을 나눕니다 |
 | `` match: binding `<이름>` is used more than once in this pattern (rename one with `field: alias`) `` | 한 패턴(중첩 포함)이 같은 이름을 두 번 바인딩 — 한 스코프에 두 번 선언됩니다. 별칭으로 바꿉니다 |
 
 ### 리터럴 패턴
@@ -124,10 +148,13 @@ rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
 스크루티니 타입이 유한 리터럴 유니언으로 확정될 때만 나옵니다
 ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)).
 
-**enum 소진성 메시지는 모드에 따라 다릅니다.** 기본 경로(`rlc`/`--check`)는
-자기 선언 표에서 답하므로 enum 이름을 댑니다(아래 표). `--check-types`/`--types`는
-match 위치의 *타입*에서 답하므로 이름 없이 `match is not exhaustive: missing ...`
-라고 하고, 대신 앞선 가드가 좁혀 낸 케이스는 요구하지 않습니다.
+**enum 소진성 문안은 두 경로가 한 렌더러를 씁니다.** 형태는 하나 —
+`match[ on <출처>] is not exhaustive: missing ... (add the missing arms or a
+final \`_\` arm)` — 이고 차이는 데이터입니다: 기본 경로(`rlc`/`--check`)는
+자기 선언 표에서 답하므로 enum 이름을 댈 수 있고(아래 표),
+`--check-types`/`--types`는 match 위치의 *타입*에서 답하므로 출처 없이
+`match is not exhaustive: ...`라고 하며, 대신 앞선 가드가 좁혀 낸 케이스는
+요구하지 않습니다. 진단 코드는 양쪽 다 `match-not-exhaustive`입니다.
 
 ### 소진성
 
@@ -161,8 +188,9 @@ rlc: r.rl:3:11: match on built-in enum Result is not exhaustive: missing "Ok(val
 손으로 쓴 유니언이나 해석되지 않는 import의 enum은 이 검사를 받지 않고 런타임
 가드만 남습니다 ([`language.md` §3.6](./language.md#36-소진성-검사)).
 
-튜플 match는 곱집합으로 검사하고 빠진 **조합**을 보고합니다 (5개 이상이면
-앞의 셋과 총 개수만):
+빠진 항목이 5개 이상이면 앞의 셋과 총 개수만 보고합니다 — 단일·튜플·typed
+경로 공통 규칙입니다. 튜플 match는 곱집합으로 검사하고 빠진 **조합**을
+보고합니다:
 
 ```
 rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Manual)
@@ -180,9 +208,10 @@ rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Man
 
 | 메시지 | 원인과 해결 |
 |--------|-------------|
-| `` `try` cannot be used inside a match expression, a `result` block, a template interpolation, or another `try` — ... `` | 그 자리의 `return`은 둘러싼 함수가 아니라 match의 IIFE(또는 `result` 블록)에서 반환됩니다. 로직을 별도 함수로 추출하거나, `result` 블록 안이라면 `<-` 바인딩을 쓰세요 ([§5.4](./language.md#54-사용-위치-제약)). 위치는 `try` |
-| `let-else cannot be used inside a match expression, a `result` block, a template interpolation, or a `try` — ...` | `try`와 같은 위치 제약 ([§6.4](./language.md#64-사용-위치와-발산-제약)). 위치는 선언 키워드 |
-| ``let-else: the `else` block must end with a `return`, `throw`, `break`, or `continue` statement`` | `else`가 발산하지 않으면 뒤의 구조 분해가 케이스 미보장 상태로 실행됩니다. 검사는 구문 수준이라 `if (c) return a; else return b;`로 끝나는 블록도 거부됩니다. 문장 경계는 최상위 `;`와 블록 문의 `}`이고 객체 리터럴·화살표 본문의 `}`는 아니므로 `return { … };`는 발산으로 인정됩니다 ([§6.4](./language.md#64-사용-위치와-발산-제약)). 위치는 `else` |
+| `` `try` cannot be used here — it compiles to a `return`, which would exit this construct's own IIFE ... `` | match(스크루티니·암 본문)·`result` 블록·템플릿 보간 안의 문장 위치: 그 자리의 `return`은 둘러싼 함수가 아니라 구성물의 IIFE에서 반환됩니다. 그 자리에 **함수를 쓰면** 그 안의 `try`는 허용됩니다(Rust의 클로저 안 `?`) — 판정은 제어 흐름 기반입니다. 로직을 함수로 추출하거나, `result` 블록 안이라면 `<-` 바인딩을 쓰세요 ([§5.4](./language.md#54-사용-위치-제약)). 위치는 `try` |
+| `` `try` must be inside a function — it compiles to a `return` that propagates the `Err` ... `` | 모듈 최상위(또는 namespace 본문 등 함수 아닌 스코프)의 `try`: 방출되는 `return`이 나갈 함수가 없습니다. 함수 안으로 옮기세요 ([§5.4](./language.md#54-사용-위치-제약)). 위치는 `try` |
+| `` let-else cannot be used here — its `else` block's exit ... would leave this construct's own IIFE ... `` | `try`와 같은 제어 흐름 판정 — rl 구성물의 문장 영역에 직접 쓴 let-else만 에러이고, 그 자리에 쓴 함수 안에서는 허용됩니다. 모듈 최상위는 허용 ([§6.4](./language.md#64-사용-위치와-발산-제약)). 위치는 선언 키워드 |
+| ``let-else: every path through the `else` block must diverge — ...`` | `else`가 발산하지 않으면 뒤의 구조 분해가 케이스 미보장 상태로 실행됩니다. 판정은 제어 흐름 기반입니다: 네 발산 키워드 외에 모든 분기가 발산하는 `if`/`else`(체인 포함)와 발산하는 중첩 블록, 발산 뒤의 도달 불가 코드도 인정되고, 루프·`switch`·`try`는 보수적으로 비발산입니다. 객체 리터럴·화살표 본문의 `}`는 문장을 끝내지 않으므로 `return { … };`는 하나의 `return`입니다 ([§6.4](./language.md#64-사용-위치와-발산-제약)). 위치는 `else` |
 
 ```rl
 function f(): number {
@@ -200,7 +229,7 @@ TS가 아니어서 아래 출력 검증 에러로 드러납니다.
 | 메시지 | 원인과 해결 |
 |--------|-------------|
 | `` `if let` could not be parsed here (pattern parens are mandatory, and the `else` must be a block or another `if let`) `` | `if let`으로 시작했지만 문으로 완전히 파싱되지 않았습니다. `if` 뒤의 `let`은 유효한 TS에 없어 통과시킬 수 없으므로 위치와 함께 에러입니다. 흔한 원인: 패턴 괄호 누락(`if let Some = ...`), `else if (조건)` 이어 붙이기(else 블록 안으로 옮깁니다), `= 식` 최상위의 괄호 없는 블록 화살표. 위치는 `if` |
-| `` `if let` cannot be used in expression position (...) — it compiles to a block statement `` | 템플릿 보간·스크루티니·가드·표현식 암 본문·`try` 식·파이프라인 안에서는 쓸 수 없습니다. 문장 위치(match 암의 블록 본문 포함)로 옮깁니다 |
+| `` `if let` cannot be used in expression position (...) — it compiles to a block statement ... `` | 템플릿 보간·스크루티니·가드·표현식 암 본문·`try` 식·파이프라인의 **표현식 자리에 직접** 쓸 수 없습니다. 문장 위치(match 암의 블록 본문 포함)로 옮기거나, 그 자리에 쓴 함수의 본문 안에 넣으세요(제어 흐름 판정 — [§6.5](./language.md#65-if-let-문--조건부-값-추출)) |
 | `` match: binding `<이름>` is used more than once in this pattern ... `` | match와 같은 패턴 규칙 — 별칭으로 해소합니다 |
 
 ## 파이프라인
@@ -220,6 +249,7 @@ head/step 내부의 `try` 문은 위의 try 위치 제약 에러로 보고됩니
 |--------|-------------|
 | `` `result` block could not be parsed here (every binding is `const <binding> <- <expression>;`, and the block must end with an expression) `` | Result 바인딩(`const x <- 식;`)이 있는 `result` 블록이 완전하게 파싱되지 않았습니다. 선언 키워드 뒤의 `<-`는 유효한 TS에 없어 통과시킬 수 없으므로 위치와 함께 에러입니다. 흔한 원인: 바인딩의 `;` 누락, 마지막 값 식 없음(또는 값 식에 `;`를 붙임), `<-` 뒤 식 없음, 바인딩 이름 없음. 위치는 `result` ([`language.md` §8.4](./language.md#84-구조-규칙)) |
 
+| `` `<-` binding must be a top-level statement of the `result` block — ... `` | 바인딩을 블록 최상위가 아닌 곳(`if` 본문, 루프, 블록 안에 쓴 함수)에 썼습니다. 바인딩은 블록 IIFE의 early return으로 컴파일되므로 최상위 문장만 될 수 있습니다 — 끌어올리거나 `match`를 쓰세요. 위치는 선언 키워드 ([`language.md` §8.4](./language.md#84-구조-규칙)) |
 | `` `result` binding is missing its declaration keyword (write `const <binding> <- <expression>;`, or `let`/`var`) `` | `b <- f();`처럼 선언 키워드 없이 바인딩을 썼습니다. 이 자리에 `const`(또는 `let`/`var`)를 붙입니다. `b < -f()` **비교**를 쓰려던 것이라면 `<`와 `-` 사이에 공백을 둡니다 — rl이 바인딩으로 보는 것은 붙여 쓴 `<-`뿐입니다. 위치는 이름 ([`language.md` §8.4](./language.md#84-구조-규칙)) |
 
 블록 안의 `try` 문·let-else는 위의 위치 제약 에러로 보고됩니다 — 그 자리의

@@ -1,7 +1,7 @@
 //! Structural parsing of rl `if let` statements:
 //!
 //! ```text
-//! if let Tag(bindings...) = <expr> { ... }
+//! if let Tag(bindings...) (| Tag[(bindings...)])* = <expr> { ... }
 //! if let Tag(bindings...) = <expr> { ... } else { ... }
 //! if let Tag(bindings...) = <expr> { ... } else if let ... { ... }
 //! ```
@@ -40,7 +40,9 @@ pub(super) fn parse_if_let<'t>(
         _ => return None,
     }
 
-    // pattern: `Tag(bindings...)` — parens mandatory, nested allowed
+    // pattern: `Tag(bindings...) (| Tag[(bindings...)])*` — the first
+    // alternative's parens are mandatory, nested patterns allowed (sema
+    // rejects nested combined with or-alternatives, as in a match).
     let (tag, tag_span) = cur.eat_ident()?;
     if super::is_reserved(tag) {
         return None;
@@ -54,8 +56,17 @@ pub(super) fn parse_if_let<'t>(
         cur.sub(open + 1, close, cur.tokens[close].span.start),
         true,
     )?;
-    let pattern_end = cur.tokens[close].span.end;
     cur.idx = close + 1;
+    let mut alternatives = vec![TagPattern {
+        tag: tag.to_string(),
+        tag_off: tag_span.start,
+        end: cur.tokens[close].span.end,
+        bindings: Some(bindings),
+    }];
+    while cur.at_punct(b'|') {
+        cur.bump();
+        alternatives.push(super::matches::parse_alternative(&mut cur, true)?);
+    }
 
     // `=` (but not `==` / `=>`; `=>` lexes as a fused Arrow token)
     let eq = cur.eat_punct(b'=')?;
@@ -134,15 +145,14 @@ pub(super) fn parse_if_let<'t>(
                 start: kw_span.start,
                 end: expr_end,
             },
-            pattern: TagPattern {
-                tag: tag.to_string(),
-                tag_off: tag_span.start,
-                end: pattern_end,
-                bindings: Some(bindings),
-            },
+            alternatives,
             expr,
             body,
             else_part,
+            // Filled by the caller for the outermost statement (a chained
+            // `else if let` is never in expression position, so only the
+            // outer one's placement is ever judged).
+            in_function: false,
         },
     ))
 }

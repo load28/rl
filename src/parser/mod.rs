@@ -243,6 +243,7 @@ impl Parser<'_> {
         let mut stray_if_lets: Vec<usize> = Vec::new();
         let mut stray_results: Vec<usize> = Vec::new();
         let mut result_missing_kw: Vec<usize> = Vec::new();
+        let mut result_nested_binds: Vec<usize> = Vec::new();
         let mut seg_start = start;
         let mut i = 0usize;
 
@@ -369,9 +370,10 @@ impl Parser<'_> {
             // structurally excluded by the sub-parser).
             if !dotted
                 && word == "try"
-                && let Some((cur, byte_end, stmt)) =
+                && let Some((cur, byte_end, mut stmt)) =
                     tries::parse_try_stmt(Cursor::new(self, tokens, i + 1, end), tok.span)
             {
+                stmt.in_function = crate::flow::in_function_body(self.src, tokens, i);
                 flush_verbatim(&mut segments, seg_start, tok.span.start);
                 segments.push(Segment::Try(stmt));
                 seg_start = byte_end;
@@ -385,9 +387,10 @@ impl Parser<'_> {
             // declaration keyword is never followed by `<ident>(` in
             // valid TypeScript.
             if !dotted && (word == "const" || word == "let" || word == "var") {
-                if let Some((cur, byte_end, stmt)) =
+                if let Some((cur, byte_end, mut stmt)) =
                     tries::parse_try_decl(Cursor::new(self, tokens, i + 1, end), tok.span)
                 {
+                    stmt.in_function = crate::flow::in_function_body(self.src, tokens, i);
                     flush_verbatim(&mut segments, seg_start, tok.span.start);
                     segments.push(Segment::Try(stmt));
                     seg_start = byte_end;
@@ -395,9 +398,10 @@ impl Parser<'_> {
                     expr = (i, false);
                     continue;
                 }
-                if let Some((cur, byte_end, stmt)) =
+                if let Some((cur, byte_end, mut stmt)) =
                     lets::parse_let_else(Cursor::new(self, tokens, i + 1, end), tok.span)
                 {
+                    stmt.in_function = crate::flow::in_function_body(self.src, tokens, i);
                     flush_verbatim(&mut segments, seg_start, tok.span.start);
                     segments.push(Segment::LetElse(stmt));
                     seg_start = byte_end;
@@ -416,9 +420,10 @@ impl Parser<'_> {
                     Some(t) if matches!(t.kind, TokenKind::Ident)
                         && &self.src[t.span.start..t.span.end] == "let")
             {
-                if let Some((cur, byte_end, stmt)) =
+                if let Some((cur, byte_end, mut stmt)) =
                     iflets::parse_if_let(Cursor::new(self, tokens, i + 1, end), tok.span)
                 {
+                    stmt.in_function = crate::flow::in_function_body(self.src, tokens, i);
                     flush_verbatim(&mut segments, seg_start, tok.span.start);
                     segments.push(Segment::IfLet(stmt));
                     seg_start = byte_end;
@@ -438,7 +443,10 @@ impl Parser<'_> {
                 && word == "result"
                 && matches!(tokens.get(i + 1), Some(t) if matches!(t.kind, TokenKind::Punct(b'{')))
             {
-                match results::parse_result_block(Cursor::new(self, tokens, i + 1, end), tok.span) {
+                let (attempt, nested) =
+                    results::parse_result_block(Cursor::new(self, tokens, i + 1, end), tok.span);
+                result_nested_binds.extend(nested);
+                match attempt {
                     results::Attempt::Claimed(cur, byte_end, block) => {
                         flush_verbatim(&mut segments, seg_start, tok.span.start);
                         segments.push(Segment::ResultBlock(*block));
@@ -482,6 +490,7 @@ impl Parser<'_> {
             stray_if_lets,
             stray_results,
             result_missing_kw,
+            result_nested_binds,
         }
     }
 

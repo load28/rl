@@ -75,7 +75,7 @@ HEAD `c6b013f5`(로컬 클론·빌드)와 TASK-086 완료 시점의 main이다.
 | completion | tsgo LSP | API에 `getCompletionsAtPosition`이 있으나 resolve가 item-echo 방식(LSP형) — 한 백엔드로 통일 |
 | TS 진단 (에디터) | tsgo LSP pull | parse-error 가드(코드<2000) 등 기존 계약이 이 표면 위에 정의됨 |
 | typed rl 진단·소진성·val | tsgo **API server** (기존 Query/Answers) | TASK-073~085의 규범 경로 그대로 |
-| rl 구조 기능 (arm completion, 문서 심볼, quick fix, rl hover/definition) | **RL 자체** (analysis.ts) | 타입 불필요 + 미완성 버퍼 내성 필요 |
+| rl 구조 기능 (완성의 enum 목록, 문서 심볼, quick fix의 삽입 지점) | **엔진** (`engine/declarations.rs`, `declarations`) | 규칙의 단일 원천은 resolve — 정규식 재구현(구 analysis.ts)은 컴파일러와 다른 답을 했다 (TASK-127·128) |
 | rl 이름 hover/definition (enum·케이스·필드) | **엔진** (`engine/names.rs`, `rlSymbol`) | 위와 같은 이유지만 구현이 엔진에 있어야 규칙이 하나다 — 정규식 재구현은 컴파일러와 다른 답을 했다 (TASK-105) |
 | 패턴 자리 완성 (태그·필드) | **엔진** (`engine/completions.rs`, `rlCompletions`) | 같은 이유. 자리 판정은 토큰 스트림이라 미완성 버퍼에서도 답한다 (TASK-106) |
 
@@ -83,6 +83,13 @@ HEAD `c6b013f5`(로컬 클론·빌드)와 TASK-086 완료 시점의 main이다.
 `symbolAt`·`armContextAt`·`inferEnum`·`armTags`·`matchBodyAt`·`enumSignature`가
 사라졌고(=해석 규칙의 두 번째 구현), 남은 것은 이 프로세스가 스스로 읽는 구조뿐이다
 — `match` 키워드 위치, 멤버 접근 판정, 문서 심볼, 빠진 암 quick fix.
+
+**갱신 (TASK-128)**: 그 "스스로 읽는 구조"도 의미론 절반이 컴파일러로
+넘어갔다. 보이는 enum 목록·케이스/필드·match 사이트(암 삽입 지점 포함)는
+서버의 `declarations` 메서드(resolve 기반)가 답하고, `analysis.ts`의
+`parseEnums`/`parseMatches`/`visibleEnums`/`BUILTIN_ENUMS`는 삭제됐다.
+Node에 남은 것은 **텍스트 형태** 유틸뿐이다 — 마스킹, 커서의 단어, 멤버
+접근 판정.
 | semantic tokens (하이라이팅 정밀화) | **RL 자체** (`engine/tokens.rs`, 파스 전용·무상태) | TextMate 문법이 못 하는 판별(파서가 청구한/안 한 `match`·`result`·`flow`)의 단일 원천은 파서; 툴체인 없이도 답해야 하므로 text 기반 요청 (TASK-093) |
 
 핵심: 이 표는 전부 **엔진 내부**의 세부다. Node LSP는 어느 백엔드가
@@ -95,7 +102,7 @@ HEAD `c6b013f5`(로컬 클론·빌드)와 TASK-086 완료 시점의 main이다.
 Editor ─ LSP ─ editors/vscode/server (어댑터)
                  ├─ server.ts    프로토콜·능력·디바운스·표시(마크다운/스니펫)
                  ├─ engine.ts    EngineSession 클라이언트 (문서 sync + semantic 요청)
-                 ├─ analysis.ts  rl 구문 계층 (미완성 버퍼 내성; 아래 참조)
+                 ├─ analysis.ts  텍스트 형태 유틸 (마스킹·커서 문맥; 아래 참조)
                  └─ rlc.ts       --check/typedCheck (엔진 경유 + one-shot 폴백)
                        │ JSON lines
                        ▼
@@ -131,15 +138,15 @@ Editor ─ LSP ─ editors/vscode/server (어댑터)
 - **rename 원자성은 엔진 규칙이다.** 글루로 역매핑 안 되는 edit 하나라도
   있으면 rename 전체가 null — half-rename은 구조적으로 불가능.
 
-### rl 구문 계층(analysis.ts)이 Node에 남는 이유
+### analysis.ts에 남는 것 (TASK-128 이후)
 
-arm 태그 completion·quick fix가 가장 필요한 순간은 **버퍼가 아직 rl로
-파싱되지 않는 순간**이다. rlc의 파서는 무오류·전량-파싱(계약 1)이라
-미완성 match를 인식하지 않는다 — 오차 허용 파싱은 언어 표면 결정이
-필요한 별도 작업이다. 그래서 이 계층은 "빠질 수 있는 편의(진단 생성
-금지)"라는 기존 계약 그대로 어댑터 프로세스에 남는다. §38의 격리
-요구와도 일치한다: 엔진/TS 백엔드가 죽어도 rl 구조 기능은 산다.
-엔진의 오차 허용 구문 계층이 생기면 이관한다(후속 태스크로 기록).
+**텍스트 형태**만 남는다: 마스킹(`maskNonCode`), 커서의 단어(`wordAt`),
+멤버 접근 판정(`memberAccessAt`) — 커서 문맥의 UI 보조이지 rl 의미론이
+아니다. rl 의미론(선언 표·match 사이트·패턴 완성)은 전부 컴파일러의
+답(`declarations`/`rlSymbol`/`rlCompletions`)이고, 그 요청들은 text 기반
+parse-only라 미완성 버퍼에서도, TS 툴체인 없이도 답한다 — 구 계층이
+Node에 남아 있던 이유(무오류 파서의 미완성 버퍼 내성)는 엔진 표면이
+같은 내성을 갖추면서 해소됐다.
 
 ### 의도된 개선 (§50 — 문서화된 behavior 변경)
 

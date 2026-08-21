@@ -222,17 +222,31 @@ impl<'a> Emitter<'a> {
         } else {
             ""
         };
+        let alts = &stmt.alternatives;
+        let misses = alts
+            .iter()
+            .map(|alt| format!("{tmp}.kind !== \"{}\"", alt.tag))
+            .collect::<Vec<_>>()
+            .join(" && ");
         let mut code = Rope::new();
         code.push_lit(format!("const {tmp} = ("));
         code.append(expr);
-        code.push_lit(format!("); if ({tmp}.kind !== \"{}\") {{ ", stmt.tag));
+        code.push_lit(format!("); if ({misses}) {{ "));
         code.append(body);
         code.push_lit(format!("{nl} }}"));
-        if !stmt.bindings.is_empty() {
-            // Same as `try`: the names come from the source, so the emitted
-            // destructuring maps back to the pattern.
+        let bindings = alts[0].bindings.as_deref().unwrap_or_default();
+        if !bindings.is_empty() {
             code.push_lit(format!(" {} {{ ", stmt.kw));
-            code.append(matches::binding_list(self, stmt.bindings.iter()));
+            if alts.len() == 1 {
+                // Same as `try`: the names come from the source, so the
+                // emitted destructuring maps back to the pattern.
+                code.append(matches::binding_list(self, bindings.iter()));
+            } else {
+                // An or-pattern's one destructuring stands for every
+                // alternative at once, so it maps to none of them — the
+                // same rule as a match or-arm's.
+                code.push_lit(matches::binding_list_lit(bindings));
+            }
             code.push_lit(format!(" }} = {tmp};"));
         }
         code
@@ -249,7 +263,11 @@ impl<'a> Emitter<'a> {
         self.try_seq.set(n + 1);
         let tmp = format!("$rl_t{n}");
         let expr = self.emit_program(&stmt.expr).trim();
-        let (cond, binds) = matches::pattern_conds_binds(self, &stmt.pattern, &tmp);
+        let (cond, binds) = if stmt.alternatives.len() == 1 {
+            matches::pattern_conds_binds(self, &stmt.alternatives[0], &tmp)
+        } else {
+            matches::or_conds_binds(&stmt.alternatives, &tmp)
+        };
         let body = guard_line_comment(self.emit_program(&stmt.body).trim());
         let mut code = Rope::new();
         code.push_lit(format!("{{ const {tmp} = ("));
