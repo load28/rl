@@ -32,6 +32,9 @@
 //! → { "id": 6, "method": "rlCompletions", "params": { "path", "text", "position" } }
 //! ← { "id": 6, "result": { "items": [{ "label", "kind", "detail", "covered" }] } }
 //!
+//! → { "id": 7, "method": "rlHints", "params": { "path", "text" } }
+//! ← { "id": 7, "result": { "hints": [{ "kind", "range", "message" }] } }
+//!
 //! ← { "id": N, "error": "sentence" }   // the request failed; the session lives
 //! ```
 //!
@@ -209,6 +212,7 @@ fn respond(sessions: &mut Sessions, line: &str) -> serde_json::Value {
         "semanticTokens" => semantic_tokens(params),
         "rlSymbol" => rl_symbol(params),
         "rlCompletions" => rl_completions(params),
+        "rlHints" => rl_hints(params),
         "tsDiagnostics" => semantic(sessions, params, |project, path, _position| {
             let diagnostics: Vec<_> = project
                 .service_diagnostics(path)?
@@ -413,6 +417,30 @@ fn rl_completions(params: &serde_json::Value) -> Result<serde_json::Value, Strin
             })
             .collect();
     Ok(json!({ "items": items }))
+}
+
+/// What rl has to say about a buffer that is not an error — today, the
+/// arms an earlier arm already covers. Text-only like [`rl_symbol`], and
+/// separate from `check` on purpose: a hint never fails a build, so it
+/// never travels in the diagnostics of a compile answer.
+fn rl_hints(params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?;
+    let hints: Vec<_> = rlc::engine::rl_hints(Path::new(path), text_param(params)?)
+        .into_iter()
+        .map(|hint| {
+            json!({
+                "kind": match hint.kind {
+                    rlc::engine::RlHintKind::UnreachableArm => "unreachableArm",
+                },
+                "range": range_json(hint.range),
+                "message": hint.message,
+            })
+        })
+        .collect();
+    Ok(json!({ "hints": hints }))
 }
 
 fn semantic_tokens(params: &serde_json::Value) -> Result<serde_json::Value, String> {

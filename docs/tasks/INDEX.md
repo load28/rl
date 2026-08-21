@@ -120,7 +120,8 @@
 | TASK-110 | witness를 붙여 넣을 수 있는 패턴으로 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-110](./TASK-110-pasteable-witnesses.md) |
 | TASK-111 | 튜플 match의 typed 소진성 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-111](./TASK-111-typed-tuple-coverage.md) |
 | TASK-112 | 키워드를 빠뜨린 `result` 바인딩 진단 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-112](./TASK-112-result-missing-keyword.md) |
+| TASK-113 | 도달 불가 arm을 에디터 힌트로 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-113](./TASK-113-unreachable-arm-hints.md) |
 
 ## 다음 태스크 번호
 
-**TASK-113**
+**TASK-114**

@@ -480,6 +480,9 @@ rlSymbol { "path", "text", "position" }
 
 rlCompletions { "path", "text", "position" }
   → { "items": [{ "label", "kind": "case" | "field", "detail", "covered" }] }
+
+rlHints { "path", "text" }
+  → { "hints": [{ "kind": "unreachableArm", "range", "message" }] }
 ```
 
 - 답하는 자리는 **체커에게 물을 수 없는 자리뿐**입니다: enum 선언 안(이름·
@@ -507,6 +510,20 @@ rlCompletions { "path", "text", "position" }
 - 튜플 패턴의 원소 자리(`(No`)는 아직 답하지 않습니다.
 - 일반 TypeScript 완성은 여기 섞이지 않습니다 — `completion`의 답과 합치는
   것은 소비자의 몫입니다.
+
+`rlHints`는 **에러가 아닌 것**을 답합니다. rl의 진단은 에러뿐이고 CLI는
+힌트를 인쇄하지 않습니다 — 이 표면에만 나옵니다.
+
+| 종류 | 뜻 |
+|------|-----|
+| `unreachableArm` | 앞선 암이 이미 잡는 값만 매치하는 암 (죽은 코드). `range`는 패턴부터 본문 끝까지 |
+
+- Rust에서 도달 불가 패턴은 **린트**입니다. rl에는 경고 계층이 없으므로 이것을
+  에러로 만들면 지금 컴파일되는 프로그램을 거절하게 됩니다 — 그래서 컴파일
+  답이 아니라 에디터의 힌트입니다. VS Code 확장은 `Hint` 심각도 + `Unnecessary`
+  태그로 표시합니다(흐리게).
+- `rlSymbol`·`rlCompletions`처럼 파싱만으로 답하므로 TypeScript 툴체인이
+  없어도 나옵니다. sema의 좁은 **중복 암** 에러는 그대로 에러입니다.
 
 - `completion`의 `member`(요청)는 커서가 멤버 접근 자리인지 — 그 자리에서
   일반 답이 불가능하면 엔진이 **프로브**(`$rl_probe` 삽입 임시 projection)

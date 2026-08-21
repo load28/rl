@@ -33,6 +33,25 @@
 
 ### Added
 
+- **도달 불가 arm이 에디터 힌트로 나온다** (TASK-113). usefulness 알고리즘이
+  이미 계산하던 죽은 암(`Coverage::unreachable`)이 엔진의 새 표면
+  `rlHints`로 나오고, VS Code 확장이 `Hint` + `Unnecessary` 태그로 흐리게
+  표시한다.
+
+  ```rl
+  const area = match (shape) {
+    Circle(radius) => radius,
+    Rect(width) => width,
+    Circle(radius: r) => r,   // ← 흐리게: 앞선 암이 이미 잡는다
+  };
+  ```
+
+  - **에러가 아니다.** Rust에서 도달 불가 패턴은 린트이고 rl에는 경고 계층이
+    없다 — 에러로 만들면 지금 컴파일되는 프로그램을 거절하게 된다. CLI는
+    힌트를 인쇄하지 않는다. sema의 좁은 중복 암 에러는 그대로다.
+  - `rlSymbol`·`rlCompletions`처럼 **파싱만으로** 답하므로 TypeScript 툴체인이
+    없어도, 저장하지 않은 버퍼에서도 나온다.
+
 - **튜플 match의 소진성도 타입 기준으로 판정된다** (TASK-111). `--check-types`가
   튜플 match의 **위치마다** 체커에게 그 자리의 구성원을 묻고, 단일 match와 같은
   usefulness 알고리즘으로 곱집합을 판정한다.

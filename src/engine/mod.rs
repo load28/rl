@@ -40,6 +40,7 @@
 //! ```
 
 mod completions;
+mod hints;
 mod language;
 mod names;
 mod project;
@@ -49,6 +50,7 @@ mod snapshot;
 mod tokens;
 
 pub use completions::{RlCompletion, RlCompletionKind, rl_completions_at};
+pub use hints::{RlHint, RlHintKind, rl_hints};
 pub use language::{
     CompletionAnswer, CompletionDetail, CompletionItem, HoverInfo, Location, Position,
     RENAME_PLACEHOLDER, Range, Reference, RenameEdit, ServiceDiagnostic, Signature, SignatureHelp,

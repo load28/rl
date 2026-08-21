@@ -246,6 +246,10 @@ pub struct PayloadField {
 /// One analyzed arm: where its body is, and the two binding maps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedArm {
+    /// Byte offset of the arm's pattern — where the arm begins, and what a
+    /// consumer points at when it has something to say about the arm
+    /// itself rather than about its body.
+    pub pattern_start: usize,
     /// Byte span of the arm's body (braces excluded for block bodies).
     pub body_start: usize,
     /// End of the body span.
@@ -1027,6 +1031,7 @@ fn analyze_match(
         .iter()
         .map(|arm| {
             let mut analyzed = AnalyzedArm {
+                pattern_start: arm.pattern_off,
                 body_start: arm.body_span.start,
                 body_end: arm.body_span.end,
                 pattern_bindings: Vec::new(),
@@ -1092,6 +1097,7 @@ fn analyze_tuple_match(
         .iter()
         .map(|arm| {
             let mut analyzed = AnalyzedArm {
+                pattern_start: arm.pattern_off,
                 body_start: arm.body_span.start,
                 body_end: arm.body_span.end,
                 pattern_bindings: Vec::new(),

@@ -103,6 +103,14 @@ export interface EngineRlSymbol {
   definition: EngineLocation | null;
 }
 
+/** One thing rl has to say about a range that is not an error. */
+export interface EngineRlHint {
+  /** What kind of hint it is — switch on this, not on the message. */
+  kind: "unreachableArm";
+  range: EngineRange;
+  message: string;
+}
+
 export interface EngineRlCompletion {
   label: string;
   kind: "case" | "field" | "wildcard";
@@ -459,6 +467,24 @@ export async function rlCompletions(
     onError,
   );
   return result?.items ?? [];
+}
+
+/** What rl has to say about a buffer that is not an error — today, the
+ * arms an earlier arm already covers. Parse-only, so it answers without a
+ * TypeScript toolchain; empty when there is nothing to say. */
+export async function rlHints(
+  compiler: string,
+  path: string,
+  text: string,
+  onError?: (message: string) => void,
+): Promise<EngineRlHint[]> {
+  const result = await semantic<{ hints: EngineRlHint[] }>(
+    compiler,
+    "rlHints",
+    { path, text },
+    onError,
+  );
+  return result?.hints ?? [];
 }
 
 export async function tsDiagnostics(

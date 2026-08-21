@@ -35,6 +35,7 @@ import {
   createConnection,
   Diagnostic,
   DiagnosticSeverity,
+  DiagnosticTag,
   DocumentSymbol,
   InitializeParams,
   InitializeResult,
@@ -479,6 +480,12 @@ async function validate(doc: TextDocument): Promise<void> {
     if (!fresh || fresh.version !== doc.version) return;
   }
 
+  // Hints are not diagnostics of the compile: rlc never fails on one, and
+  // they only reach the user here (`engine::hints`).
+  diagnostics.push(...(await rlHints(doc, compiler)));
+  const settled = documents.get(doc.uri);
+  if (!settled || settled.version !== doc.version) return;
+
   baseDiagnostics.set(doc.uri, { version: doc.version, diagnostics });
   publish(doc.uri, doc.version, diagnostics);
 }
@@ -517,6 +524,33 @@ async function typeDiagnostics(
     message: d.message,
     code: d.code,
     source: "ts",
+  }));
+}
+
+/**
+ * What rl has to say about a buffer that is not an error — an unreachable
+ * arm, today. These carry `DiagnosticSeverity.Hint` and the `Unnecessary`
+ * tag, which is what dims dead code: rl has no warning level and the CLI
+ * never reports these, so nothing here may look like a build failure.
+ */
+async function rlHints(
+  doc: TextDocument,
+  compiler: string,
+): Promise<Diagnostic[]> {
+  const fsPath = enginePath(doc);
+  if (fsPath === null) return [];
+  const hints = await engine.rlHints(
+    compiler,
+    fsPath,
+    doc.getText(),
+    logEngine,
+  );
+  return hints.map((hint) => ({
+    severity: DiagnosticSeverity.Hint,
+    tags: [DiagnosticTag.Unnecessary],
+    range: hint.range,
+    message: hint.message,
+    source: "rl",
   }));
 }
 

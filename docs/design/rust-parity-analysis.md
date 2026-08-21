@@ -199,7 +199,9 @@ rust-analyzer는 이 자리 전부에서 변형·필드를 완성한다. 이 자
   verify가 `generated TypeScript failed to parse: ... (line 12, col 18 of the
   generated output)`으로 **생성물 좌표**를 들이밀었다. `|>`·`if let`이 받는 대접
   (`errors.md`의 rl-전용 구문 규칙)과 일관되지 않았다.
-- **도달 불가 arm 검사**는 `match`의 중복 태그 검사에 한정된다.
+- ~~**도달 불가 arm 검사**는 `match`의 중복 태그 검사에 한정된다.~~ —
+  TASK-113. 계산은 TASK-103의 usefulness가 하고, 보고는 에디터 힌트
+  (`rlHints`)로 한다 — 에러 계층에는 넣지 않는다(경고 계층이 없다).
 
 ## 5. 원인 — 왜 이렇게 갈렸나
 
