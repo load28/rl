@@ -133,6 +133,7 @@ pub(crate) fn translate(
     message: &str,
     declarations: &[DeclaredEnum],
 ) -> Option<String> {
+    translation_class(kind, code)?;
     let said = match (kind, code) {
         // `.kind` / `.value` reached for on something that is not a Result.
         (AnchorKind::Try, 2339 | 2551 | 2571) => {
@@ -172,6 +173,23 @@ pub(crate) fn translate(
             "{said} (in rl's names: {named}) (ts{code}: {message})"
         )),
         None => Some(format!("{said} (ts{code}: {message})")),
+    }
+}
+
+/// Stable meaning shared by CLI and editor translation deduplication.
+/// TypeScript may emit several incidental diagnostics for one rl mistake;
+/// the class identifies the single rl-level explanation they share.
+pub(crate) fn translation_class(kind: AnchorKind, code: u32) -> Option<&'static str> {
+    match (kind, code) {
+        (AnchorKind::Try | AnchorKind::ResultBind, 2339 | 2551 | 2571) => Some("not-result"),
+        (AnchorKind::Try, 2322 | 2345) => Some("try-error-type"),
+        (AnchorKind::LetElse | AnchorKind::IfLet | AnchorKind::Match, 2339 | 2571) => {
+            Some("missing-discriminant")
+        }
+        (AnchorKind::Match, 2678) | (AnchorKind::LetElse | AnchorKind::IfLet, 2367) => {
+            Some("impossible-case")
+        }
+        _ => None,
     }
 }
 
@@ -512,6 +530,7 @@ pub(crate) fn report(
     // TypeScript's own diagnostics, at the position in the `.rl` file the
     // offending code was written at.
     let type_diagnostics: &[TsDiagnostic] = if rl_only { &[] } else { &answers.diagnostics };
+    let mut translated_seen: HashSet<(PathBuf, usize, AnchorKind, &'static str)> = HashSet::new();
     for diagnostic in type_diagnostics {
         let Some(file) = files.iter().find(|f| f.module_path == diagnostic.file) else {
             // A hand-written file: TypeScript's own coordinates already name
@@ -536,6 +555,16 @@ pub(crate) fn report(
                         analysis.keyword_off == anchor.src && analysis.has_unresolved
                     })
                 })
+            {
+                continue;
+            }
+            if let Some(class) = translation_class(anchor.kind, diagnostic.code)
+                && !translated_seen.insert((
+                    file.source_path.clone(),
+                    anchor.src,
+                    anchor.kind,
+                    class,
+                ))
             {
                 continue;
             }
@@ -1099,6 +1128,17 @@ mod tests {
             name_types("Type '{ kind: \"A\" | \"B\"; }'.", &declarations),
             None
         );
+    }
+
+    #[test]
+    fn translation_classes_group_incidental_ts_codes_by_rl_meaning() {
+        assert_eq!(translation_class(AnchorKind::Try, 2339), Some("not-result"));
+        assert_eq!(translation_class(AnchorKind::Try, 2571), Some("not-result"));
+        assert_eq!(
+            translation_class(AnchorKind::Try, 2322),
+            Some("try-error-type")
+        );
+        assert_eq!(translation_class(AnchorKind::Pipe, 2339), None);
     }
 
     #[test]

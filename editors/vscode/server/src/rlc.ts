@@ -33,6 +33,8 @@ export interface RlcDiagnostic {
   /** See {@link RlcDiagnostic.endLine}. */
   endCol?: number;
   message: string;
+  /** Stable rl rule identity; older/one-shot compilers may omit it. */
+  code?: string;
 }
 
 export type RlcResult =
@@ -146,6 +148,7 @@ export async function runCheck(
         endLine: d.endLine,
         endCol: d.endCol,
         message: d.message,
+        code: d.code,
       })),
     };
   }
@@ -333,6 +336,7 @@ export async function runTypedCheck(
         endLine?: number;
         endCol?: number;
         message: string;
+        code?: string;
       }[];
     };
     const all = result.diagnostics ?? [];
@@ -360,6 +364,7 @@ export async function runTypedCheck(
         endLine: d.endLine,
         endCol: d.endCol,
         message: d.message,
+        code: d.code,
       })),
     };
   }

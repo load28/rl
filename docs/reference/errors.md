@@ -67,7 +67,7 @@ CLI는 시작 위치만 찍지만, 진단은 그 안에 **범위**를 함께 담
 | 메시지 | 원인과 해결 |
 |--------|-------------|
 | `enum <이름>: duplicate case "<태그>"` | 한 enum에 같은 태그가 두 번. 위치는 두 번째 태그. 합치거나 이름을 바꿉니다 |
-| `enum <이름>: invalid type for field ``<필드>``: <상세>` | 필드 타입이 TypeScript 타입으로 파싱되지 않음. 위치는 타입 시작 지점. 표기를 고치거나 `--no-verify`로 우회(이 경우 tsc 단계에서 드러납니다) |
+| `enum <이름>: invalid type for field ``<필드>``: <상세>` | 필드 타입이 TypeScript 타입으로 파싱되지 않음. 서로 맞지 않는 괄호·대괄호도 enum 전체 parse 오류가 아니라 이 진단으로 보고합니다. 위치는 타입 시작 지점. 표기를 고치거나 `--no-verify`로 우회(이 경우 tsc 단계에서 드러납니다) |
 | ``rl `enum` could not be parsed (...)`` | payload 괄호나 제네릭으로 rl enum임이 확정됐지만 선언이 완성되지 않음. 위치는 `enum` |
 
 ```rl

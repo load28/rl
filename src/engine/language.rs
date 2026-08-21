@@ -794,6 +794,7 @@ impl Project {
         // translate nothing, and building it parses the file and its
         // imports.
         let mut declarations: Option<Vec<crate::analysis::DeclaredEnum>> = None;
+        let mut translated_seen: HashSet<(usize, crate::AnchorKind, &'static str)> = HashSet::new();
         for item in items {
             let severity = item["severity"].as_u64().unwrap_or(1);
             if severity > 2 {
@@ -810,11 +811,19 @@ impl Project {
             let e = if e > s { e } else { s + 1 };
             let raw = item["message"].as_str().unwrap_or_default().to_string();
             let code = item["code"].as_u64().unwrap_or(0) as u32;
+            let glue = glue_anchor(&doc, start);
+            if let Some((anchor, class)) = glue.and_then(|anchor| {
+                crate::engine::semantics::translation_class(anchor.kind, code)
+                    .map(|class| (anchor, class))
+            }) && !translated_seen.insert((anchor.src, anchor.kind, class))
+            {
+                continue;
+            }
             // On glue the construct is the diagnostic's extent: its own
             // text is underlined, and where rlc can say what the construct
             // meant it says that instead — the same table the CLI reports
             // through, so the two surfaces cannot drift.
-            if !exact && let Some(anchor) = glue_anchor(&doc, start) {
+            if !exact && let Some(anchor) = glue {
                 let from = mapper::to_utf16(&doc.source, anchor.src);
                 let to = mapper::to_utf16(&doc.source, anchor.src_end).max(from + 1);
                 let range = source_range(&doc.source, from, to);

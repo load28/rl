@@ -228,19 +228,22 @@ fn parse_fields(mut cur: Cursor) -> Option<Vec<Field>> {
 /// annotation ends (`range_end` when the tokens run out — the enclosing
 /// closer's position).
 fn type_end(cur: &Cursor) -> (usize, usize) {
-    let mut depth = 0usize;
+    let mut closers = Vec::new();
     let mut k = cur.idx;
     while k < cur.tokens.len() {
         match cur.tokens[k].kind {
-            TokenKind::Punct(b'(' | b'[' | b'{' | b'<') => depth += 1,
-            TokenKind::Punct(b')' | b']' | b'}') => {
-                if depth == 0 {
-                    return (k, cur.tokens[k].span.start);
-                }
-                depth -= 1;
+            TokenKind::Punct(b'(') => closers.push(b')'),
+            TokenKind::Punct(b'[') => closers.push(b']'),
+            TokenKind::Punct(b'{') => closers.push(b'}'),
+            TokenKind::Punct(b'<') => closers.push(b'>'),
+            TokenKind::Punct(close @ (b')' | b']' | b'}' | b'>'))
+                if closers.last() == Some(&close) =>
+            {
+                closers.pop();
             }
-            TokenKind::Punct(b'>') => depth = depth.saturating_sub(1),
-            TokenKind::Punct(b',') if depth == 0 => return (k, cur.tokens[k].span.start),
+            TokenKind::Punct(b',') if closers.is_empty() => {
+                return (k, cur.tokens[k].span.start);
+            }
             _ => {}
         }
         k += 1;

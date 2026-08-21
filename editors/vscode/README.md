@@ -74,6 +74,7 @@ head와 맞지 않아 콤비네이터 파라미터가 `unknown`으로 추론되�
 
 - **rl 수준 에러**(중복 케이스, 소진되지 않은 match, 잘못된 필드 타입)는
   `rlc --check`만 냅니다 (`source: rlc`).
+- rl 진단의 안정적인 규칙 코드는 LSP `Diagnostic.code`로 전달됩니다.
 - **타입 에러**는 tsc만 냅니다 (`source: ts`, `code`는 TS 에러 번호).
 
 안전장치 두 가지 때문에 잘못된 진단이 새어 나오지 않습니다.

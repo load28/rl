@@ -550,6 +550,7 @@ function toDiagnostic(doc: TextDocument, d: rlc.RlcDiagnostic): Diagnostic {
     severity: DiagnosticSeverity.Error,
     range,
     message: d.message,
+    code: d.code,
     source: "rlc",
   };
 }

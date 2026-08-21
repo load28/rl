@@ -61,13 +61,19 @@ pub(super) fn parse_match<'t>(
         _ => false,
     };
     if committed {
+        let message = if matches!(cur.peek(), Some(token) if matches!(token.kind, TokenKind::Ident))
+        {
+            "`match` could not be parsed here — wrap the scrutinee in parentheses: \
+             `match (<expression>) { ... }`"
+                .to_string()
+        } else {
+            "rl `match` could not be parsed (write `match (<scrutinee>) { <pattern> => <body> }`; \
+             tuple patterns must match the scrutinee arity)"
+                .to_string()
+        };
         Claim::Malformed(
-            crate::error::RlError::span(
-                kw_span.start,
-                kw_span.end,
-                "rl `match` could not be parsed (write `match (<scrutinee>) { <pattern> => <body> }`; tuple patterns need at least two elements)".to_string(),
-            )
-            .code(crate::DiagnosticCode::MalformedMatch),
+            crate::error::RlError::span(kw_span.start, kw_span.end, message)
+                .code(crate::DiagnosticCode::MalformedMatch),
         )
     } else {
         Claim::NotRl
@@ -103,11 +109,15 @@ fn parse_match_complete<'t>(
     let byte_end = cur.tokens[body_close].span.end;
     let arms_cur = cur.sub(body_open + 1, body_close, cur.tokens[body_close].span.start);
 
-    // Tuple attempt first (arm-driven): every arm a tuple pattern (or a
-    // bare `_`) and a scrutinee splitting into two or more parts.
+    // Tuple attempt first (arm-driven). One side may have arity one when
+    // the other proves tuple intent, so sema can report the exact mismatch.
     if let Some(parts) = split_scrutinees(&cur, open, close)
         && let Some(arms) = parse_tuple_arms(arms_cur)
         && !arms.is_empty()
+        && (parts.len() > 1
+            || arms
+                .iter()
+                .any(|arm| matches!(&arm.pattern, TuplePattern::Elems(elems) if elems.len() > 1)))
     {
         let scrutinees = parts
             .iter()
@@ -162,8 +172,8 @@ fn parse_match_complete<'t>(
 }
 
 /// Splits the scrutinee token range `(open..close)` at top-level commas
-/// into `(from, to)` token ranges. `None` unless there are two or more
-/// non-empty parts. `<`/`>` count as brackets so a generic call's type
+/// into `(from, to)` token ranges. `None` means an empty part; one part is
+/// retained for tuple-arity recovery. `<`/`>` count as brackets so a generic call's type
 /// arguments don't split (a comparison next to a top-level comma is not a
 /// meaningful tuple scrutinee — tags are matched by `kind`).
 fn split_scrutinees(cur: &Cursor, open: usize, close: usize) -> Option<Vec<(usize, usize)>> {
@@ -188,9 +198,6 @@ fn split_scrutinees(cur: &Cursor, open: usize, close: usize) -> Option<Vec<(usiz
         return None; // trailing comma leaves an empty last part
     }
     parts.push((from, close));
-    if parts.len() < 2 {
-        return None;
-    }
     Some(parts)
 }
 
@@ -250,9 +257,6 @@ fn parse_tuple_arms(mut cur: Cursor) -> Option<Vec<TupleArm>> {
                 let close = cur.find_close()?;
                 let elems =
                     parse_tuple_elems(cur.sub(open + 1, close, cur.tokens[close].span.start))?;
-                if elems.len() < 2 {
-                    return None; // `(P)` is not a tuple pattern
-                }
                 cur.idx = close + 1;
                 TuplePattern::Elems(elems)
             }

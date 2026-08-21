@@ -103,10 +103,10 @@ fn enum_invalid_field_type_is_rejected_by_swc_with_position() {
 }
 
 #[test]
-fn enum_with_unbalanced_field_type_is_a_malformed_rl_enum() {
+fn enum_with_unbalanced_field_type_is_a_field_type_error() {
     let e = err("enum E { A(value: number]) }\n");
-    assert!(e.message.contains("rl `enum` could not be parsed"), "{e}");
-    assert_eq!((e.line, e.col), (1, 1));
+    assert!(e.message.contains("invalid type for field `value`"), "{e}");
+    assert_eq!((e.line, e.col), (1, 19));
 }
 
 #[test]
@@ -1874,16 +1874,30 @@ fn tuple_match_arity_mismatch_is_an_error() {
 }
 
 #[test]
-fn one_element_tuple_pattern_is_a_malformed_tuple_match() {
+fn one_element_tuple_pattern_reports_the_exact_arity() {
     let e = err("const r = match (a, b) {\n  (A) => 1,\n  _ => 0,\n};\n");
-    assert!(e.message.contains("rl `match` could not be parsed"), "{e}");
-    assert_eq!((e.line, e.col), (1, 11));
+    assert!(
+        e.message
+            .contains("tuple pattern has 1 elements but the match has 2 scrutinees"),
+        "{e}"
+    );
+    assert_eq!((e.line, e.col), (2, 3));
+
+    let e = err("const r = match (a) {\n  (A, B) => 1,\n  _ => 0,\n};\n");
+    assert!(
+        e.message
+            .contains("tuple pattern has 2 elements but the match has 1 scrutinees"),
+        "{e}"
+    );
 }
 
 #[test]
 fn match_without_scrutinee_parentheses_is_a_malformed_rl_match() {
     let e = err("const r = match value { A => 1, _ => 0 };\n");
-    assert!(e.message.contains("rl `match` could not be parsed"), "{e}");
+    assert!(
+        e.message.contains("wrap the scrutinee in parentheses"),
+        "{e}"
+    );
     assert_eq!((e.line, e.col), (1, 11));
 }
 

@@ -14,14 +14,14 @@
 //! ```text
 //! → { "id": 1, "method": "check", "params": { "text", "filename"?, "verify"? } }
 //! ← { "id": 1, "result": { "diagnostics":
-//!        [{ "line", "col", "endLine", "endCol", "message" }] } }
+//!        [{ "line", "col", "endLine", "endCol", "message", "code" }] } }
 //!
 //! → { "id": 2, "method": "emitMap", "params": { "text" } }
 //! ← { "id": 2, "result": { "code", "mappings": [{ "src", "out", "len" }] } }
 //!
 //! → { "id": 3, "method": "typedCheck", "params": { "path", "text" } }
 //! ← { "id": 3, "result": { "blocked", "diagnostics":
-//!        [{ "path", "line", "col", "endLine", "endCol", "message" }] } }
+//!        [{ "path", "line", "col", "endLine", "endCol", "message", "code" }] } }
 //!
 //! → { "id": 4, "method": "semanticTokens", "params": { "text" } }
 //! ← { "id": 4, "result": { "tokens": [{ "range", "kind" }] } }

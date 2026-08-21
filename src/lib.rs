@@ -400,7 +400,7 @@ pub struct ScrutineeTemp {
 /// The kind is half of what turns a TypeScript diagnostic on that glue into
 /// an rl one — the other half is the error code (see
 /// `docs/design/rust-parity-analysis.md` §10).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnchorKind {
     /// A `match` expression's switch or if-chain.
     Match,

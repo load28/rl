@@ -527,9 +527,8 @@ test(
   "a construct that did not parse is reported where it is written",
   { skip, timeout },
   async () => {
-    // A `match` without its scrutinee parens is not rl syntax, so it passes
-    // through — and the generated module no longer parses. The error used
-    // to arrive with no position at all and land on line 1.
+    // Parser recovery owns this unambiguous rl near miss and keeps its
+    // stable rule identity through the compiler protocol and LSP adapter.
     const source = [
       "enum Shape { Circle(r: number), Square(s: number) }",
       "export function area(shape: Shape): number {",
@@ -541,10 +540,9 @@ test(
       "",
     ].join("\n");
     const diagnostics = await published(source);
-    const failed = diagnostics.find((d: any) =>
-      d.message.includes("did not parse as an rl `match`"),
-    );
+    const failed = diagnostics.find((d: any) => d.code === "malformed-match");
     assert.ok(failed, `no parse report in: ${JSON.stringify(diagnostics)}`);
+    assert.match(failed.message, /wrap the scrutinee in parentheses/);
     assert.equal(failed.range.start.line, 2);
     assert.equal(covered(source, failed.range), "match");
   },

@@ -148,7 +148,8 @@
 | TASK-138 | Snapshot 부분 실패 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-138](./TASK-138-snapshot-partial-failure.md) |
 | TASK-139 | 파서 Claim 커밋 모델 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-139](./TASK-139-parser-claim-model.md) |
 | TASK-140 | 진단 병합과 원본 이름 보존 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-140](./TASK-140-diagnostic-merge.md) |
+| TASK-141 | codex 브랜치 정밀 진단 이식 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-141](./TASK-141-port-codex-diagnostics.md) |
 
 ## 다음 태스크 번호
 
-**TASK-141**
+**TASK-142**

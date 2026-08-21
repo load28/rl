@@ -57,7 +57,7 @@ Tuple match (product exhaustiveness — missing COMBINATIONS are errors):
 ```rl
 match (conn, mode) { (Online(latency), Auto) if latency < 50 => 10, (Online, _) => 5, (Offline, _) => 0 }
 ```
-Every arm = tuple pattern (or final bare `_` covering all); element count = scrutinee count; no `(A,B)|(C,D)` — use element-level or `(A, B|D)`; parenthesize scrutinees containing top-level `<`/`>` comparisons.
+Every arm = tuple pattern (or final bare `_` covering all); element count = scrutinee count (an arity-one side is still claimed when the other side proves tuple intent, so rlc reports the exact mismatch); no `(A,B)|(C,D)` — use element-level or `(A, B|D)`; parenthesize scrutinees containing top-level `<`/`>` comparisons.
 - Exhaustiveness is the product of the positions. `rlc --check-types` asks the checker for each position's alphabet, so narrowed types count, and reports combinations unquoted: `match is not exhaustive: missing (North, Slow)`. A position no arm tags stays `_`.
 
 ## try (Rust `?`)
