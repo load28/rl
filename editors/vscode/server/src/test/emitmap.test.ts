@@ -378,3 +378,51 @@ test("let-else and if let bindings hover with the extracted type", { skip }, asy
     /text: string/,
   );
 });
+
+/* --------------------------------------------------------------------------
+ * TASK-118: a diagnostic on generated code is restated in rl's words *and*
+ * in rl's names — the case TypeScript printed structurally is called by the
+ * declaration it lowers from, with TypeScript's own text alongside.
+ * -------------------------------------------------------------------- */
+
+const NAMED_SOURCE = [
+  'import { Result } from "@rl/std";',
+  "",
+  "enum Wire { OutOfRange(value: number), Missing }",
+  "enum ParseError { NotANumber(text: string) }",
+  "",
+  "function inner(w: Wire) {",
+  '  if (w.kind === "OutOfRange") { return Result.Err(w); }',
+  "  return Result.Ok(1);",
+  "}",
+  "",
+  "export function outer(w: Wire): Result<number, ParseError> {",
+  "  const n = try inner(w);",
+  "  return Result.Ok(n);",
+  "}",
+  "",
+].join("\n");
+
+test("a restated diagnostic names the case it is about", { skip }, async () => {
+  const dir = fixture("rl-named-test-", { "wire.rl": NAMED_SOURCE });
+  const diagnostics = await engine.tsDiagnostics(
+    COMPILER,
+    path.join(dir, "wire.rl"),
+  );
+  const error = diagnostics.find((d) => d.code === 2322);
+  assert.ok(error, JSON.stringify(diagnostics));
+  // The propagation is the extent, and the wording is rl's (TASK-104/116).
+  assert.equal(sliceOf(NAMED_SOURCE, error!.range), "try inner(w)");
+  assert.match(error!.message, /the `Err` this `try` propagates/);
+  // The narrowed case prints structurally; rl says whose case it is, and
+  // a union covering a whole enum is that enum.
+  assert.match(
+    error!.message,
+    /in rl's names: Type 'Err<Wire\.OutOfRange>' is not assignable to type 'Result<number, ParseError>'/,
+  );
+  // TypeScript's own text rides along, unchanged.
+  assert.match(
+    error!.message,
+    /ts2322: Type 'Err<\{ kind: "OutOfRange"; value: number; \}>'/,
+  );
+});

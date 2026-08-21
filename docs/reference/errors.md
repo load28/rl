@@ -357,6 +357,41 @@ rlc: f.rl:2:13: `try` needs a `Result` — this expression is not one
 - 매핑이 있는 자리(사용자가 쓴 텍스트)의 타입 에러는 **옮기지 않습니다** —
   그건 사용자의 코드이고 tsc가 말할 몫입니다.
 
+#### 구조적 타입을 선언 이름으로
+
+tsc에는 rl 케이스를 가리킬 말이 없습니다. `Wire.OutOfRange`는 유니언의 한
+멤버로 낮아지므로, 그 케이스에 대한 진단은 낮아진 모양
+(`{ kind: "OutOfRange"; value: number; }`)을 그대로 찍습니다. rlc는 그게 누구의
+케이스인지 알기 때문에, 옮긴 말 쪽에 **rl 이름으로 다시 쓴 문장**을 함께
+싣습니다(`(in rl's names: ...)`).
+
+```
+rlc: a.rl:12:13: the `Err` this `try` propagates does not fit the enclosing
+     function's return type — rl has no automatic conversion, so widen the
+     return type or convert the error
+     (in rl's names: Type 'Err<Wire.OutOfRange>' is not assignable to type
+      'Result<number, ParseError>'.)
+     (ts2322: Type 'Err<{ kind: "OutOfRange"; value: number; }>' is not
+      assignable to type 'Result<number, { kind: "NotANumber"; text: string; }>'.)
+```
+
+이름은 선언 표(파일의 enum + 임포트가 이름 붙여 들여온 enum + 내장
+`Option`/`Result`)가 **유일하게** 지목할 때만 붙습니다:
+
+- 같은 태그를 두 enum이 선언했으면 **이름을 붙이지 않습니다**. 어느 쪽인지
+  말하는 게 목적인데 둘 중 찍는 건 아무 말도 아닙니다.
+- 필드 이름이 그 케이스의 페이로드와 정확히 같지 않으면 붙이지 않습니다 —
+  태그만 우연히 같은 다른 타입입니다.
+- 한 enum의 케이스 전부가 유니언으로 나오면 그 enum 이름 하나로 줄이고
+  (`ParseError`), 일부만 나오면 케이스들의 유니언으로 씁니다
+  (`ParseError.NotANumber | ParseError.Overflow`).
+- 임포트한 enum은 **임포트가 준 이름**으로 부릅니다
+  (`import { Wire as W }` → `W.OutOfRange`).
+
+원문은 그대로 실립니다 — 이름은 읽기를 돕는 것이지 원문을 대신하지 않습니다.
+rl이 이름을 잘못 붙였을 때 사용자가 tsc가 실제로 한 말과 맞춰볼 수 있어야
+합니다.
+
 ## CLI
 
 컴파일 이전 단계의 에러입니다. 전부 stderr로 나가고 종료 코드 1입니다.

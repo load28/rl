@@ -534,6 +534,9 @@ TypeQuery { module, position, ask }
 
 > **상태: 구현됨** (TASK-104) — `engine::semantics::translate`. 규범은
 > [`errors.md`](../reference/errors.md#생성된-코드에서-난-타입-에러).
+> 문안 안의 낮아진 케이스 타입(`{ kind: "X"; ... }`)을 선언 이름(`E.X`)으로
+> 부르는 것은 TASK-118 — 선언 표가 유일하게 지목할 때만, 원문은 그대로 둔 채
+> 옮긴 말 쪽에 덧붙인다.
 
 앵커가 붙으면 rlc는 "이 TS 진단은 내가 `try`를 위해 만든 글루에서 나왔다"를
 **확실하게** 안다. 그러면 그 진단을 rl 문안으로 **번역**할 수 있다:

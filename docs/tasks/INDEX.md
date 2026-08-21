@@ -125,7 +125,7 @@
 | TASK-115 | CI 복구 — 새 clippy 린트와 테스트 개수 guard | 완료 | 2026-08-21 | 2026-08-21 | [TASK-115](./TASK-115-ci-green.md) |
 | TASK-116 | 진단을 정확한 구문 범위로 — 스팬 있는 에러 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-116](./TASK-116-diagnostic-spans.md) |
 | TASK-117 | 한 파일의 rl 에러를 여러 개 보고한다 (문제 기록) | 대기 | — | — | [TASK-117](./TASK-117-multiple-rl-diagnostics.md) |
-| TASK-118 | 타입 에러 문안에서 구조적 타입을 선언 이름으로 | 대기 | — | — | [TASK-118](./TASK-118-named-error-types-in-messages.md) |
+| TASK-118 | 타입 에러 문안에서 구조적 타입을 선언 이름으로 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-118](./TASK-118-named-error-types-in-messages.md) |
 
 ## 다음 태스크 번호
 

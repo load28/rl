@@ -472,12 +472,24 @@ fn scrutinee_position(emit: &MappedEmit, keyword_offset: usize) -> Option<usize>
 ///
 /// A diagnostic whose span *is* mapped is the user's own code and is never
 /// translated: their type error is TypeScript's to phrase.
+///
+/// `declarations` is the file's declaration table — what lets the wording
+/// name the enum case a structural type in the message lowers from. It is
+/// the caller's because the table costs a parse of the file (and of what it
+/// imports), which is worth doing once per file rather than once per
+/// diagnostic.
 pub(crate) fn translate_on_glue(
     file: &ProjectedDocument,
     diagnostic: &crate::typescript::backend::Diagnostic,
+    declarations: &[crate::analysis::DeclaredEnum],
 ) -> Option<(crate::EmitAnchor, String)> {
     let anchor = glue_anchor(file, diagnostic.start)?;
-    let said = super::semantics::translate(anchor.kind, diagnostic.code, &diagnostic.message)?;
+    let said = super::semantics::translate(
+        anchor.kind,
+        diagnostic.code,
+        &diagnostic.message,
+        declarations,
+    )?;
     Some((anchor, said))
 }
 
@@ -524,6 +536,11 @@ mod tests {
         }
     }
 
+    /// The declaration table the report path hands the translation.
+    fn declarations(file: &ProjectedDocument) -> Vec<crate::analysis::DeclaredEnum> {
+        crate::pattern_analyses(&file.source, &[]).declarations
+    }
+
     fn project(source: &str) -> ProjectedDocument {
         ProjectedDocument::project(Path::new("/p/src/a.rl"), source.to_string()).expect("projects")
     }
@@ -539,7 +556,8 @@ mod tests {
             2339,
             "Property 'kind' does not exist on type 'number'.",
         );
-        let (anchor, said) = translate_on_glue(&file, &diagnostic).expect("translated");
+        let (anchor, said) =
+            translate_on_glue(&file, &diagnostic, &declarations(&file)).expect("translated");
         // The propagation itself is the span — not the whole declaration,
         // and not one character of it.
         assert_eq!(&file.source[anchor.src..anchor.src_end], "try plain()");
@@ -554,14 +572,14 @@ mod tests {
         // `plain()` is copied from the source, so it is mapped — the user's
         // own text, and their type error to read as TypeScript phrased it.
         let diagnostic = ts_at(&file, "plain()", 2554, "Expected 1 arguments, but got 0.");
-        assert!(translate_on_glue(&file, &diagnostic).is_none());
+        assert!(translate_on_glue(&file, &diagnostic, &declarations(&file)).is_none());
     }
 
     #[test]
     fn an_unrecognized_code_on_glue_is_not_guessed_at() {
         let file = project("function f() {\n  const a = try plain();\n  return a;\n}\n");
         let diagnostic = ts_at(&file, "$rl_t0.kind", 2739, "Type is missing properties.");
-        assert!(translate_on_glue(&file, &diagnostic).is_none());
+        assert!(translate_on_glue(&file, &diagnostic, &declarations(&file)).is_none());
     }
 
     #[test]
@@ -575,7 +593,8 @@ mod tests {
             2339,
             "Property 'kind' does not exist on type 'Plain'.",
         );
-        let (anchor, said) = translate_on_glue(&file, &diagnostic).expect("translated");
+        let (anchor, said) =
+            translate_on_glue(&file, &diagnostic, &declarations(&file)).expect("translated");
         assert_eq!(&file.source[anchor.src..anchor.src_end], "match (e)");
         assert!(said.starts_with("match on a tag pattern"), "{said}");
     }

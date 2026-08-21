@@ -14,7 +14,7 @@ use std::sync::Arc;
 use super::projection::{self, Probes, ProjectedDocument};
 use super::snapshot::Snapshot;
 use crate::AnchorKind;
-use crate::analysis::PayloadAlphabet;
+use crate::analysis::{DeclaredEnum, PayloadAlphabet};
 use crate::typescript::backend::{Answers, Diagnostic as TsDiagnostic, Resolution};
 
 /// One reported problem, at a position in a file the user can open.
@@ -93,7 +93,16 @@ type MatchAlphabets = (usize, Vec<Vec<String>>);
 /// through unchanged rather than guessed at, because silently restating an
 /// error as something it is not is worse than an ugly message. The original
 /// text rides along in every translation for the same reason.
-pub(crate) fn translate(kind: AnchorKind, code: u32, message: &str) -> Option<String> {
+///
+/// `declarations` is the file's declaration table ([`crate::pattern_analyses`]).
+/// It is what lets the translation say `Test.OutOfRange` where TypeScript
+/// wrote `{ kind: "OutOfRange"; value: number; }` — see [`name_types`].
+pub(crate) fn translate(
+    kind: AnchorKind,
+    code: u32,
+    message: &str,
+    declarations: &[DeclaredEnum],
+) -> Option<String> {
     let said = match (kind, code) {
         // `.kind` / `.value` reached for on something that is not a Result.
         (AnchorKind::Try, 2339 | 2551 | 2571) => {
@@ -127,7 +136,281 @@ pub(crate) fn translate(kind: AnchorKind, code: u32, message: &str) -> Option<St
         }
         _ => return None,
     };
-    Some(format!("{said} (ts{code}: {})", message.trim()))
+    let message = message.trim();
+    match name_types(message, declarations) {
+        Some(named) => Some(format!(
+            "{said} (in rl's names: {named}) (ts{code}: {message})"
+        )),
+        None => Some(format!("{said} (ts{code}: {message})")),
+    }
+}
+
+/// The message again, with every structural case type the declaration table
+/// **uniquely** recognizes written as the rl name it lowers from — `None`
+/// when it recognizes none of them and the restatement would be the message
+/// itself.
+///
+/// TypeScript has no word for an rl case: `Test.OutOfRange` lowers to a
+/// member of a union type, so a diagnostic about one prints the member —
+/// `{ kind: "OutOfRange"; value: number; }` — and the reader is left to
+/// match it back against a declaration by eye. rl can do that matching: the
+/// tag and the payload's field names name a case, and the table says which
+/// enum declares it.
+///
+/// Two rules keep the restatement honest, and both are the whitelist rule
+/// of [`translate`] again:
+///
+/// - A tag two enums in scope declare is **not** named. The point is to say
+///   which declaration this is, and a guess between two says nothing.
+/// - A member whose field names are not exactly the case's is not named
+///   either — it is some other type that happens to carry the same tag.
+///
+/// A union of members that covers every case of one enum is the enum
+/// itself (`ParseError`), which is how the return type in the motivating
+/// example comes back to its declared name; a partial union stays a union
+/// of named cases (`ParseError.NotANumber | ParseError.Overflow`).
+///
+/// The restatement is a reading aid and never replaces the original — the
+/// caller carries TypeScript's own text along with it, because a name rl
+/// got wrong has to be checkable against what the checker actually said.
+fn name_types(message: &str, declarations: &[DeclaredEnum]) -> Option<String> {
+    let members = case_members(message, declarations);
+    if members.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    let mut at = 0;
+    for run in union_runs(message, &members) {
+        let (first, last) = (&members[run.start], &members[run.end - 1]);
+        out.push_str(&message[at..first.start]);
+        match collapsed(&members[run.start..run.end], declarations) {
+            Some(name) => out.push_str(&name),
+            None => {
+                let named: Vec<String> = members[run.start..run.end]
+                    .iter()
+                    .map(|m| format!("{}.{}", m.enum_name, m.tag))
+                    .collect();
+                out.push_str(&named.join(" | "));
+            }
+        }
+        at = last.end;
+    }
+    out.push_str(&message[at..]);
+    Some(out)
+}
+
+/// One structural case type found in a message, resolved to its
+/// declaration.
+struct CaseMember {
+    /// Byte span of the `{ ... }` in the message.
+    start: usize,
+    end: usize,
+    /// The enum that declares the case, under the name the analyzed file
+    /// calls it by.
+    enum_name: String,
+    /// The case's tag.
+    tag: String,
+}
+
+/// A `[start, end)` range of members that a message writes as one union.
+struct Run {
+    start: usize,
+    end: usize,
+}
+
+/// Every structural case type in `message`, in order, that the table names.
+///
+/// The scan is quote-aware — a `{` inside a string literal opens nothing —
+/// and it descends into an object type it does not recognize, so a case
+/// nested in some other type is still found.
+fn case_members(message: &str, declarations: &[DeclaredEnum]) -> Vec<CaseMember> {
+    let bytes = message.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'"' => at = string_end(bytes, at),
+            b'{' => match object_end(bytes, at) {
+                Some(end) => match recognize(&message[at..end], declarations) {
+                    Some((enum_name, tag)) => {
+                        out.push(CaseMember {
+                            start: at,
+                            end,
+                            enum_name,
+                            tag,
+                        });
+                        at = end;
+                    }
+                    // Not a case of its own — but one may be written
+                    // inside it.
+                    None => at += 1,
+                },
+                None => at += 1,
+            },
+            _ => at += 1,
+        }
+    }
+    out
+}
+
+/// The members grouped into the unions the message writes them as: members
+/// separated by exactly `" | "` belong to one union.
+fn union_runs(message: &str, members: &[CaseMember]) -> Vec<Run> {
+    let mut runs: Vec<Run> = Vec::new();
+    for (i, member) in members.iter().enumerate() {
+        match runs.last_mut() {
+            Some(run) if &message[members[i - 1].end..member.start] == " | " => run.end = i + 1,
+            _ => runs.push(Run {
+                start: i,
+                end: i + 1,
+            }),
+        }
+    }
+    runs
+}
+
+/// The enum name a whole union collapses to — `Some` only when its members
+/// are the cases of one enum, each once, all of them.
+fn collapsed(run: &[CaseMember], declarations: &[DeclaredEnum]) -> Option<String> {
+    let first = run.first()?;
+    if run.iter().any(|m| m.enum_name != first.enum_name) {
+        return None;
+    }
+    let declared = declarations.iter().find(|d| d.name == first.enum_name)?;
+    if declared.constructors.len() != run.len() {
+        return None;
+    }
+    declared
+        .constructors
+        .iter()
+        .all(|c| run.iter().any(|m| m.tag == c.tag))
+        .then(|| first.enum_name.clone())
+}
+
+/// The case an object type names — `Some((enum, tag))` when exactly one
+/// declaration in scope declares the tag *and* its payload is exactly the
+/// fields written here.
+fn recognize(text: &str, declarations: &[DeclaredEnum]) -> Option<(String, String)> {
+    let (tag, mut fields) = object_fields(text)?;
+    fields.sort_unstable();
+    let mut candidates = declarations
+        .iter()
+        .filter(|d| d.constructors.iter().any(|c| c.tag == tag));
+    let declared = candidates.next()?;
+    if candidates.next().is_some() {
+        return None; // two declarations answer to the tag — neither is *the* one
+    }
+    let constructor = declared.constructors.iter().find(|c| c.tag == tag)?;
+    let mut declared_fields: Vec<&str> = constructor
+        .fields
+        .iter()
+        .flatten()
+        .map(|f| f.name.as_str())
+        .collect();
+    declared_fields.sort_unstable();
+    (declared_fields == fields).then(|| (declared.name.clone(), tag))
+}
+
+/// An object type's `kind` tag and the names of its other members — `None`
+/// when it has no string-literal `kind`, or is written in a shape this
+/// reader does not fully understand (a method, an index signature).
+fn object_fields(text: &str) -> Option<(String, Vec<&str>)> {
+    let inner = text.strip_prefix('{')?.strip_suffix('}')?;
+    let mut tag = None;
+    let mut fields = Vec::new();
+    for entry in split_top(inner, b';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let colon = split_top(entry, b':').next()?.len();
+        if colon >= entry.len() {
+            return None; // no `name: type` — not a property
+        }
+        let name = entry[..colon].trim().trim_end_matches('?');
+        let value = entry[colon + 1..].trim();
+        if !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+        {
+            return None; // an index signature, a quoted name, a call
+        }
+        if name == "kind" {
+            let literal = value.strip_prefix('"')?.strip_suffix('"')?;
+            if literal.contains(['"', '|']) {
+                return None; // a union of tags, not one case
+            }
+            tag = Some(literal.to_string());
+        } else {
+            fields.push(name);
+        }
+    }
+    Some((tag?, fields))
+}
+
+/// `text` split on `sep` where nothing encloses it — a `;` inside a nested
+/// object, a bracket or a string separates nothing.
+fn split_top(text: &str, sep: u8) -> impl Iterator<Item = &str> {
+    let bytes = text.as_bytes();
+    let mut cuts = Vec::new();
+    let (mut at, mut depth, mut start) = (0, 0usize, 0);
+    while at < bytes.len() {
+        match bytes[at] {
+            b'"' => {
+                at = string_end(bytes, at);
+                continue;
+            }
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => depth = depth.saturating_sub(1),
+            b if b == sep && depth == 0 => {
+                cuts.push(&text[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    cuts.push(&text[start..]);
+    cuts.into_iter()
+}
+
+/// The byte just past the `}` that closes the object type opening at
+/// `at` — `None` when nothing closes it.
+fn object_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = at;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i = string_end(bytes, i);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The byte just past the string literal opening at `at`.
+fn string_end(bytes: &[u8], at: usize) -> usize {
+    let quote = bytes[at];
+    let mut i = at + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b if b == quote => return i + 1,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
 }
 
 /// Builds the pass's diagnostics from the checker's answers, in the exact
@@ -140,6 +423,10 @@ pub(crate) fn report(
 ) -> Vec<Diagnostic> {
     let files = snapshot.files();
     let mut out = Vec::new();
+    // A file's declaration table, built the first time a translation on
+    // that file asks for it: it costs a parse of the file and of what it
+    // imports, and most passes translate nothing at all.
+    let mut declarations: HashMap<PathBuf, Vec<DeclaredEnum>> = HashMap::new();
 
     // TypeScript's own diagnostics, at the position in the `.rl` file the
     // offending code was written at.
@@ -157,20 +444,31 @@ pub(crate) fn report(
             continue;
         };
         // Glue is not the user's code. When rlc can say what the construct
-        // meant, it says that — over the construct's own text.
-        if let Some((anchor, said)) = projection::translate_on_glue(file, diagnostic) {
-            let entry = Diagnostic {
-                path: file.source_path.clone(),
-                position: Some(crate::line_col(&file.source, anchor.src)),
-                end: Some(crate::line_col(&file.source, anchor.src_end)),
-                message: said,
-            };
-            // One construct's glue can draw several TypeScript errors that
-            // all mean the same rl thing (`$rl_t.kind` and `$rl_t.value`).
-            if !out.contains(&entry) {
-                out.push(entry);
+        // meant, it says that — over the construct's own text. The
+        // declaration table its wording names types from is built only for
+        // a file that has a diagnostic on glue at all, and once for it.
+        if projection::glue_anchor(file, diagnostic.start).is_some() {
+            let declared = declarations
+                .entry(file.source_path.clone())
+                .or_insert_with(|| {
+                    crate::pattern_analyses(&file.source, &externs_of(files, file)).declarations
+                });
+            if let Some((anchor, said)) = projection::translate_on_glue(file, diagnostic, declared)
+            {
+                let entry = Diagnostic {
+                    path: file.source_path.clone(),
+                    position: Some(crate::line_col(&file.source, anchor.src)),
+                    end: Some(crate::line_col(&file.source, anchor.src_end)),
+                    message: said,
+                };
+                // One construct's glue can draw several TypeScript errors
+                // that all mean the same rl thing (`$rl_t.kind` and
+                // `$rl_t.value`).
+                if !out.contains(&entry) {
+                    out.push(entry);
+                }
+                continue;
             }
-            continue;
         }
         match projection::diagnostic_source_offset(file, diagnostic.start) {
             Some((nearest, exact)) => {
@@ -296,13 +594,7 @@ pub(crate) fn report(
         // imported ones have to be collected — otherwise a payload whose
         // type is an imported enum reads as an unknown alphabet and its
         // holes go unreported.
-        let externs = super::language::externs_of(&file.source_path, &file.source, &|target| {
-            files
-                .iter()
-                .find(|f| f.source_path == target)
-                .map(|f| f.source.clone())
-                .or_else(|| std::fs::read_to_string(target).ok())
-        });
+        let externs = externs_of(files, file);
         let asked_payloads = payloads
             .get(&file.source_path)
             .map_or(&[][..], Vec::as_slice);
@@ -536,6 +828,23 @@ pub(crate) fn match_declarations(
     out
 }
 
+/// The enum declarations one file's direct `.rl` imports bring into scope,
+/// preferring the snapshot's own text for a file it holds — the same
+/// 1-hop collection every other surface does, so an imported enum is known
+/// under the name the import gave it.
+fn externs_of(
+    files: &[Arc<ProjectedDocument>],
+    file: &ProjectedDocument,
+) -> Vec<crate::EnumSymbol> {
+    super::language::externs_of(&file.source_path, &file.source, &|target| {
+        files
+            .iter()
+            .find(|f| f.source_path == target)
+            .map(|f| f.source.clone())
+            .or_else(|| std::fs::read_to_string(target).ok())
+    })
+}
+
 /// A covered literal as it reads in a message.
 fn display_literal(literal: &crate::Literal) -> String {
     match literal {
@@ -543,5 +852,120 @@ fn display_literal(literal: &crate::Literal) -> String {
         crate::Literal::Number(n) => n.to_string(),
         crate::Literal::BigInt(d) => format!("{d}n"),
         crate::Literal::Boolean(b) => b.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The declaration table of a source, as a translation sees it.
+    fn table(source: &str) -> Vec<DeclaredEnum> {
+        crate::pattern_analyses(source, &[]).declarations
+    }
+
+    /// The motivating example of TASK-118: the propagated `Err` and the
+    /// return type it does not fit, both said as the user declared them.
+    #[test]
+    fn a_case_is_named_and_a_full_union_is_its_enum() {
+        let declarations = table(
+            "enum Test { OutOfRange(value: number), Empty }\n\
+             enum ParseError { NotANumber(text: string) }\n",
+        );
+        let said = translate(
+            AnchorKind::Try,
+            2322,
+            "Type 'Err<{ kind: \"OutOfRange\"; value: number; }>' is not assignable to type \
+             'Result<string, { kind: \"NotANumber\"; text: string; }>'.",
+            &declarations,
+        )
+        .expect("translated");
+        assert!(
+            said.contains(
+                "(in rl's names: Type 'Err<Test.OutOfRange>' is not assignable to type \
+                 'Result<string, ParseError>'.)"
+            ),
+            "{said}"
+        );
+        // The original rides along, unchanged — the names are checkable.
+        assert!(
+            said.contains("(ts2322: Type 'Err<{ kind: \"OutOfRange\""),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_partial_union_stays_a_union_of_named_cases() {
+        let declarations = table("enum E { A(x: number), B, C }\n");
+        let named = name_types(
+            "Type '{ kind: \"A\"; x: number; } | { kind: \"B\"; }' is not assignable to type 'E'.",
+            &declarations,
+        )
+        .expect("named");
+        assert_eq!(
+            named,
+            "Type 'E.A | E.B' is not assignable to type 'E'.".to_string()
+        );
+    }
+
+    #[test]
+    fn a_tag_two_declarations_answer_to_is_not_named() {
+        let declarations = table("enum A { Empty }\nenum B { Empty }\n");
+        assert_eq!(
+            name_types("Type '{ kind: \"Empty\"; }'.", &declarations),
+            None
+        );
+    }
+
+    #[test]
+    fn a_type_that_only_shares_a_tag_is_not_named() {
+        // Same tag, different payload — some other type, not this case.
+        let declarations = table("enum E { A(x: number) }\n");
+        assert_eq!(
+            name_types("Type '{ kind: \"A\"; y: string; }'.", &declarations),
+            None
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_structural_case_is_left_alone() {
+        let declarations = table("enum E { A(x: number), B }\n");
+        assert_eq!(
+            name_types(
+                "Property 'kind' does not exist on type 'number'.",
+                &declarations
+            ),
+            None,
+        );
+        // ... and a translation of it carries no naming clause.
+        let said = translate(
+            AnchorKind::Try,
+            2339,
+            "Property 'kind' does not exist.",
+            &declarations,
+        )
+        .expect("translated");
+        assert!(!said.contains("in rl's names"), "{said}");
+    }
+
+    #[test]
+    fn a_case_nested_in_another_type_is_named_where_it_stands() {
+        let declarations = table("enum E { A(x: number), B }\n");
+        let named = name_types(
+            "Type 'Array<{ kind: \"A\"; x: number; }>' is not assignable.",
+            &declarations,
+        )
+        .expect("named");
+        assert_eq!(named, "Type 'Array<E.A>' is not assignable.".to_string());
+    }
+
+    #[test]
+    fn a_tag_union_names_nothing() {
+        // `{ kind: "A" | "B" }` is not one case, so it is not one name.
+        let declarations = table("enum E { A(x: number), B }\n");
+        assert_eq!(
+            name_types("Type '{ kind: \"A\" | \"B\"; }'.", &declarations),
+            None
+        );
     }
 }

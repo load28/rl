@@ -790,6 +790,11 @@ impl Project {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
+        // The declaration table a translated message names its types from,
+        // built on the first translation of this pass: most passes
+        // translate nothing, and building it parses the file and its
+        // imports.
+        let mut declarations: Option<Vec<crate::analysis::DeclaredEnum>> = None;
         for item in items {
             let severity = item["severity"].as_u64().unwrap_or(1);
             if severity > 2 {
@@ -814,20 +819,24 @@ impl Project {
                 let from = mapper::to_utf16(&doc.source, anchor.src);
                 let to = mapper::to_utf16(&doc.source, anchor.src_end).max(from + 1);
                 let range = source_range(&doc.source, from, to);
-                let entry = match crate::engine::semantics::translate(anchor.kind, code, &raw) {
-                    Some(said) => ServiceDiagnostic {
-                        range,
-                        message: said,
-                        code,
-                        warning: severity == 2,
-                    },
-                    None => ServiceDiagnostic {
-                        range,
-                        message: format!("{raw} (in code rlc generated for this construct)"),
-                        code,
-                        warning: severity == 2,
-                    },
-                };
+                let declared = declarations.get_or_insert_with(|| {
+                    analyses_of(&self.overlays, &path, &doc.source).declarations
+                });
+                let entry =
+                    match crate::engine::semantics::translate(anchor.kind, code, &raw, declared) {
+                        Some(said) => ServiceDiagnostic {
+                            range,
+                            message: said,
+                            code,
+                            warning: severity == 2,
+                        },
+                        None => ServiceDiagnostic {
+                            range,
+                            message: format!("{raw} (in code rlc generated for this construct)"),
+                            code,
+                            warning: severity == 2,
+                        },
+                    };
                 // One construct's glue can draw several TypeScript errors
                 // that all mean the same rl thing.
                 if !out.contains(&entry) {
