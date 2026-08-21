@@ -614,7 +614,8 @@ impl Checker {
                          things (`$rl_m.kind` vs `$rl_m`); split them into two matches"
                     ),
                 )
-                .code(DiagnosticCode::MatchMixedPatterns),
+                .code(DiagnosticCode::MatchMixedPatterns)
+                .owner(expr.keyword_off, expr.body_close + 1),
             );
             // A mixed match has no one discriminant, so its coverage answer
             // is not worth asking — report the cause, not its effects.

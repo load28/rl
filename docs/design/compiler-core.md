@@ -213,6 +213,12 @@ differences, span }`으로 정규화한다. TypeScript 진단 문자열을 다�
   expected/found 관계가 있으면 이를 원인으로 선택하고 같은 lowering anchor의
   프로퍼티·비교 진단은 결과로 분류한다. 정확한 rl 진단 범위와 겹치는 구조화된
   타입 결과도 rl 원인 뒤에 중복 표시하지 않는다.
+- TASK-145에서 checker span의 시작과 끝을 함께 투영한다. 한 verbatim mapping이
+  span 전체를 덮을 때만 `Exact`이고, 생성 glue와 걸치면 가장 안쪽 lowering의
+  `Anchor`, 둘 다 없을 때만 `Nearest`다. anchor는 사용자가 볼 primary span과
+  원인·결과를 묶는 syntax owner span을 따로 가진다. RL 원인과 checker 결과는
+  같은 owner일 때만 억제한다. 이 분류기는 batch typed check와 언어 서비스가
+  함께 사용한다.
 
 ## 9. Flow IR (Phase 5)
 

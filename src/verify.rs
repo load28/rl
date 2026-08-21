@@ -137,6 +137,7 @@ pub(crate) fn at_source(
             offset: None,
             end: None,
             code,
+            owner: None,
         },
     }
 }

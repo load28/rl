@@ -557,7 +557,8 @@ fn scrutinee_position(emit: &MappedEmit, keyword_offset: usize) -> Option<usize>
 /// the caller's because the table costs a parse of the file (and of what it
 /// imports), which is worth doing once per file rather than once per
 /// diagnostic.
-pub(crate) fn translate_on_glue(
+#[cfg(test)]
+fn translate_on_glue(
     file: &ProjectedDocument,
     diagnostic: &crate::typescript::backend::Diagnostic,
     declarations: &[crate::analysis::DeclaredEnum],
@@ -574,10 +575,8 @@ pub(crate) fn translate_on_glue(
 
 /// The construct whose glue a diagnostic's start lands in — `None` when the
 /// position is the user's own text (mapped) or belongs to no construct.
-pub(crate) fn glue_anchor(
-    file: &ProjectedDocument,
-    utf16_start: usize,
-) -> Option<crate::EmitAnchor> {
+#[cfg(test)]
+fn glue_anchor(file: &ProjectedDocument, utf16_start: usize) -> Option<crate::EmitAnchor> {
     let out = mapper::from_utf16(&file.emit.code, utf16_start);
     if mapper::to_source_inclusive(&file.emit.mappings, out).is_some() {
         return None;
@@ -585,23 +584,35 @@ pub(crate) fn glue_anchor(
     file.emit.anchor_at(out).copied()
 }
 
-pub(crate) fn diagnostic_source_offset(
+pub(crate) fn diagnostic_origin(
     file: &ProjectedDocument,
     utf16_start: usize,
-) -> Option<(usize, bool)> {
-    let out = mapper::from_utf16(&file.emit.code, utf16_start);
-    mapper::to_source_or_nearest(&file.emit.mappings, out)
+    utf16_end: usize,
+) -> Option<mapper::DiagnosticOrigin> {
+    mapper::diagnostic_origin(
+        &file.emit.mappings,
+        &file.emit.anchors,
+        mapper::from_utf16(&file.emit.code, utf16_start),
+        mapper::from_utf16(&file.emit.code, utf16_end),
+    )
+}
+
+fn source_extent(origin: mapper::DiagnosticOrigin) -> (usize, usize) {
+    match origin {
+        mapper::DiagnosticOrigin::Exact { start, end } => (start, end.max(start.saturating_add(1))),
+        mapper::DiagnosticOrigin::Anchor(anchor) => (anchor.src, anchor.src_end),
+        mapper::DiagnosticOrigin::Nearest { start } => (start, start.saturating_add(1)),
+    }
 }
 
 pub(crate) fn diagnostic_intersects_recovery(
     file: &ProjectedDocument,
     diagnostic: &crate::typescript::backend::Diagnostic,
 ) -> bool {
-    let Some((start, _)) = diagnostic_source_offset(file, diagnostic.start) else {
+    let Some(origin) = diagnostic_origin(file, diagnostic.start, diagnostic.end) else {
         return false;
     };
-    let end = diagnostic_source_offset(file, diagnostic.end)
-        .map_or(start.saturating_add(1), |(end, _)| end.max(start + 1));
+    let (start, end) = source_extent(origin);
     file.recovered
         .iter()
         .any(|&(recovery_start, recovery_end)| start < recovery_end && recovery_start < end)
@@ -621,17 +632,21 @@ pub(crate) fn diagnostic_intersects_rl_error(
         .map_or((diagnostic.start, diagnostic.end), |mismatch| {
             (mismatch.start, mismatch.end)
         });
-    let Some((start, _)) = diagnostic_source_offset(file, diagnostic_start) else {
+    let Some(origin) = diagnostic_origin(file, diagnostic_start, diagnostic_end) else {
         return false;
     };
-    let Some((end, _)) = diagnostic_source_offset(file, diagnostic_end) else {
-        return false;
-    };
-    let end = end.max(start.saturating_add(1));
+    let (start, end) = source_extent(origin);
     file.rl_diagnostics.iter().any(|rl| {
-        let (Some(rl_start), Some(rl_end)) = (rl.start, rl.end) else {
+        if let (mapper::DiagnosticOrigin::Anchor(anchor), Some(owner)) = (origin, rl.owner)
+            && owner.start == anchor.src
+            && owner.end == anchor.owner_end
+        {
+            return true;
+        }
+        let Some(rl_start) = rl.start else {
             return false;
         };
+        let rl_end = rl.end.unwrap_or_else(|| rl_start.saturating_add(1));
         start < rl_end && rl_start < end
     })
 }

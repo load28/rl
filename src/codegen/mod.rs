@@ -133,6 +133,7 @@ impl<'a> Emitter<'a> {
                     // `match (scrutinee)` — the arms are the user's own
                     // code and carry mappings of their own.
                     expr.scrutinee_span.end + 1,
+                    expr.body_close + 1,
                     matches::emit_match(self, expr),
                 ),
                 Segment::TupleMatch(expr) => out.anchored(
@@ -141,11 +142,13 @@ impl<'a> Emitter<'a> {
                     expr.scrutinees
                         .last()
                         .map_or(expr.keyword_off, |(span, _)| span.end + 1),
+                    expr.body_close + 1,
                     matches::emit_tuple_match(self, expr),
                 ),
                 Segment::Try(stmt) => out.anchored(
                     AnchorKind::Try,
                     stmt.span.start,
+                    stmt.span.end,
                     stmt.span.end,
                     self.emit_try(stmt),
                 ),
@@ -155,17 +158,22 @@ impl<'a> Emitter<'a> {
                     // The refutable binding and what it destructures; the
                     // `else` block is ordinary code.
                     stmt.head_span.end,
+                    stmt.head_span.end,
                     self.emit_let_else(stmt),
                 ),
                 Segment::IfLet(stmt) => out.anchored(
                     AnchorKind::IfLet,
                     stmt.keyword_off,
                     stmt.head_span.end,
+                    stmt.head_span.end,
                     self.emit_if_let(stmt),
                 ),
                 Segment::Pipe(pipe) => out.anchored(
                     AnchorKind::Pipe,
                     pipe.head_span.start,
+                    pipe.steps
+                        .last()
+                        .map_or(pipe.head_span.end, |step| step.span.end),
                     pipe.steps
                         .last()
                         .map_or(pipe.head_span.end, |step| step.span.end),
@@ -340,6 +348,7 @@ impl<'a> Emitter<'a> {
                     code.anchored(
                         AnchorKind::ResultBind,
                         bind.binding_span.start,
+                        self.trimmed_end(bind.binding_span.start, bind.expr_span.end),
                         self.trimmed_end(bind.binding_span.start, bind.expr_span.end),
                         one,
                     );

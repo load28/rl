@@ -66,9 +66,11 @@ pub(crate) struct RlError {
     /// [`RlError::code`]; a site that forgets still compiles, as
     /// [`DiagnosticCode::Other`], which is why sema's tests pin the codes.
     pub code: DiagnosticCode,
+    /// Complete syntax node that owns consequences of this cause.
+    pub owner: Option<DiagnosticOwner>,
 }
 
-use crate::diagnostics::DiagnosticCode;
+use crate::diagnostics::{DiagnosticCode, DiagnosticOwner};
 
 impl RlError {
     /// An error at one byte, its width left to the consumer.
@@ -78,6 +80,7 @@ impl RlError {
             offset: Some(offset),
             end: None,
             code: DiagnosticCode::Other,
+            owner: None,
         }
     }
 
@@ -89,6 +92,7 @@ impl RlError {
             offset: Some(start),
             end: Some(end.max(start)),
             code: DiagnosticCode::Other,
+            owner: None,
         }
     }
 
@@ -96,6 +100,13 @@ impl RlError {
     #[must_use]
     pub fn code(mut self, code: DiagnosticCode) -> Self {
         self.code = code;
+        self
+    }
+
+    /// Associates this cause with the complete syntax node it invalidates.
+    #[must_use]
+    pub fn owner(mut self, start: usize, end: usize) -> Self {
+        self.owner = Some(DiagnosticOwner { start, end });
         self
     }
 }

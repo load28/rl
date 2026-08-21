@@ -16,6 +16,7 @@ use super::snapshot::Snapshot;
 use crate::AnchorKind;
 use crate::analysis::{DeclaredEnum, PayloadAlphabet};
 use crate::typescript::backend::{Answers, Diagnostic as TsDiagnostic, Resolution};
+use crate::typescript::mapper::DiagnosticOrigin;
 
 /// One reported problem, at a position in a file the user can open.
 ///
@@ -594,8 +595,11 @@ pub(crate) fn report(
             let file = files
                 .iter()
                 .find(|file| file.module_path == diagnostic.file)?;
-            let (start, _) = diagnostic_span(diagnostic);
-            let anchor = projection::glue_anchor(file, start)?;
+            let (start, end) = diagnostic_span(diagnostic);
+            let DiagnosticOrigin::Anchor(anchor) = projection::diagnostic_origin(file, start, end)?
+            else {
+                return None;
+            };
             Some((file.source_path.clone(), anchor.src, anchor.kind))
         })
         .collect();
@@ -617,16 +621,25 @@ pub(crate) fn report(
         if projection::diagnostic_intersects_recovery(file, diagnostic) {
             continue;
         }
-        if diagnostic.mismatch.is_some()
-            && projection::diagnostic_intersects_rl_error(file, diagnostic)
-        {
+        if projection::diagnostic_intersects_rl_error(file, diagnostic) {
             continue;
         }
+        let Some(origin) = projection::diagnostic_origin(file, diagnostic_start, diagnostic_end)
+        else {
+            out.push(Diagnostic {
+                path: file.source_path.clone(),
+                position: None,
+                end: None,
+                message: diagnostic_message(diagnostic, &[]),
+                code: Some(format!("ts{}", diagnostic.code)),
+            });
+            continue;
+        };
         // Glue is not the user's code. When rlc can say what the construct
         // meant, it says that — over the construct's own text. The
         // declaration table its wording names types from is built only for
         // a file that has a diagnostic on glue at all, and once for it.
-        if let Some(anchor) = projection::glue_anchor(file, diagnostic_start) {
+        if let DiagnosticOrigin::Anchor(anchor) = origin {
             if anchor.kind == AnchorKind::Match
                 && semantics.get(&file.source_path).is_some_and(|semantics| {
                     semantics.analyses.matches.iter().any(|analysis| {
@@ -679,7 +692,8 @@ pub(crate) fn report(
                 .get(&file.source_path)
                 .map(|s| s.analyses.declarations.as_slice())
                 .unwrap_or_default();
-            if let Some((anchor, said)) = projection::translate_on_glue(file, diagnostic, declared)
+            if let Some(said) =
+                translate(anchor.kind, diagnostic.code, &diagnostic.message, declared)
             {
                 let entry = Diagnostic {
                     path: file.source_path.clone(),
@@ -701,48 +715,34 @@ pub(crate) fn report(
             .get(&file.source_path)
             .map(|s| s.analyses.declarations.as_slice())
             .unwrap_or_default();
-        match projection::diagnostic_source_offset(file, diagnostic_start) {
-            Some((nearest, exact)) => {
-                // Exact: the user's own text, so the diagnostic covers
-                // exactly what TypeScript underlined. On glue: the
-                // construct that wrote it, which is the honest extent —
-                // and better than the nearest byte before the glue.
-                let anchor = projection::glue_anchor(file, diagnostic_start);
-                let (offset, end) = match (exact, anchor) {
-                    (true, _) => (
-                        nearest,
-                        projection::diagnostic_source_offset(file, diagnostic_end)
-                            .filter(|(at, exact)| *exact && *at >= nearest)
-                            .map(|(at, _)| at),
-                    ),
-                    (false, Some(anchor)) => (anchor.src, Some(anchor.src_end)),
-                    (false, None) => (nearest, None),
-                };
+        match origin {
+            DiagnosticOrigin::Exact { start, end } => {
                 out.push(Diagnostic {
                     path: file.source_path.clone(),
-                    position: Some(crate::line_col(&file.source, offset)),
-                    end: end.map(|at| crate::line_col(&file.source, at)),
-                    message: format!(
-                        "{}{}",
-                        diagnostic_message(diagnostic, declared),
-                        // By the error-layer contract rlc's output must not
-                        // draw type errors, so say where it came from rather
-                        // than pinning it on the line the position landed
-                        // near.
-                        if exact {
-                            ""
-                        } else {
-                            " (in code rlc generated for this construct)"
-                        },
-                    ),
+                    position: Some(crate::line_col(&file.source, start)),
+                    end: (end > start).then(|| crate::line_col(&file.source, end)),
+                    message: diagnostic_message(diagnostic, declared),
                     code: Some(format!("ts{}", diagnostic.code)),
                 });
             }
-            None => out.push(Diagnostic {
+            DiagnosticOrigin::Anchor(anchor) => out.push(Diagnostic {
                 path: file.source_path.clone(),
-                position: None,
+                position: Some(crate::line_col(&file.source, anchor.src)),
+                end: Some(crate::line_col(&file.source, anchor.src_end)),
+                message: format!(
+                    "{} (in code rlc generated for this construct)",
+                    diagnostic_message(diagnostic, declared)
+                ),
+                code: Some(format!("ts{}", diagnostic.code)),
+            }),
+            DiagnosticOrigin::Nearest { start } => out.push(Diagnostic {
+                path: file.source_path.clone(),
+                position: Some(crate::line_col(&file.source, start)),
                 end: None,
-                message: diagnostic_message(diagnostic, declared),
+                message: format!(
+                    "{} (in code rlc generated near this position)",
+                    diagnostic_message(diagnostic, declared)
+                ),
                 code: Some(format!("ts{}", diagnostic.code)),
             }),
         }

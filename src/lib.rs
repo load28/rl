@@ -78,7 +78,7 @@ pub use analysis::{
     NameKind, Origin, PatternAnalyses, PatternBinding, PatternSite, PayloadField, SiteKind,
     UnresolvedName, pattern_analyses,
 };
-pub use diagnostics::{Diagnostic, DiagnosticCode, Severity};
+pub use diagnostics::{Diagnostic, DiagnosticCode, DiagnosticOwner, Severity};
 pub use error::CompileError;
 pub use probe::{
     Literal, LiteralMatch, PayloadProbe, TagMatch, literal_matches, payload_probes, tag_matches,
@@ -445,6 +445,11 @@ pub struct EmitAnchor {
     /// the whole statement: for `try` it is `try <expr>`, for a `match` the
     /// keyword and its scrutinee.
     pub src_end: usize,
+    /// Byte offset just past the complete source construct that owns this
+    /// lowering. This can be wider than the primary display span: a match
+    /// diagnostic underlines only `match (subject)`, while an error in any
+    /// arm still owns consequences produced by that match's glue.
+    pub owner_end: usize,
     /// What kind of construct wrote it.
     pub kind: AnchorKind,
 }

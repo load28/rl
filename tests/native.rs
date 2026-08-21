@@ -164,6 +164,67 @@ fn check(dir: &Path, toolchain: &Toolchain) -> String {
     stderr.into_owned()
 }
 
+fn typed_server(
+    dir: &Path,
+    toolchain: &Toolchain,
+    relative: &str,
+    source: &str,
+) -> serde_json::Value {
+    use std::io::Write;
+
+    let file = dir.join(relative).canonicalize().unwrap();
+    let request = serde_json::json!({
+        "id": 1,
+        "method": "typedCheck",
+        "params": {
+            "path": file,
+            "text": source,
+            "includeTypes": true,
+        },
+    });
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rlc"));
+    command
+        .arg("--server")
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    if let Toolchain::Tree(root) = toolchain {
+        command.env("RLC_TSGO_ROOT", root);
+    }
+    let mut child = command.spawn().expect("server starts");
+    writeln!(child.stdin.as_mut().unwrap(), "{request}").unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("server answers");
+    serde_json::from_slice(String::from_utf8_lossy(&output.stdout).trim().as_bytes())
+        .expect("one JSON response")
+}
+
+fn source_slice<'a>(source: &'a str, diagnostic: &serde_json::Value) -> &'a str {
+    fn offset(source: &str, line: usize, col: usize) -> usize {
+        let line_start = source
+            .split_inclusive('\n')
+            .take(line.saturating_sub(1))
+            .map(str::len)
+            .sum::<usize>();
+        line_start
+            + source[line_start..]
+                .char_indices()
+                .nth(col.saturating_sub(1))
+                .map_or(source[line_start..].len(), |(at, _)| at)
+    }
+    let start = offset(
+        source,
+        diagnostic["line"].as_u64().unwrap() as usize,
+        diagnostic["col"].as_u64().unwrap() as usize,
+    );
+    let end = offset(
+        source,
+        diagnostic["endLine"].as_u64().unwrap() as usize,
+        diagnostic["endCol"].as_u64().unwrap() as usize,
+    );
+    &source[start..end]
+}
+
 #[test]
 fn watching_re_checks_against_the_compiler_it_already_started() {
     let root = require_tsgo!();
@@ -539,6 +600,66 @@ fn a_precise_rl_error_owns_an_overlapping_type_consequence() {
     assert!(
         out.contains("case `Circle` has no field `radiuz`") && !out.contains("type mismatch:"),
         "the direct rl cause replaces its broader checker consequence: {out}"
+    );
+}
+
+#[test]
+fn typed_diagnostic_ranges_follow_source_ownership_not_mapping_accidents() {
+    let root = require_tsgo!();
+    let source = "import { Result } from \"@rl/std\";\n\
+        enum Input { Blank, Num(value: number) }\n\
+        enum InputError { Empty }\n\
+        enum RangeError { TooLarge(value: number) }\n\
+        enum Conn { Up(value: number), Down }\n\
+        export function toPort(input: Input): Result<number, InputError> {\n\
+        \x20 return match (input) {\n\
+        \x20   Blank => Result.Err(InputError.Empty),\n\
+        \x20   Num(value) => Result.Err(RangeError.TooLarge(value)),\n\
+        \x20 };\n\
+        }\n\
+        const test = (): Result<string, number> => Result.Err(10);\n\
+        export function bind(): Result<number, InputError> {\n\
+        \x20 return result {\n\
+        \x20   const n <- test();\n\
+        \x20   n\n\
+        \x20 };\n\
+        }\n\
+        export const mixed = (c: Conn): string =>\n\
+        \x20 match (c) { Up(value) => \"up\", 404 => \"gone\", Down => \"down\" };\n";
+    let dir = project(&[("src/ranges.rl", source)]);
+    let answer = typed_server(&dir, &root, "src/ranges.rl", source);
+    let diagnostics = answer["result"]["diagnostics"].as_array().unwrap();
+
+    let match_mismatch = diagnostics
+        .iter()
+        .find(|d| {
+            d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("found `RangeError`"))
+        })
+        .unwrap_or_else(|| panic!("missing match mismatch: {answer}"));
+    assert_eq!(source_slice(source, match_mismatch), "match (input)");
+
+    let result_mismatch = diagnostics
+        .iter()
+        .find(|d| {
+            d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("expected `Result<number, InputError>`"))
+                && d["line"].as_u64().is_some_and(|line| line > 10)
+        })
+        .unwrap_or_else(|| panic!("missing result mismatch: {answer}"));
+    assert_eq!(source_slice(source, result_mismatch), "n <- test()");
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d["code"] == "match-mixed-patterns"),
+        "the direct rl cause remains: {answer}"
+    );
+    assert!(
+        diagnostics.iter().all(|d| d["code"] != "ts2678"),
+        "checker consequences owned by the invalid match are suppressed: {answer}"
     );
 }
 

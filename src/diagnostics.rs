@@ -183,6 +183,17 @@ pub struct Diagnostic {
     /// Byte offset just past the range the diagnostic covers — the
     /// construct as written. `None` leaves the width to the consumer.
     pub end: Option<usize>,
+    /// Complete syntax node that owns checker consequences of this cause.
+    pub owner: Option<DiagnosticOwner>,
+}
+
+/// Source identity of the syntax node that owns a diagnostic cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiagnosticOwner {
+    /// Byte offset where the owning syntax node starts.
+    pub start: usize,
+    /// Byte offset just past the owning syntax node.
+    pub end: usize,
 }
 
 impl Diagnostic {
@@ -214,6 +225,7 @@ impl Diagnostic {
             message: error.message,
             start: error.offset,
             end: error.end,
+            owner: error.owner,
         }
     }
 }
@@ -293,6 +305,7 @@ mod tests {
             message: "match: duplicate arm \"A\"".to_string(),
             start: Some(5),
             end: Some(6),
+            owner: None,
         };
         let e = d.to_compile_error("abc\ndef\n", Some("x.rl"));
         assert_eq!((e.line, e.col), (2, 2));

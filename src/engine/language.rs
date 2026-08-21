@@ -774,8 +774,8 @@ impl Project {
 
     /// TypeScript's type errors for one file, mapped onto its `.rl` source.
     /// Exact source spans are reported as-is. Diagnostics that land in
-    /// compiler-written glue are still surfaced at the nearest source
-    /// construct, matching the batch typed-check path.
+    /// compiler-written glue use their lowering anchor's primary source
+    /// span, matching the batch typed-check path.
     pub fn service_diagnostics(&mut self, path: &Path) -> Result<Vec<ServiceDiagnostic>, String> {
         let (doc, path) = self.serve(path)?;
         // An unhandled projection failure still gets the old raw emit-map
@@ -805,7 +805,8 @@ impl Project {
             }
             let start = u16_offset(&doc.code, position_of(&item["range"]["start"]));
             let end = u16_offset(&doc.code, position_of(&item["range"]["end"]));
-            let Some((s, e, exact)) = diagnostic_source_span(&doc, start, end) else {
+            let Some((s, e, exact, projected_anchor)) = diagnostic_source_span(&doc, start, end)
+            else {
                 continue;
             };
             if recovery_intersects(&doc, s, e) {
@@ -817,7 +818,7 @@ impl Project {
             let e = if e > s { e } else { s + 1 };
             let raw = item["message"].as_str().unwrap_or_default().to_string();
             let code = item["code"].as_u64().unwrap_or(0) as u32;
-            let glue = glue_anchor(&doc, start);
+            let glue = projected_anchor.or_else(|| glue_anchor(&doc, start));
             if let Some((anchor, class)) = glue.and_then(|anchor| {
                 crate::engine::semantics::translation_class(anchor.kind, code)
                     .map(|class| (anchor, class))
@@ -1304,24 +1305,29 @@ fn diagnostic_source_span(
     doc: &ServiceDoc,
     start: usize,
     end: usize,
-) -> Option<(usize, usize, bool)> {
+) -> Option<(usize, usize, bool, Option<crate::EmitAnchor>)> {
     let sb = mapper::from_utf16(&doc.code, start);
     let eb = mapper::from_utf16(&doc.code, end);
-    if let (Some(ss), Some(se)) = (
-        mapper::to_source_inclusive(&doc.mappings, sb),
-        mapper::to_source_inclusive(&doc.mappings, eb),
-    ) && se >= ss
-    {
-        return Some((
-            mapper::to_utf16(&doc.source, ss),
-            mapper::to_utf16(&doc.source, se),
+    match mapper::diagnostic_origin(&doc.mappings, &doc.anchors, sb, eb)? {
+        mapper::DiagnosticOrigin::Exact { start, end } => Some((
+            mapper::to_utf16(&doc.source, start),
+            mapper::to_utf16(&doc.source, end),
             true,
-        ));
+            None,
+        )),
+        mapper::DiagnosticOrigin::Anchor(anchor) => Some((
+            mapper::to_utf16(&doc.source, anchor.src),
+            mapper::to_utf16(&doc.source, anchor.src_end),
+            false,
+            Some(anchor),
+        )),
+        mapper::DiagnosticOrigin::Nearest { start } => Some((
+            mapper::to_utf16(&doc.source, start),
+            mapper::to_utf16(&doc.source, start.saturating_add(1)),
+            false,
+            None,
+        )),
     }
-
-    let (ss, exact) = mapper::to_source_or_nearest(&doc.mappings, sb)?;
-    let s = mapper::to_utf16(&doc.source, ss);
-    Some((s, s + 1, exact))
 }
 
 fn recovery_intersects(doc: &ServiceDoc, start: usize, end: usize) -> bool {

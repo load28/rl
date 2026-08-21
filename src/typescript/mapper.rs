@@ -4,12 +4,60 @@
 //! ([`crate::EmitMapping`]) → UTF-16 code unit, which is what TypeScript
 //! itself counts in. Questions travel that way; diagnostics travel back.
 //!
-//! Only bytes copied **verbatim** from the source have a source position at
-//! all. Compiler-written glue — the `switch` IIFE, a destructuring, an enum
-//! emission — belongs to no `.rl` byte, and a diagnostic landing there is
-//! reported without a mapped position rather than at a made-up one.
+//! Only bytes copied **verbatim** from the source have an exact source
+//! position. Compiler-written glue — a `switch` IIFE or destructuring —
+//! belongs to no `.rl` byte, so diagnostics crossing it use the syntax
+//! anchor that owns the lowering instead of inventing a partial mapping.
 
-use crate::EmitMapping;
+use crate::{EmitAnchor, EmitMapping};
+
+/// Where a checker diagnostic span belongs in the original source.
+///
+/// A span is exact only when one verbatim mapping covers it completely.
+/// Crossing even one byte of compiler-written glue transfers ownership to
+/// the innermost lowering anchor. `Nearest` is the last-resort position for
+/// output that has neither a complete mapping nor a recorded origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiagnosticOrigin {
+    Exact { start: usize, end: usize },
+    Anchor(EmitAnchor),
+    Nearest { start: usize },
+}
+
+/// Projects one emitted diagnostic span without inventing a partially
+/// mapped source range.
+pub(crate) fn diagnostic_origin(
+    mappings: &[EmitMapping],
+    anchors: &[EmitAnchor],
+    start: usize,
+    end: usize,
+) -> Option<DiagnosticOrigin> {
+    let end = end.max(start);
+    if let Some(mapping) = mappings
+        .iter()
+        .find(|mapping| mapping.out <= start && end <= mapping.out + mapping.len)
+    {
+        return Some(DiagnosticOrigin::Exact {
+            start: mapping.src + (start - mapping.out),
+            end: mapping.src + (end - mapping.out),
+        });
+    }
+
+    let occupied_end = end.max(start.saturating_add(1));
+    if let Some(anchor) = anchors
+        .iter()
+        .find(|anchor| anchor.out <= start && start < anchor.end)
+        .or_else(|| {
+            anchors
+                .iter()
+                .find(|anchor| anchor.out < occupied_end && start < anchor.end)
+        })
+    {
+        return Some(DiagnosticOrigin::Anchor(*anchor));
+    }
+
+    to_source_or_nearest(mappings, start).map(|(start, _)| DiagnosticOrigin::Nearest { start })
+}
 
 /// Offset of `byte` in `text`, counted in UTF-16 code units — TypeScript's
 /// own coordinate space. An offset past the end clamps to the end.
@@ -100,6 +148,32 @@ pub(crate) fn to_source_or_nearest(mappings: &[EmitMapping], out: usize) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AnchorKind;
+
+    #[test]
+    fn a_partially_mapped_diagnostic_belongs_to_its_lowering_anchor() {
+        let mappings = [EmitMapping {
+            src: 20,
+            out: 100,
+            len: 5,
+        }];
+        let anchor = EmitAnchor {
+            out: 90,
+            end: 140,
+            src: 12,
+            src_end: 25,
+            owner_end: 40,
+            kind: AnchorKind::Match,
+        };
+        assert_eq!(
+            diagnostic_origin(&mappings, &[anchor], 100, 130),
+            Some(DiagnosticOrigin::Anchor(anchor))
+        );
+        assert_eq!(
+            diagnostic_origin(&mappings, &[anchor], 101, 104),
+            Some(DiagnosticOrigin::Exact { start: 21, end: 24 })
+        );
+    }
 
     #[test]
     fn utf16_round_trips_through_multibyte_text() {
