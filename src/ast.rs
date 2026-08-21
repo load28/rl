@@ -47,16 +47,16 @@ pub(crate) struct Program {
     /// instead of `=` is never valid TypeScript, so the text cannot be
     /// passed through either.
     pub stray_results: Vec<usize>,
-    /// Byte offsets of `result` bindings written without a declaration
-    /// keyword (`b <- f();`), reported by the semantic phase.
-    pub result_missing_kw: Vec<usize>,
-    /// Byte offsets of `result` bindings written **below** a block's top
+    /// Byte spans of names in `result` bindings written without a
+    /// declaration keyword (`b <- f();`), reported by the semantic phase.
+    pub result_missing_kw: Vec<Span>,
+    /// Byte spans of `result` bindings written **below** a block's top
     /// level (inside an `if` body, a loop, a function written in the
     /// block) — a binding early-returns the block's IIFE, and only a
     /// top-level statement can (`docs/reference/language.md` §8). Same
     /// reporting story as [`Self::stray_pipes`]: the shape is never valid
     /// TypeScript, so it cannot pass through either.
-    pub result_nested_binds: Vec<usize>,
+    pub result_nested_binds: Vec<Span>,
 }
 
 /// A parser-owned error node used only by the typed projection.
@@ -452,8 +452,10 @@ pub(crate) struct TupleMatchExpr {
 /// One arm of a [`TupleMatchExpr`].
 #[derive(Debug)]
 pub(crate) struct TupleArm {
-    /// Byte offset of the pattern, for error reporting.
-    pub pattern_off: usize,
+    /// Complete byte span of the pattern as written. Semantic diagnostics
+    /// use this primary span rather than asking a consumer to guess width
+    /// from its first byte.
+    pub pattern_span: Span,
     pub pattern: TuplePattern,
     /// `Some` for a guarded arm; never attached to a bare `_` arm.
     pub guard: Option<GuardExpr>,
@@ -480,8 +482,9 @@ pub(crate) enum TuplePattern {
 #[derive(Debug)]
 pub(crate) struct Arm {
     pub pattern: Pattern,
-    /// Byte offset of the pattern, for error reporting.
-    pub pattern_off: usize,
+    /// Complete byte span of the pattern as written. This is the primary
+    /// diagnostic span for rules about the arm's pattern.
+    pub pattern_span: Span,
     /// `Some` for a guarded arm (`pattern if <cond> => body`). The parser
     /// never attaches a guard to a wildcard pattern (`_ if` fails the parse).
     pub guard: Option<GuardExpr>,

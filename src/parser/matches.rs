@@ -216,7 +216,7 @@ fn split_scrutinees(cur: &Cursor, open: usize, close: usize) -> Option<Vec<(usiz
 fn parse_arms(mut cur: Cursor) -> Option<Vec<Arm>> {
     let mut arms = Vec::new();
     while let Some(first) = cur.peek() {
-        let pattern_off = first.span.start;
+        let pattern_start = first.span.start;
 
         // pattern
         let pattern = match first.kind {
@@ -228,6 +228,7 @@ fn parse_arms(mut cur: Cursor) -> Option<Vec<Arm>> {
             TokenKind::Ident => Pattern::Tags(parse_tag_alternatives(&mut cur)?),
             _ => return None,
         };
+        let pattern_end = cur.tokens.get(cur.idx.checked_sub(1)?)?.span.end;
 
         // Only tag and literal patterns take a guard — `_ if` never parses,
         // so it passes through.
@@ -236,7 +237,10 @@ fn parse_arms(mut cur: Cursor) -> Option<Vec<Arm>> {
 
         arms.push(Arm {
             pattern,
-            pattern_off,
+            pattern_span: Span {
+                start: pattern_start,
+                end: pattern_end,
+            },
             guard,
             body_span,
             body,
@@ -257,7 +261,7 @@ fn parse_arms(mut cur: Cursor) -> Option<Vec<Arm>> {
 fn parse_tuple_arms(mut cur: Cursor) -> Option<Vec<TupleArm>> {
     let mut arms = Vec::new();
     while let Some(first) = cur.peek() {
-        let pattern_off = first.span.start;
+        let pattern_start = first.span.start;
 
         let pattern = match first.kind {
             TokenKind::Ident if cur.text(first) == "_" => {
@@ -274,12 +278,16 @@ fn parse_tuple_arms(mut cur: Cursor) -> Option<Vec<TupleArm>> {
             }
             _ => return None,
         };
+        let pattern_end = cur.tokens.get(cur.idx.checked_sub(1)?)?.span.end;
 
         let allow_guard = matches!(pattern, TuplePattern::Elems(_));
         let (guard, body_span, body, block) = parse_arm_tail(&mut cur, allow_guard)?;
 
         arms.push(TupleArm {
-            pattern_off,
+            pattern_span: Span {
+                start: pattern_start,
+                end: pattern_end,
+            },
             pattern,
             guard,
             body_span,

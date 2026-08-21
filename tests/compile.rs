@@ -1886,7 +1886,8 @@ const r = match (a, b) {
 
 #[test]
 fn tuple_match_arity_mismatch_is_an_error() {
-    let e = err("const r = match (a, b) {\n  (A, B, C) => 1,\n  _ => 0,\n};\n");
+    let src = "const r = match (a, b) {\n  (A, B, C) => 1,\n  _ => 0,\n};\n";
+    let e = err(src);
     assert!(
         e.message
             .contains("tuple pattern has 3 elements but the match has 2 scrutinees"),
@@ -1894,6 +1895,14 @@ fn tuple_match_arity_mismatch_is_an_error() {
         e.message
     );
     assert_eq!((e.line, e.col), (2, 3));
+    let diagnostic = rlc::analyze(src, &Options::default())
+        .into_iter()
+        .find(|d| d.code == rlc::DiagnosticCode::MatchTupleArity)
+        .unwrap();
+    assert_eq!(
+        &src[diagnostic.start.unwrap()..diagnostic.end.unwrap()],
+        "(A, B, C)"
+    );
 }
 
 #[test]
@@ -3881,13 +3890,17 @@ fn every_stray_construct_is_reported_not_just_the_first() {
 fn a_mixed_match_reports_the_cause_and_suppresses_its_coverage() {
     // The mixed-pattern error is the cause; that match's own exhaustiveness
     // answer would be an effect stacked on it.
-    let src = "const v = match (x) {\n  Some(v) => v,\n  1 => 0,\n};\n";
+    let src = "const v = match (x) {\n  Some(v) => v,\n  222 => 0,\n};\n";
     let diagnostics = rlc::analyze(src, &Options::default());
     let codes: Vec<_> = diagnostics.iter().map(|d| d.code).collect();
     assert_eq!(
         codes,
         [rlc::DiagnosticCode::MatchMixedPatterns],
         "{diagnostics:#?}"
+    );
+    assert_eq!(
+        &src[diagnostics[0].start.unwrap()..diagnostics[0].end.unwrap()],
+        "222"
     );
 }
 

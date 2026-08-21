@@ -422,8 +422,8 @@ impl Parser<'_> {
         let mut stray_pipes: Vec<usize> = Vec::new();
         let mut stray_if_lets: Vec<usize> = Vec::new();
         let mut stray_results: Vec<usize> = Vec::new();
-        let mut result_missing_kw: Vec<usize> = Vec::new();
-        let mut result_nested_binds: Vec<usize> = Vec::new();
+        let mut result_missing_kw: Vec<Span> = Vec::new();
+        let mut result_nested_binds: Vec<Span> = Vec::new();
         let mut seg_start = start;
         let mut i = 0usize;
 
@@ -662,7 +662,7 @@ impl Parser<'_> {
             {
                 let (attempt, nested) =
                     results::parse_result_block(Cursor::new(self, tokens, i + 1, end), tok.span);
-                result_nested_binds.extend(nested.iter().map(|span| span.start));
+                result_nested_binds.extend(nested.iter().copied());
                 recoveries.extend(nested.into_iter().map(|span| RecoveryNode {
                     span,
                     kind: RecoveryKind::Statement,
@@ -682,8 +682,8 @@ impl Parser<'_> {
                             kind: RecoveryKind::Expression,
                         });
                     }
-                    results::Attempt::MissingKeyword { at, recovery } => {
-                        result_missing_kw.push(at);
+                    results::Attempt::MissingKeyword { span, recovery } => {
+                        result_missing_kw.push(span);
                         recoveries.push(RecoveryNode {
                             span: recovery,
                             kind: RecoveryKind::Expression,

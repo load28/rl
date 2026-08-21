@@ -196,7 +196,7 @@ impl Lower {
         let arms = expr
             .arms
             .iter()
-            .map(|arm| self.lower_arm(&arm.pattern, arm.pattern_off, &arm.guard, Some(&arm.body)))
+            .map(|arm| self.lower_arm(&arm.pattern, arm.pattern_span, &arm.guard, Some(&arm.body)))
             .collect();
         let site_node = self.node(head, AstOrigin::Match);
         let site = self.hir.sites.alloc(PatternSite {
@@ -225,24 +225,19 @@ impl Lower {
             .iter()
             .map(|arm| {
                 let pattern = match &arm.pattern {
-                    ast::TuplePattern::Wildcard => self.alloc_pattern(
-                        Pat::Wildcard,
-                        Span::new(arm.pattern_off, arm.pattern_off + 1),
-                    ),
+                    ast::TuplePattern::Wildcard => {
+                        self.alloc_pattern(Pat::Wildcard, Self::span(arm.pattern_span))
+                    }
                     ast::TuplePattern::Elems(elems) => {
                         let lowered: Vec<PatternId> = elems
                             .iter()
-                            .map(|elem| self.lower_pattern(elem, arm.pattern_off))
+                            .map(|elem| self.lower_pattern(elem, arm.pattern_span.start))
                             .collect();
-                        let end = lowered
-                            .last()
-                            .and_then(|p| self.hir.source_map.pattern_span(*p))
-                            .map_or(arm.pattern_off + 1, |s| s.end);
-                        self.alloc_pattern(Pat::Tuple(lowered), Span::new(arm.pattern_off, end))
+                        self.alloc_pattern(Pat::Tuple(lowered), Self::span(arm.pattern_span))
                     }
                 };
                 let arm_node = self.node(
-                    Span::new(arm.pattern_off, arm.body_span.end),
+                    Span::new(arm.pattern_span.start, arm.body_span.end),
                     AstOrigin::Arm,
                 );
                 let guard = arm.guard.as_ref().map(|g| self.lower_guard(g));
@@ -268,17 +263,12 @@ impl Lower {
     fn lower_arm(
         &mut self,
         pattern: &ast::Pattern,
-        pattern_off: usize,
+        pattern_span: ast::Span,
         guard: &Option<ast::GuardExpr>,
         body: Option<&ast::Program>,
     ) -> SiteArm {
-        let pattern_id = self.lower_pattern(pattern, pattern_off);
-        let pattern_span = self
-            .hir
-            .source_map
-            .pattern_span(pattern_id)
-            .unwrap_or(Span::new(pattern_off, pattern_off + 1));
-        let node = self.node(pattern_span, AstOrigin::Arm);
+        let pattern_id = self.lower_pattern(pattern, pattern_span.start);
+        let node = self.node(Self::span(pattern_span), AstOrigin::Arm);
         let guard = guard.as_ref().map(|g| self.lower_guard(g));
         let body = body.map(|b| self.lower_body(b));
         SiteArm {

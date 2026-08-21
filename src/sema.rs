@@ -299,10 +299,11 @@ impl Checker {
                 .code(DiagnosticCode::StrayResult),
             );
         }
-        for &off in &program.result_missing_kw {
+        for &span in &program.result_missing_kw {
             self.error(
-                RlError::at(
-                    off,
+                RlError::span(
+                    span.start,
+                    span.end,
                     "`result` binding is missing its declaration keyword \
                      (write `const <binding> <- <expression>;`, or `let`/`var`)"
                         .to_string(),
@@ -310,10 +311,11 @@ impl Checker {
                 .code(DiagnosticCode::ResultMissingKeyword),
             );
         }
-        for &off in &program.result_nested_binds {
+        for &span in &program.result_nested_binds {
             self.error(
-                RlError::at(
-                    off,
+                RlError::span(
+                    span.start,
+                    span.end,
                     "`<-` binding must be a top-level statement of the `result` block — \
                      nested inside a block or a function it cannot early-return the \
                      block's `Err`. Hoist it to the top level, or use `match` on the \
@@ -606,8 +608,9 @@ impl Checker {
                 .find(|a| arm_kind(a).is_some_and(|k| k != first))
         {
             self.error(
-                RlError::at(
-                    other.pattern_off,
+                RlError::span(
+                    other.pattern_span.start,
+                    other.pattern_span.end,
                     format!(
                         "match: cannot mix tag patterns and literal patterns in the same match \
                          (this match starts with {first} patterns) — the two compare different \
@@ -634,8 +637,8 @@ impl Checker {
                     if idx != expr.arms.len() - 1 {
                         self.error(
                             RlError::span(
-                                arm.pattern_off,
-                                arm.pattern_off + 1,
+                                arm.pattern_span.start,
+                                arm.pattern_span.end,
                                 "match: the wildcard arm `_` must be the last arm".to_string(),
                             )
                             .code(DiagnosticCode::MatchWildcardNotLast),
@@ -765,8 +768,8 @@ impl Checker {
                     if idx != expr.arms.len() - 1 {
                         self.error(
                             RlError::span(
-                                arm.pattern_off,
-                                arm.pattern_off + 1,
+                                arm.pattern_span.start,
+                                arm.pattern_span.end,
                                 "match: the wildcard arm `_` must be the last arm".to_string(),
                             )
                             .code(DiagnosticCode::MatchWildcardNotLast),
@@ -776,8 +779,9 @@ impl Checker {
                 TuplePattern::Elems(elems) => {
                     if elems.len() != arity {
                         self.error(
-                            RlError::at(
-                                arm.pattern_off,
+                            RlError::span(
+                                arm.pattern_span.start,
+                                arm.pattern_span.end,
                                 format!(
                                     "match: tuple pattern has {} elements but the match has {} scrutinees",
                                     elems.len(),

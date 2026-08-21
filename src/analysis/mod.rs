@@ -934,7 +934,7 @@ fn analyze_match(expr: &MatchExpr, table: &Table, depth: Depth) -> MatchAnalysis
         .iter()
         .map(|arm| {
             let mut analyzed = AnalyzedArm {
-                pattern_start: arm.pattern_off,
+                pattern_start: arm.pattern_span.start,
                 body_start: arm.body_span.start,
                 body_end: arm.body_span.end,
                 pattern_bindings: Vec::new(),
@@ -987,7 +987,7 @@ fn analyze_tuple_match(expr: &TupleMatchExpr, table: &Table, depth: Depth) -> Ma
         .iter()
         .map(|arm| {
             let mut analyzed = AnalyzedArm {
-                pattern_start: arm.pattern_off,
+                pattern_start: arm.pattern_span.start,
                 body_start: arm.body_span.start,
                 body_end: arm.body_span.end,
                 pattern_bindings: Vec::new(),

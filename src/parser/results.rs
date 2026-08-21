@@ -43,10 +43,10 @@ pub(super) enum Attempt<'t> {
     /// The block carries a Result binding but does not parse as a whole —
     /// recorded for the semantic phase (it cannot pass through either).
     Malformed(Span),
-    /// A binding that forgot its declaration keyword (`b <- f();`), at the
-    /// byte offset of the name. Only reported where the text cannot be
+    /// A binding that forgot its declaration keyword (`b <- f();`), over
+    /// the complete span of the name. Only reported where the text cannot be
     /// TypeScript — see [`no_keyword_is_certain`].
-    MissingKeyword { at: usize, recovery: Span },
+    MissingKeyword { span: Span, recovery: Span },
     /// Not an rl construct: an ordinary `result` identifier and a block.
     Pass,
 }
@@ -79,7 +79,7 @@ pub(super) fn parse_result_block<'t>(
     let mut saw_bind = false;
     // Runs shaped like a binding whose declaration keyword is missing.
     // Whether they are an error is decided once the whole block is read.
-    let mut missing: Vec<usize> = Vec::new();
+    let mut missing: Vec<Span> = Vec::new();
     // Where the next item starts, in bytes and in tokens.
     let mut cut = body_span.start;
     let mut tok_cut = open + 1;
@@ -112,7 +112,7 @@ pub(super) fn parse_result_block<'t>(
         }
         match scan_bind(&cur, run_start, k) {
             BindRun::NotBind => {} // ordinary statements — keep accumulating
-            BindRun::NoKeyword { at } => missing.push(at),
+            BindRun::NoKeyword { span } => missing.push(span),
             BindRun::Malformed => return (Attempt::Malformed(recovery), nested),
             BindRun::Bind {
                 kw,
@@ -170,8 +170,8 @@ pub(super) fn parse_result_block<'t>(
         // letting the output fail to parse.
         return (
             match missing.first() {
-                Some(&at) if no_keyword_is_certain(&cur, open) => {
-                    Attempt::MissingKeyword { at, recovery }
+                Some(&span) if no_keyword_is_certain(&cur, open) => {
+                    Attempt::MissingKeyword { span, recovery }
                 }
                 _ => Attempt::Pass,
             },
@@ -180,8 +180,8 @@ pub(super) fn parse_result_block<'t>(
     }
     // The block is claimed, so the file is not TypeScript and a
     // keyword-less binding here is a mistake rlc can name.
-    if let Some(&at) = missing.first() {
-        return (Attempt::MissingKeyword { at, recovery }, nested);
+    if let Some(&span) = missing.first() {
+        return (Attempt::MissingKeyword { span, recovery }, nested);
     }
     if run_start == close {
         return (Attempt::Malformed(recovery), nested); // nothing after the last `;`
@@ -293,9 +293,9 @@ enum BindRun<'t> {
     NotBind,
     /// Bind-shaped (`const ... <- ...`) but not parseable as one.
     Malformed,
-    /// `<name> <- <expr>;` — a binding with no declaration keyword, at the
-    /// byte offset of the name.
-    NoKeyword { at: usize },
+    /// `<name> <- <expr>;` — a binding with no declaration keyword, over
+    /// the name's complete source span.
+    NoKeyword { span: Span },
     Bind {
         /// The declaration keyword.
         kw: &'t str,
@@ -473,7 +473,7 @@ fn scan_no_keyword<'t>(cur: &Cursor<'t>, from: usize, boundary: usize) -> BindRu
         }
     }
     BindRun::NoKeyword {
-        at: cur.tokens[from].span.start,
+        span: cur.tokens[from].span,
     }
 }
 

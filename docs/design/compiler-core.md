@@ -223,6 +223,11 @@ differences, span }`으로 정규화한다. TypeScript 진단 문자열을 다�
   진단도 함께 보존한다. 빠른 checker 진단은 게시 전에 같은 owner 판정을 거친다.
   따라서 잠정 진단과 batch typed 진단은 응답 시점만 다르고 원인·결과 경계는
   동일하다. VSCode 계층에서 오류 코드나 위치를 추측해 지우지 않는다.
+- TASK-147에서 semantic 패턴 진단의 primary span을 AST 단계 계약으로 올린다.
+  단일·튜플 arm은 시작 offset 대신 완전한 `pattern_span`을 소유하고 HIR·analysis·
+  sema가 이를 소비한다. 구문 노드에 귀속되는 semantic 오류는 `RlError::span`으로
+  만들어지며, 위치만 있는 진단은 원문 넓이를 실제로 알 수 없는 검증 실패에
+  한정한다. 에디터는 숫자나 괄호의 단어 경계를 추측하지 않는다.
 
 ## 9. Flow IR (Phase 5)
 

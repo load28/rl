@@ -150,7 +150,7 @@ const b = match (s) { Circle(radiuz) => radiuz, Empty => 0 };
 | 메시지 | 원인과 해결 |
 |--------|-------------|
 | `match: duplicate arm <리터럴>` | 무가드 암이 이미 덮은 리터럴이 다시 나옴. **값 기준**이라 `200`/`0xc8`, `"a"`/`'\x61'`은 같은 리터럴입니다. 위치는 두 번째 리터럴. 가드 암끼리의 반복은 에러가 아닙니다 |
-| `match: cannot mix tag patterns and literal patterns in the same match ...` | 태그 match는 `$rl_m.kind`를, 리터럴 match는 `$rl_m`을 비교하므로 한 match에 섞을 수 없습니다. 두 match로 나눕니다 (`_`는 양쪽 모두 가능) |
+| `match: cannot mix tag patterns and literal patterns in the same match ...` | 태그 match는 `$rl_m.kind`를, 리터럴 match는 `$rl_m`을 비교하므로 한 match에 섞을 수 없습니다. 두 match로 나눕니다 (`_`는 양쪽 모두 가능). 범위는 종류가 처음 달라진 패턴 전체 |
 | `match: or-pattern alternatives must all be the same kind of literal (found <종류> after <종류>)` | `"a" \| 1`처럼 종류가 다른 리터럴을 한 or-패턴에 섞었습니다. 암을 나눕니다 |
 
 ```rl
@@ -226,7 +226,7 @@ rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Man
 
 | 메시지 | 원인과 해결 |
 |--------|-------------|
-| `match: tuple pattern has <n> elements but the match has <m> scrutinees` | 튜플 패턴의 원소 수가 스크루티니 수와 다름. 위치는 패턴 시작 |
+| `match: tuple pattern has <n> elements but the match has <m> scrutinees` | 튜플 패턴의 원소 수가 스크루티니 수와 다름. 범위는 괄호를 포함한 튜플 패턴 전체 |
 | `` match: binding `<이름>` is used more than once in this tuple pattern (rename one with `field: alias`) `` | 한 튜플 패턴의 두 원소가 같은 이름을 바인딩 — 한 스코프에 두 번 선언됩니다. 별칭으로 바꿉니다: `(Some(value), Some(value: other))` |
 
 ## try / let-else

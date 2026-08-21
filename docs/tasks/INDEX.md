@@ -154,7 +154,8 @@
 | TASK-144 | 구조화된 타입 진단과 공통 렌더링 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-144](./TASK-144-structured-type-diagnostics.md) |
 | TASK-145 | 타입 진단 범위의 구문 anchor 폴백 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-145](./TASK-145-diagnostic-range-fallback.md) |
 | TASK-146 | 에디터 잠정 진단의 원인 소유권 정리 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-146](./TASK-146-editor-provisional-diagnostic-ownership.md) |
+| TASK-147 | semantic 패턴 진단의 완전한 primary span | 완료 | 2026-08-22 | 2026-08-22 | [TASK-147](./TASK-147-semantic-pattern-primary-spans.md) |
 
 ## 다음 태스크 번호
 
-**TASK-147**
+**TASK-148**

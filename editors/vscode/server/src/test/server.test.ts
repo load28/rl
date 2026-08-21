@@ -524,6 +524,29 @@ test(
 );
 
 test(
+  "semantic pattern diagnostics keep their complete source spans",
+  { skip, timeout },
+  async () => {
+    const source = [
+      "enum Conn { Up(value: number), Down }",
+      "enum Mode { Auto(), Manual }",
+      "const mixed = match (c) { Up(value) => 1, 222 => 2, Down => 3 };",
+      "const arity = match (c, m) { (Up(value)) => value, _ => 0 };",
+      "",
+    ].join("\n");
+    const diagnostics = await published(source);
+    const mixed = diagnostics.find(
+      (d: any) => d.code === "match-mixed-patterns",
+    );
+    const arity = diagnostics.find(
+      (d: any) => d.code === "match-tuple-arity",
+    );
+    assert.equal(covered(source, mixed?.range), "222");
+    assert.equal(covered(source, arity?.range), "(Up(value))");
+  },
+);
+
+test(
   "a construct that did not parse is reported where it is written",
   { skip, timeout },
   async () => {
