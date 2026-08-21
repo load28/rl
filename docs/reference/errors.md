@@ -14,6 +14,29 @@ rl 구문으로 완전히 파싱되지 않는 텍스트는 에러가 아니라 �
 에러는 **rl 구문임이 확정된 뒤의 규칙 위반**에만 발생합니다. 통과 영역의 타입
 에러는 tsc의 몫입니다.
 
+## 다중 보고
+
+한 파일의 rl 진단은 **전부, 소스 순서로** 보고됩니다 — tsc·rustc처럼
+한 번의 실행이 파일의 문제를 다 보여 줍니다. 한 구문의 에러는 다음 독립
+구문의 검사를 막지 않습니다. 복구 경계는 구문 단위입니다: 이름이 해석되지
+않은 match는 **자기** 소진성 질문만 침묵하고(원인 위에 결과를 쌓지 않기
+위해), 이웃 match는 제 답을 그대로 냅니다. 태그·리터럴이 섞인 match도
+같은 이유로 자기 소진성만 침묵합니다.
+
+`--check-types`/`--types`/에디터에서도 같습니다: 복구 가능한 rl 에러(중복
+암, 미지의 태그 등)는 그 파일의 타입 진단·`val` 진단과 **함께** 보고됩니다.
+파일 전체가 막히는 것은 산출물이 TypeScript일 수 없는 경우뿐입니다(청구되지
+못한 `|>`·`if let`·`result`, 깨진 필드 타입, 출력 자가 검사 실패).
+
+모든 진단은 안정된 **코드**를 가집니다(예: `match-not-exhaustive`,
+`unknown-case`, `val-mutation`). 코드는 규칙의 식별자이고 모든
+소비자(CLI·`--server`·에디터, 기본·typed 경로)에서 같습니다. `--server`의
+응답에 `code` 필드로 실립니다.
+
+라이브러리의 `compile()`은 계약("코드를 내놓거나 실패하거나")을 유지합니다 —
+소스 순서의 **첫** 에러를 돌려줍니다. 전체 목록은 `analyze()` /
+`compile_report()`가 답합니다.
+
 ## 진단의 범위
 
 CLI는 시작 위치만 찍지만, 진단은 그 안에 **범위**를 함께 담습니다 — 그
@@ -124,10 +147,13 @@ rlc: src/main.rl:3:10: match on literal union is not exhaustive: missing "south"
 스크루티니 타입이 유한 리터럴 유니언으로 확정될 때만 나옵니다
 ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)).
 
-**enum 소진성 메시지는 모드에 따라 다릅니다.** 기본 경로(`rlc`/`--check`)는
-자기 선언 표에서 답하므로 enum 이름을 댑니다(아래 표). `--check-types`/`--types`는
-match 위치의 *타입*에서 답하므로 이름 없이 `match is not exhaustive: missing ...`
-라고 하고, 대신 앞선 가드가 좁혀 낸 케이스는 요구하지 않습니다.
+**enum 소진성 문안은 두 경로가 한 렌더러를 씁니다.** 형태는 하나 —
+`match[ on <출처>] is not exhaustive: missing ... (add the missing arms or a
+final \`_\` arm)` — 이고 차이는 데이터입니다: 기본 경로(`rlc`/`--check`)는
+자기 선언 표에서 답하므로 enum 이름을 댈 수 있고(아래 표),
+`--check-types`/`--types`는 match 위치의 *타입*에서 답하므로 출처 없이
+`match is not exhaustive: ...`라고 하며, 대신 앞선 가드가 좁혀 낸 케이스는
+요구하지 않습니다. 진단 코드는 양쪽 다 `match-not-exhaustive`입니다.
 
 ### 소진성
 
@@ -161,8 +187,9 @@ rlc: r.rl:3:11: match on built-in enum Result is not exhaustive: missing "Ok(val
 손으로 쓴 유니언이나 해석되지 않는 import의 enum은 이 검사를 받지 않고 런타임
 가드만 남습니다 ([`language.md` §3.6](./language.md#36-소진성-검사)).
 
-튜플 match는 곱집합으로 검사하고 빠진 **조합**을 보고합니다 (5개 이상이면
-앞의 셋과 총 개수만):
+빠진 항목이 5개 이상이면 앞의 셋과 총 개수만 보고합니다 — 단일·튜플·typed
+경로 공통 규칙입니다. 튜플 match는 곱집합으로 검사하고 빠진 **조합**을
+보고합니다:
 
 ```
 rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Manual)

@@ -42,12 +42,20 @@ pub struct ProjectedDocument {
     /// The `val` bindings, mutations, declarations and passes of this file,
     /// unpaired — pairing is symbol identity, the checker's answer.
     pub(crate) val: ValProbes,
+    /// The file's own rl-level diagnostics, found while projecting — the
+    /// recoverable ones (a duplicate arm, an unknown case) that do not stop
+    /// the file from lowering. The typed pass reports them **alongside**
+    /// its own answers, so one rl error no longer hides a file's type
+    /// errors and exhaustiveness holes (TASK-117 symptom 3).
+    pub(crate) rl_diagnostics: Vec<crate::Diagnostic>,
 }
 
 impl ProjectedDocument {
     /// Projects one file: lowers it to ordinary TypeScript and derives every
-    /// probe the typed pass will ask about. An rl-level error is the file's
-    /// own, with its position.
+    /// probe the typed pass will ask about. Recoverable rl-level errors ride
+    /// along in [`ProjectedDocument::rl_diagnostics`]; only an error that
+    /// leaves the file impossible to lower
+    /// ([`crate::DiagnosticCode::blocks_projection`]) fails the projection.
     pub(crate) fn project(
         source_path: &Path,
         source: String,
@@ -65,7 +73,18 @@ impl ProjectedDocument {
             rewrite_imports: crate::ImportRewrite::Off,
             ..Options::default()
         };
-        let emit = crate::compile_mapped(&source, &options)?;
+        let report = crate::compile_report(&source, &options);
+        let Some(emit) = report.emit else {
+            // Impossible to lower. The blocking diagnostic is the file's
+            // answer; the first one in source order names it.
+            let blocked = report
+                .diagnostics
+                .iter()
+                .find(|d| d.code.blocks_projection())
+                .or_else(|| report.diagnostics.first())
+                .expect("an emission is only withheld for a diagnostic");
+            return Err(blocked.to_compile_error(&source, options.filename));
+        };
         Ok(ProjectedDocument {
             module_path: module_path_of(source_path),
             imports_std: crate::imports_std(&source),
@@ -76,6 +95,7 @@ impl ProjectedDocument {
             source_path: source_path.to_path_buf(),
             source,
             emit,
+            rl_diagnostics: report.diagnostics,
         })
     }
 }
@@ -597,6 +617,44 @@ mod tests {
             translate_on_glue(&file, &diagnostic, &declarations(&file)).expect("translated");
         assert_eq!(&file.source[anchor.src..anchor.src_end], "match (e)");
         assert!(said.starts_with("match on a tag pattern"), "{said}");
+    }
+
+    #[test]
+    fn a_recoverable_rl_error_does_not_block_the_projection() {
+        // TASK-117 symptom 3: a duplicate arm used to fail the projection
+        // (`Blocked`) and silence the file's typed diagnostics wholesale.
+        // Now the file lowers, and the error rides along for the report.
+        let file = project(
+            "enum E { A(x: number), B }\n\
+             const v = match (E.A(1)) { A(x) => x, A(x) => 0, B => 1 };\n",
+        );
+        assert!(file.emit.code.contains("switch ($rl_m.kind)"));
+        assert_eq!(file.rl_diagnostics.len(), 1);
+        assert_eq!(
+            file.rl_diagnostics[0].code,
+            crate::DiagnosticCode::MatchDuplicateArm
+        );
+    }
+
+    #[test]
+    fn resolution_diagnostics_ride_along_on_the_typed_path_too() {
+        let file = project(
+            "enum Shape { Circle(r: number), Empty }\n\
+             const v = match (s) { Circel(r) => r, Empty => 0 };\n",
+        );
+        assert_eq!(file.rl_diagnostics.len(), 1);
+        assert_eq!(
+            file.rl_diagnostics[0].code,
+            crate::DiagnosticCode::UnknownCase
+        );
+    }
+
+    #[test]
+    fn text_that_cannot_lower_still_blocks_the_projection() {
+        let err =
+            ProjectedDocument::project(Path::new("/p/src/a.rl"), "const x = 1 |> ;\n".to_string())
+                .expect_err("a stray pipe cannot be lowered");
+        assert!(err.message.contains("`|>` could not be parsed"), "{err}");
     }
 
     #[test]

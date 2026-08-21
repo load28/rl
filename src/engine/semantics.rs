@@ -41,6 +41,12 @@ pub struct Diagnostic {
     pub end: Option<(usize, usize)>,
     /// The full message, as it is shown.
     pub message: String,
+    /// The diagnostic's stable identity: an rl rule's code
+    /// ([`crate::DiagnosticCode::as_str`], e.g. `match-not-exhaustive`) or
+    /// a TypeScript code (`ts2322`). `None` only where no rule is known.
+    /// The same rule carries the same code on every path — CLI, server,
+    /// editor, typed or untyped.
+    pub code: Option<String>,
 }
 
 /// What one checked snapshot came back with.
@@ -428,6 +434,23 @@ pub(crate) fn report(
     // imports, and most passes translate nothing at all.
     let mut declarations: HashMap<PathBuf, Vec<DeclaredEnum>> = HashMap::new();
 
+    // The rl layer first: the diagnostics each file's projection found on
+    // its own (duplicate arms, unknown cases, misplaced constructs). They
+    // are rl's answers about rl's constructs, so they are reported on the
+    // rl-only path too — and they no longer gate the rest of this report
+    // (TASK-117 symptom 3): the typed answers below follow either way.
+    for file in files {
+        for d in &file.rl_diagnostics {
+            out.push(Diagnostic {
+                path: file.source_path.clone(),
+                position: d.start.map(|at| crate::line_col(&file.source, at)),
+                end: d.end.map(|at| crate::line_col(&file.source, at)),
+                message: d.message.clone(),
+                code: Some(d.code.as_str().to_string()),
+            });
+        }
+    }
+
     // TypeScript's own diagnostics, at the position in the `.rl` file the
     // offending code was written at.
     let type_diagnostics: &[TsDiagnostic] = if rl_only { &[] } else { &answers.diagnostics };
@@ -440,6 +463,7 @@ pub(crate) fn report(
                 position: None,
                 end: None,
                 message: format!("ts({}): {}", diagnostic.code, diagnostic.message),
+                code: Some(format!("ts{}", diagnostic.code)),
             });
             continue;
         };
@@ -460,6 +484,7 @@ pub(crate) fn report(
                     position: Some(crate::line_col(&file.source, anchor.src)),
                     end: Some(crate::line_col(&file.source, anchor.src_end)),
                     message: said,
+                    code: Some(format!("ts{}", diagnostic.code)),
                 };
                 // One construct's glue can draw several TypeScript errors
                 // that all mean the same rl thing (`$rl_t.kind` and
@@ -505,6 +530,7 @@ pub(crate) fn report(
                             " (in code rlc generated for this construct)"
                         },
                     ),
+                    code: Some(format!("ts{}", diagnostic.code)),
                 });
             }
             None => out.push(Diagnostic {
@@ -512,6 +538,7 @@ pub(crate) fn report(
                 position: None,
                 end: None,
                 message: format!("ts({}): {}", diagnostic.code, diagnostic.message),
+                code: Some(format!("ts{}", diagnostic.code)),
             }),
         }
     }
@@ -529,15 +556,19 @@ pub(crate) fn report(
             path: file.source_path.clone(),
             position: Some(crate::line_col(&file.source, anchor.offset)),
             end: Some(crate::line_col(&file.source, anchor.end)),
-            message: format!(
-                "match on literal union is not exhaustive: missing {} \
-                 (add the missing arms or a final `_` arm)",
-                missing
+            message: crate::diagnostics::non_exhaustive_message(
+                Some("literal union"),
+                &missing
                     .missing
                     .iter()
                     .map(display_literal)
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                    .collect::<Vec<_>>(),
+                false,
+            ),
+            code: Some(
+                crate::DiagnosticCode::MatchNotExhaustive
+                    .as_str()
+                    .to_string(),
             ),
         });
     }
@@ -620,32 +651,21 @@ pub(crate) fn report(
             if uncovered.is_empty() {
                 continue;
             }
-            // A product of positions gets long fast; the default path
-            // truncates it the same way, with the same wording.
+            // The typed pass knows the alphabet but not the declaration,
+            // so the shared renderer gets no subject — one renderer, one
+            // wording, on both pipelines (TASK-120).
             let tuple = coverage.positions.len() > 1;
-            let shown = if uncovered.len() > 4 {
-                let unit = if tuple {
-                    "combinations in total"
-                } else {
-                    "in total"
-                };
-                format!(
-                    "{}, … ({} {unit})",
-                    uncovered[..3].join(", "),
-                    uncovered.len()
-                )
-            } else {
-                uncovered.join(", ")
-            };
             out.push(Diagnostic {
                 path: file.source_path.clone(),
                 position: Some(crate::line_col(&file.source, offset)),
                 end: match_ends
                     .get(&(file.source_path.clone(), offset))
                     .map(|at| crate::line_col(&file.source, *at)),
-                message: format!(
-                    "match is not exhaustive: missing {shown} \
-                     (add the missing arms or a final `_` arm)"
+                message: crate::diagnostics::non_exhaustive_message(None, &uncovered, tuple),
+                code: Some(
+                    crate::DiagnosticCode::MatchNotExhaustive
+                        .as_str()
+                        .to_string(),
                 ),
             });
         }
@@ -715,6 +735,7 @@ pub(crate) fn report(
             position: Some(crate::line_col(&file.source, mutation.anchor.offset)),
             end: Some(crate::line_col(&file.source, mutation.anchor.end)),
             message,
+            code: Some(crate::DiagnosticCode::ValMutation.as_str().to_string()),
         });
     }
 
@@ -786,6 +807,7 @@ pub(crate) fn report(
                  through it)",
                 pass.name, described, pass.callee,
             ),
+            code: Some(crate::DiagnosticCode::ValPass.as_str().to_string()),
         });
     }
 

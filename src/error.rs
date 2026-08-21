@@ -61,7 +61,14 @@ pub(crate) struct RlError {
     /// width to the consumer (the editor underlines the word at the
     /// position); `Some` is what makes the squiggle cover the construct.
     pub end: Option<usize>,
+    /// Which rule fired — the diagnostic's stable identity
+    /// ([`crate::DiagnosticCode`]). Reporting sites set it with
+    /// [`RlError::code`]; a site that forgets still compiles, as
+    /// [`DiagnosticCode::Other`], which is why sema's tests pin the codes.
+    pub code: DiagnosticCode,
 }
+
+use crate::diagnostics::DiagnosticCode;
 
 impl RlError {
     /// An error at one byte, its width left to the consumer.
@@ -70,6 +77,7 @@ impl RlError {
             message: message.into(),
             offset: Some(offset),
             end: None,
+            code: DiagnosticCode::Other,
         }
     }
 
@@ -80,7 +88,15 @@ impl RlError {
             message: message.into(),
             offset: Some(start),
             end: Some(end.max(start)),
+            code: DiagnosticCode::Other,
         }
+    }
+
+    /// The same error, carrying its rule's code.
+    #[must_use]
+    pub fn code(mut self, code: DiagnosticCode) -> Self {
+        self.code = code;
+        self
     }
 }
 

@@ -213,6 +213,12 @@ pub struct MatchAnalysis {
     /// [`crate::literal_matches`]). This is what sema reports on; there is
     /// no second implementation of the rule.
     pub coverage: Option<Coverage>,
+    /// Whether resolution failed for a name written in *this* match's
+    /// patterns ([`PatternAnalyses::unresolved`] holds the entries). The
+    /// reporter uses it as the recovery boundary: a match with a typo has
+    /// no exhaustiveness question worth asking, but its neighbour still
+    /// does — suppression is per match, not per file (TASK-120).
+    pub has_unresolved: bool,
 }
 
 /// What a match is over: the resolved enum and its constructors.
@@ -1008,6 +1014,7 @@ fn analyze_match(
     depth: Depth,
     names: &mut Names,
 ) -> MatchAnalysis {
+    let unresolved_before = names.unresolved.len();
     // The subject is identified from *every* arm's tags, guarded or not —
     // the same identification sema uses.
     let tags: Vec<&str> = expr
@@ -1055,6 +1062,7 @@ fn analyze_match(
         subjects: vec![subject.map(to_subject)],
         arms,
         coverage,
+        has_unresolved: names.unresolved.len() > unresolved_before,
     }
 }
 
@@ -1065,6 +1073,7 @@ fn analyze_tuple_match(
     names: &mut Names,
 ) -> MatchAnalysis {
     let arity = expr.scrutinees.len();
+    let unresolved_before = names.unresolved.len();
     // Each position resolves independently, from the tags every arm uses
     // there — sema's tuple identification.
     let subjects: Vec<Option<(&str, &[MatchConstructor])>> = (0..arity)
@@ -1133,6 +1142,7 @@ fn analyze_tuple_match(
         subjects: subjects.into_iter().map(|s| s.map(to_subject)).collect(),
         arms,
         coverage: tuple_coverage_of(expr, table),
+        has_unresolved: names.unresolved.len() > unresolved_before,
     }
 }
 

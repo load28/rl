@@ -35,7 +35,7 @@ GitHub Release 업로드까지 수행합니다.
 | `-o, --out-dir <dir>` | 출력을 `<dir>` 아래에 씁니다 (중간 디렉터리 자동 생성) |
 | `-w, --watch` | 계속 지켜보며 바뀐 파일을 다시 처리합니다 ([감시 모드](#감시-모드--w)) |
 | `-j, --jobs <n>` | 한 번에 컴파일할 파일 수 (기본: 코어 수, `1`이면 순차) ([병렬 컴파일](#병렬-컴파일---jobs)) |
-| `--check` | 컴파일만 하고 아무것도 쓰지 않습니다 (rl 수준 검사, TypeScript 불필요) |
+| `--check` | 컴파일만 하고 아무것도 쓰지 않습니다 (rl 수준 검사 — 파일의 진단을 전부 보고, TypeScript 불필요) |
 | `--check-types` | 여기에 **타입 검사**까지 ([타입 검사](#타입-검사---check-types---types)) |
 | `--types` | `--check-types`에 더해 **타입 사이드카**를 씁니다 (같은 절) |
 | `--project <tsconfig>` | 위 두 모드가 검사할 `tsconfig.json` (기본: 입력 위쪽에서 탐색) |
@@ -213,10 +213,15 @@ rlc: src/main.rl:2:1: cannot call mutating method `set` through val binding `map
   (원문은 괄호 안에 함께), 모르는 코드는 그대로 전달하며
   `(in code rlc generated for this construct)`를 덧붙입니다
   ([`errors.md`](./errors.md#생성된-코드에서-난-타입-에러)).
-- **소진성 메시지가 `--check`와 다릅니다.** `--check`는 자기 선언 표에서
-  답하므로 enum 이름을 댈 수 있고(`match on enum Shape is not exhaustive`),
-  이 모드는 *타입*에서 답하므로 이름 없이 `match is not exhaustive`라고
-  합니다. 대신 좁혀진 타입을 쓰므로 더 정확합니다. 계산 자체는 두 경로가
+- **rl 수준 에러가 타입 진단을 가리지 않습니다.** 복구 가능한 rl 에러(중복
+  암, 미지의 태그 등)가 있는 파일도 낮춰서 검사하고, 그 rl 에러들을 타입
+  진단과 **함께** 보고합니다. 파일이 통째로 막히는 것(종료 코드 2)은
+  산출물이 TypeScript일 수 없는 경우뿐입니다
+  ([`errors.md`](./errors.md#다중-보고)).
+- **소진성 문안은 `--check`와 같은 렌더러를 씁니다.** `--check`는 자기 선언
+  표에서 답하므로 enum 이름을 댈 수 있고(`match on enum Shape is not
+  exhaustive`), 이 모드는 *타입*에서 답하므로 출처 없이 `match is not
+  exhaustive`라고 합니다. 대신 좁혀진 타입을 쓰므로 더 정확합니다. 계산 자체는 두 경로가
   **같은 알고리즘**이고(체커는 구성원 목록을 답하는 오라클), 알파벳을 알아내지
   못한 자리의 witness는 이 모드에서 보고하지 않습니다. 튜플 match는 위치마다
   한 번씩 물어 곱집합을 판정합니다 — 조합은 `missing (North, Slow)`처럼
@@ -423,14 +428,14 @@ import 수집은 소진성 검사와 같은 1-홉입니다. 컴파일 모드와 
 ```
 → { "id": 1, "method": "check",      "params": { "text", "filename"?, "verify"? } }
 ← { "id": 1, "result":
-      { "diagnostics": [{ "line", "col", "endLine", "endCol", "message" }] } }
+      { "diagnostics": [{ "line", "col", "endLine", "endCol", "message", "code" }] } }
 
 → { "id": 2, "method": "emitMap",    "params": { "text" } }
 ← { "id": 2, "result": { "code", "mappings": [{ "src", "out", "len" }] } }
 
 → { "id": 3, "method": "typedCheck", "params": { "path", "text" } }
 ← { "id": 3, "result": { "blocked", "diagnostics":
-      [{ "path", "line", "col", "endLine", "endCol", "message" }] } }
+      [{ "path", "line", "col", "endLine", "endCol", "message", "code" }] } }
 
 ← { "id": N, "error": "문장" }        // 요청 실패 — 세션은 살아 있음
 ```
@@ -440,7 +445,10 @@ import 수집은 소진성 검사와 같은 1-홉입니다. 컴파일 모드와 
   `--emit-map`의 항목 하나와 같습니다. `typedCheck`는
   `--check-types --rl-only --overlay <path>`와 같고, `blocked`가
   종료 코드 2에 해당합니다.
-- 진단의 문안·위치는 one-shot과 동일합니다. `typedCheck`의 `path`는
+- 진단의 문안·위치는 one-shot과 동일합니다. `diagnostics`는 그 파일의
+  **모든** rl 진단을 소스 순서로 담습니다([`errors.md`](./errors.md#다중-보고)).
+  `code`는 규칙의 안정 식별자(`match-not-exhaustive` 등; 타입 진단은
+  `ts2339` 형태)입니다. `typedCheck`의 `path`는
   절대 경로로 돌아오고, 위치가 없는 진단은 `line`/`col`이 0입니다.
 - `endLine`/`endCol`은 진단이 덮는 범위의 끝(마지막 글자 다음)입니다 —
   구문의 넓이를 아는 진단만 채워지고, 모르면 0입니다(그 경우 소비자가

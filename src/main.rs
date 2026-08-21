@@ -27,7 +27,8 @@ mod server;
 
 use rlc::engine::collect_sources;
 use rlc::{
-    EnumSymbol, ExternEnum, ImportRewrite, ModuleScan, Options, RlImport, RlImportNames, compile,
+    EnumSymbol, ExternEnum, ImportRewrite, ModuleScan, Options, RlImport, RlImportNames,
+    compile_report,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1438,10 +1439,30 @@ fn compile_jobs(jobs: &[Job], opts: &BuildOptions) -> bool {
                 defer_to_checker: false,
                 std_import: std_import.as_deref(),
             };
-            let mut code = match compile(&loaded.source, &options) {
-                Ok(c) => c,
-                Err(e) => {
-                    out.messages.push(format!("rlc: {e}"));
+            // Every rl-level diagnostic of the file, not the first one —
+            // the reader fixes a file in one pass (TASK-120). Output is
+            // only produced (and only written) when the file is clean.
+            let report = compile_report(&loaded.source, &options);
+            let errors: Vec<_> = report
+                .diagnostics
+                .iter()
+                .filter(|d| d.severity == rlc::Severity::Error)
+                .collect();
+            if !errors.is_empty() {
+                for diagnostic in errors {
+                    out.messages.push(format!(
+                        "rlc: {}",
+                        diagnostic.to_compile_error(&loaded.source, Some(&filename))
+                    ));
+                }
+                out.failed = true;
+                return out;
+            }
+            let mut code = match report.emit {
+                Some(emit) => emit.code,
+                None => {
+                    // Unreachable in practice: emission is only withheld for
+                    // an error-severity diagnostic. Stay total.
                     out.failed = true;
                     return out;
                 }

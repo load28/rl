@@ -342,19 +342,25 @@ fn check(params: &serde_json::Value) -> Result<serde_json::Value, String> {
         verify: params["verify"].as_bool().unwrap_or(true),
         ..rlc::Options::default()
     };
-    let diagnostics = match rlc::compile(text, &options) {
-        Ok(_) => Vec::new(),
-        // `endLine`/`endCol` close the range the diagnostic covers — the
-        // construct as written. Zero means "position only": the consumer
-        // decides the width.
-        Err(e) => vec![json!({
-            "line": e.line,
-            "col": e.col,
-            "endLine": e.end_line,
-            "endCol": e.end_col,
-            "message": e.message,
-        })],
-    };
+    // Every rl-level diagnostic of the buffer, in source order (TASK-120).
+    // `endLine`/`endCol` close the range the diagnostic covers — the
+    // construct as written. Zero means "position only": the consumer
+    // decides the width. `code` is the rule's stable identity.
+    let diagnostics: Vec<_> = rlc::compile_report(text, &options)
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let e = d.to_compile_error(text, filename);
+            json!({
+                "line": e.line,
+                "col": e.col,
+                "endLine": e.end_line,
+                "endCol": e.end_col,
+                "message": e.message,
+                "code": d.code.as_str(),
+            })
+        })
+        .collect();
     Ok(json!({ "diagnostics": diagnostics }))
 }
 
@@ -551,6 +557,7 @@ fn typed_check(
                                 "endLine": end_line,
                                 "endCol": end_col,
                                 "message": d.message,
+                                "code": d.code,
                             })
                         })
                         .collect();

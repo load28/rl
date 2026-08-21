@@ -3301,3 +3301,191 @@ fn an_error_without_a_known_extent_reports_a_position_only() {
     assert!(e.message.contains("must be the last arm"), "{}", e.message);
     assert_eq!(covered(src, &e), "_");
 }
+
+/* ------------------------------------------------------------------ */
+/* multiple diagnostics (TASK-120)                                     */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn analyze_reports_every_uncovered_match_in_source_order() {
+    // TASK-117 symptom 1: the default path used to report one error per
+    // run; tsc and rustc report them all.
+    let src = "enum Shape { Circle(r: number), Square(s: number), Tri(a: number) }\n\
+        export function f(x: Shape): number {\n  return match (x) { Circle(r) => r };\n}\n\
+        export function g(x: Shape): number {\n  return match (x) { Square(s) => s };\n}\n\
+        export function h(x: Shape): number {\n  return match (x) { Tri(a) => a };\n}\n";
+    let diagnostics = rlc::analyze(src, &Options::default());
+    assert_eq!(diagnostics.len(), 3, "{diagnostics:#?}");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.code == rlc::DiagnosticCode::MatchNotExhaustive)
+    );
+    let starts: Vec<usize> = diagnostics.iter().map(|d| d.start.unwrap()).collect();
+    let mut sorted = starts.clone();
+    sorted.sort_unstable();
+    assert_eq!(starts, sorted, "diagnostics arrive in source order");
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("missing \"Square\", \"Tri\"")
+    );
+    assert!(
+        diagnostics[1]
+            .message
+            .contains("missing \"Circle\", \"Tri\"")
+    );
+    assert!(
+        diagnostics[2]
+            .message
+            .contains("missing \"Circle\", \"Square\"")
+    );
+}
+
+#[test]
+fn a_duplicate_arm_does_not_hide_the_files_other_diagnostics() {
+    // TASK-117 symptom 3, the rl half: one recoverable error used to stop
+    // the whole check.
+    let src = "enum Shape { Circle(r: number), Square(s: number), Tri(a: number) }\n\
+        export function f(x: Shape): number {\n\
+          return match (x) { Circle(r) => r, Circle(r) => 0, Square(s) => s, Tri(a) => a };\n\
+        }\n\
+        export function g(x: Shape): number { return match (x) { Square(s) => s }; }\n\
+        export function h(x: Shape): number { return match (x) { Tri(a) => a }; }\n";
+    let diagnostics = rlc::analyze(src, &Options::default());
+    let codes: Vec<_> = diagnostics.iter().map(|d| d.code).collect();
+    assert_eq!(
+        codes,
+        [
+            rlc::DiagnosticCode::MatchDuplicateArm,
+            rlc::DiagnosticCode::MatchNotExhaustive,
+            rlc::DiagnosticCode::MatchNotExhaustive,
+        ],
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_typo_suppresses_coverage_for_its_own_match_only() {
+    // The recovery boundary is the match, not the file: `Circel` silences
+    // f's exhaustiveness question (the typo is the cause), while g's hole
+    // is still reported.
+    let src = "enum Shape { Circle(r: number), Empty }\n\
+        export function f(x: Shape): number {\n\
+          return match (x) { Circel(r) => r, Empty => 0 };\n\
+        }\n\
+        export function g(x: Shape): number { return match (x) { Empty => 0 }; }\n";
+    let diagnostics = rlc::analyze(src, &Options::default());
+    let codes: Vec<_> = diagnostics.iter().map(|d| d.code).collect();
+    assert_eq!(
+        codes,
+        [
+            rlc::DiagnosticCode::UnknownCase,
+            rlc::DiagnosticCode::MatchNotExhaustive,
+        ],
+        "{diagnostics:#?}"
+    );
+    assert!(diagnostics[0].message.contains("did you mean `Circle`"));
+    assert!(diagnostics[1].message.contains("missing \"Circle\""));
+}
+
+#[test]
+fn sema_and_val_diagnostics_merge_in_source_order() {
+    let src = "enum E { A(x: number), B }\n\
+        val const cfg = { a: 1 };\n\
+        cfg.a = 2;\n\
+        const v = match (E.B) { B => 0 };\n";
+    let diagnostics = rlc::analyze(src, &Options::default());
+    let codes: Vec<_> = diagnostics.iter().map(|d| d.code).collect();
+    assert_eq!(
+        codes,
+        [
+            rlc::DiagnosticCode::ValMutation,
+            rlc::DiagnosticCode::MatchNotExhaustive,
+        ],
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn compile_still_returns_the_first_error_in_source_order() {
+    let src = "enum Shape { Circle(r: number), Square(s: number) }\n\
+        export function f(x: Shape): number {\n  return match (x) { Circle(r) => r };\n}\n\
+        export function g(x: Shape): number {\n  return match (x) { Square(s) => s };\n}\n";
+    let e = err(src);
+    assert_eq!(
+        e.line, 3,
+        "the first uncovered match decides compile()'s error"
+    );
+    assert!(e.message.contains("missing \"Square\""));
+}
+
+#[test]
+fn compile_report_still_emits_under_recoverable_errors() {
+    // Codegen is infallible, so a duplicate arm does not withhold the
+    // lowered TypeScript — that is what lets the typed pass run and report
+    // alongside the rl errors (TASK-117 symptom 3).
+    let src = "enum E { A(x: number), B }\n\
+        const v = match (E.A(1)) { A(x) => x, A(x) => 0, B => 1 };\n";
+    let report = rlc::compile_report(src, &Options::default());
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(
+        report.diagnostics[0].code,
+        rlc::DiagnosticCode::MatchDuplicateArm
+    );
+    let emit = report.emit.expect("recoverable errors still emit");
+    assert!(emit.code.contains("switch ($rl_m.kind)"));
+}
+
+#[test]
+fn compile_report_withholds_emission_when_the_output_cannot_be_typescript() {
+    // A stray `|>` passes through verbatim, so the output would not parse:
+    // that diagnostic blocks projection.
+    let src = "const x = 1 |> ;\n";
+    let report = rlc::compile_report(src, &Options::default());
+    assert!(report.emit.is_none());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == rlc::DiagnosticCode::StrayPipe),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn every_stray_construct_is_reported_not_just_the_first() {
+    let src = "const x = 1 |> ;\nconst y = 2 |> ;\n";
+    let diagnostics = rlc::analyze(src, &Options::default());
+    let strays = diagnostics
+        .iter()
+        .filter(|d| d.code == rlc::DiagnosticCode::StrayPipe)
+        .count();
+    assert_eq!(strays, 2, "{diagnostics:#?}");
+}
+
+#[test]
+fn a_mixed_match_reports_the_cause_and_suppresses_its_coverage() {
+    // The mixed-pattern error is the cause; that match's own exhaustiveness
+    // answer would be an effect stacked on it.
+    let src = "const v = match (x) {\n  Some(v) => v,\n  1 => 0,\n};\n";
+    let diagnostics = rlc::analyze(src, &Options::default());
+    let codes: Vec<_> = diagnostics.iter().map(|d| d.code).collect();
+    assert_eq!(
+        codes,
+        [rlc::DiagnosticCode::MatchMixedPatterns],
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn diagnostic_codes_are_stable_strings() {
+    assert_eq!(
+        rlc::DiagnosticCode::MatchNotExhaustive.as_str(),
+        "match-not-exhaustive"
+    );
+    assert_eq!(rlc::DiagnosticCode::ValMutation.as_str(), "val-mutation");
+    assert!(rlc::DiagnosticCode::StrayPipe.blocks_projection());
+    assert!(!rlc::DiagnosticCode::MatchDuplicateArm.blocks_projection());
+}

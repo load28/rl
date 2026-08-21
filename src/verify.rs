@@ -126,13 +126,17 @@ pub(crate) fn at_source(
                 .map(|a| (a.src, a.src_end)),
         ),
     };
+    let code = crate::DiagnosticCode::VerifyFailed;
     match span {
-        Some((start, end)) if end > start => crate::error::RlError::span(start, end, message),
-        Some((start, _)) => crate::error::RlError::at(start, message),
+        Some((start, end)) if end > start => {
+            crate::error::RlError::span(start, end, message).code(code)
+        }
+        Some((start, _)) => crate::error::RlError::at(start, message).code(code),
         None => crate::error::RlError {
             message,
             offset: None,
             end: None,
+            code,
         },
     }
 }
