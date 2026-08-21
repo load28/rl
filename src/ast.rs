@@ -42,6 +42,13 @@ pub(crate) struct Program {
     /// Byte offsets of `result` bindings written without a declaration
     /// keyword (`b <- f();`), reported by the semantic phase.
     pub result_missing_kw: Vec<usize>,
+    /// Byte offsets of `result` bindings written **below** a block's top
+    /// level (inside an `if` body, a loop, a function written in the
+    /// block) — a binding early-returns the block's IIFE, and only a
+    /// top-level statement can (`docs/reference/language.md` §8). Same
+    /// reporting story as [`Self::stray_pipes`]: the shape is never valid
+    /// TypeScript, so it cannot pass through either.
+    pub result_nested_binds: Vec<usize>,
 }
 
 /// One top-level piece of a [`Program`], in source order.

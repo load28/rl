@@ -29,7 +29,7 @@
 //! (the same rule the pipeline-head tracker uses). The run after the last
 //! boundary is the block's value expression.
 
-use super::cursor::{Cursor, dotted_at};
+use super::cursor::{Cursor, dotted_at, skip_braced_construct};
 use crate::ast::{ResultBind, ResultBlock, ResultItem, Span};
 use crate::lexer::TokenKind;
 
@@ -53,11 +53,19 @@ pub(super) enum Attempt<'t> {
 
 /// `cur` is positioned at the `{` token following an undotted `result`
 /// identifier (`kw_span`, used only by the caller for error reporting).
-pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Attempt<'t> {
+/// Besides the attempt, returns the byte offsets of bind-shaped runs
+/// nested below the block's top level ([`nested_binds`]) — reportable
+/// whatever the attempt turned out to be, since the shape is never
+/// TypeScript.
+pub(super) fn parse_result_block<'t>(
+    mut cur: Cursor<'t>,
+    kw_span: Span,
+) -> (Attempt<'t>, Vec<usize>) {
     let open = cur.idx;
     let Some(close) = cur.find_close() else {
-        return Attempt::Pass; // unbalanced braces — nothing to claim
+        return (Attempt::Pass, Vec::new()); // unbalanced braces — nothing to claim
     };
+    let nested = nested_binds(&cur, open, close);
     let body_span = Span {
         start: cur.tokens[open].span.end,
         end: cur.tokens[close].span.start,
@@ -101,7 +109,7 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
         match scan_bind(&cur, run_start, k) {
             BindRun::NotBind => {} // ordinary statements — keep accumulating
             BindRun::NoKeyword { at } => missing.push(at),
-            BindRun::Malformed => return Attempt::Malformed,
+            BindRun::Malformed => return (Attempt::Malformed, nested),
             BindRun::Bind {
                 kw,
                 binding_start,
@@ -146,7 +154,7 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
     if run_start < close {
         match scan_bind(&cur, run_start, close) {
             BindRun::NotBind | BindRun::NoKeyword { .. } => {}
-            BindRun::Bind { .. } | BindRun::Malformed => return Attempt::Malformed,
+            BindRun::Bind { .. } | BindRun::Malformed => return (Attempt::Malformed, nested),
         }
     }
     if !saw_bind {
@@ -154,24 +162,27 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
         // cannot be TypeScript at all, in which case a keyword-less
         // binding is the author's `result` block and saying so beats
         // letting the output fail to parse.
-        return match missing.first() {
-            Some(&at) if no_keyword_is_certain(&cur, open) => Attempt::MissingKeyword(at),
-            _ => Attempt::Pass,
-        };
+        return (
+            match missing.first() {
+                Some(&at) if no_keyword_is_certain(&cur, open) => Attempt::MissingKeyword(at),
+                _ => Attempt::Pass,
+            },
+            nested,
+        );
     }
     // The block is claimed, so the file is not TypeScript and a
     // keyword-less binding here is a mistake rlc can name.
     if let Some(&at) = missing.first() {
-        return Attempt::MissingKeyword(at);
+        return (Attempt::MissingKeyword(at), nested);
     }
     if run_start == close {
-        return Attempt::Malformed; // nothing after the last `;`
+        return (Attempt::Malformed, nested); // nothing after the last `;`
     }
     let value_start = cur.tokens[run_start].span.start;
     if let TokenKind::Ident = cur.tokens[run_start].kind
         && super::tries::STMT_ONLY_WORDS.contains(&cur.text(&cur.tokens[run_start]))
     {
-        return Attempt::Malformed; // a statement, not the block's value
+        return (Attempt::Malformed, nested); // a statement, not the block's value
     }
     items.push(ResultItem::Stmts(cur.parser.parse_tokens(
         &cur.tokens[tok_cut..run_start],
@@ -184,16 +195,85 @@ pub(super) fn parse_result_block<'t>(mut cur: Cursor<'t>, kw_span: Span) -> Atte
 
     let byte_end = cur.tokens[close].span.end;
     cur.idx = close + 1;
-    Attempt::Claimed(
-        cur,
-        byte_end,
-        Box::new(ResultBlock {
-            keyword_off: kw_span.start,
-            body_span,
-            items,
-            value,
-        }),
+    (
+        Attempt::Claimed(
+            cur,
+            byte_end,
+            Box::new(ResultBlock {
+                keyword_off: kw_span.start,
+                body_span,
+                items,
+                value,
+            }),
+        ),
+        nested,
     )
+}
+
+/// Byte offsets of bind-shaped runs (`const|let|var … <- …;`) **below**
+/// the block's top level — inside an `if` body, a loop, a function
+/// written in the block. A binding compiles to an early return of the
+/// block's IIFE, and only a top-level statement can promise that (a
+/// nested function's `return` exits the function; and codegen only lowers
+/// top-level runs) — so these are mistakes to report, not bindings. The
+/// shape cannot pass through either: a declaration keyword followed by
+/// `<-` is never TypeScript (the one look-alike, a generic type argument
+/// `let x: Foo<-1>;`, is ruled out by [`scan_bind`]'s own tail checks).
+///
+/// A nested `match`/`result` region is skipped — it is re-parsed as its
+/// own construct, and an inner `result` block answers for its own runs.
+fn nested_binds(cur: &Cursor<'_>, open: usize, close: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut k = open + 1;
+    while k < close {
+        let t = &cur.tokens[k];
+        match t.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            TokenKind::Ident if !dotted_at(cur.tokens, open + 1, k) => {
+                let word = cur.text(t);
+                if let Some(past) = skip_braced_construct(cur.tokens, word, k) {
+                    // The region is balanced, so the depth is unchanged.
+                    k = past.min(close);
+                    continue;
+                }
+                if depth > 0
+                    && matches!(word, "const" | "let" | "var")
+                    && let Some(semi) = run_end(cur, k, close)
+                    && matches!(scan_bind(cur, k, semi), BindRun::Bind { .. })
+                {
+                    out.push(t.span.start);
+                    k = semi + 1;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    out
+}
+
+/// The token index of the `;` ending the statement run that starts at
+/// `from`, staying at the run's own bracket level. `None` when the run
+/// leaves its enclosing brace or reaches `close` first.
+fn run_end(cur: &Cursor<'_>, from: usize, close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for k in from + 1..close {
+        match cur.tokens[k].kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            TokenKind::Punct(b';') if depth == 0 => return Some(k),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// What one statement run of a block body is.

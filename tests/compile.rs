@@ -2297,6 +2297,64 @@ fn a_binding_without_a_declaration_keyword_is_a_located_error() {
 }
 
 #[test]
+fn a_binding_below_the_blocks_top_level_is_a_located_error() {
+    // A binding compiles to an early return of the block's IIFE; nested
+    // in an `if` body it is not lowered at all, and before this check the
+    // raw `<-` leaked into the output and died in the verify backstop.
+    let e = err("const a = result {\n  const x <- f();\n  if (c) { const y <- g(); }\n  x\n};\n");
+    assert!(
+        e.message
+            .contains("`<-` binding must be a top-level statement"),
+        "{}",
+        e.message
+    );
+    assert_eq!((e.line, e.col), (3, 12));
+
+    // Inside a function written in the block the `return` would exit the
+    // function, not the block — same error.
+    let e = err(
+        "const a = result {\n  const x <- f();\n  const h = () => { const y <- g(); return y; };\n  x\n};\n",
+    );
+    assert!(
+        e.message
+            .contains("`<-` binding must be a top-level statement"),
+        "{}",
+        e.message
+    );
+
+    // A block that is a candidate only (no top-level binding) still
+    // reports — the shape is never TypeScript, claimed or not.
+    let e = err("const a = result {\n  if (c) { const y <- g(); }\n  x\n};\n");
+    assert!(
+        e.message
+            .contains("`<-` binding must be a top-level statement"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_nested_generic_look_alike_still_passes_through() {
+    // `let x: Foo<-1>;` leaves an unopened `>` after the `<-`, so it is a
+    // generic type argument — at any depth, not just the block's top
+    // level (the passthrough contract).
+    let out = ok(
+        "declare const result: number;\nfunction f() {\n  result\n  {\n    { let x: Foo<-1>; }\n  }\n}\n",
+    );
+    assert!(out.contains("let x: Foo<-1>;"), "{out}");
+}
+
+#[test]
+fn a_nested_result_block_answers_for_its_own_runs() {
+    // The outer scan skips the inner `result { … }` region — its binding
+    // is the inner block's own top-level statement, not a nested mistake.
+    let out = ok(
+        "const a = result {\n  const x <- f();\n  const b = result {\n    const c <- g();\n    c\n  };\n  x\n};\n",
+    );
+    assert_eq!(out.matches("(() => {").count(), 2, "{out}");
+}
+
+#[test]
 fn result_binding_without_a_semicolon_is_an_error() {
     // The binding is rl syntax whether or not the `;` is there, so this is
     // a located rl error rather than a failed output self-check.

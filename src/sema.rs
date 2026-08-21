@@ -285,6 +285,19 @@ impl Checker {
                 .code(DiagnosticCode::ResultMissingKeyword),
             );
         }
+        for &off in &program.result_nested_binds {
+            self.error(
+                RlError::at(
+                    off,
+                    "`<-` binding must be a top-level statement of the `result` block — \
+                     nested inside a block or a function it cannot early-return the \
+                     block's `Err`. Hoist it to the top level, or use `match` on the \
+                     `Result` instead"
+                        .to_string(),
+                )
+                .code(DiagnosticCode::ResultNestedBinding),
+            );
+        }
         for segment in &program.segments {
             match segment {
                 Segment::Verbatim(_) | Segment::RlImport(_) | Segment::ValModifier(_) => {}

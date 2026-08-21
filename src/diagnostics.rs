@@ -45,6 +45,9 @@ pub enum DiagnosticCode {
     StrayResult,
     /// A `result` binding missing its declaration keyword.
     ResultMissingKeyword,
+    /// A `result` binding below the block's top level — it cannot
+    /// early-return the block.
+    ResultNestedBinding,
     /// A `flow` composition whose first step is a method step.
     FlowFirstStepMethod,
     /// A `try` outside the top-level statement stream.
@@ -100,6 +103,7 @@ impl DiagnosticCode {
             DiagnosticCode::StrayIfLet => "stray-if-let",
             DiagnosticCode::StrayResult => "stray-result",
             DiagnosticCode::ResultMissingKeyword => "result-missing-keyword",
+            DiagnosticCode::ResultNestedBinding => "result-nested-binding",
             DiagnosticCode::FlowFirstStepMethod => "flow-first-step-method",
             DiagnosticCode::TryPlacement => "try-placement",
             DiagnosticCode::LetElsePlacement => "let-else-placement",
@@ -146,6 +150,7 @@ impl DiagnosticCode {
                 | DiagnosticCode::StrayIfLet
                 | DiagnosticCode::StrayResult
                 | DiagnosticCode::ResultMissingKeyword
+                | DiagnosticCode::ResultNestedBinding
                 | DiagnosticCode::EnumInvalidFieldType
                 | DiagnosticCode::VerifyFailed
         )

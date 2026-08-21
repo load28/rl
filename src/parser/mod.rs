@@ -243,6 +243,7 @@ impl Parser<'_> {
         let mut stray_if_lets: Vec<usize> = Vec::new();
         let mut stray_results: Vec<usize> = Vec::new();
         let mut result_missing_kw: Vec<usize> = Vec::new();
+        let mut result_nested_binds: Vec<usize> = Vec::new();
         let mut seg_start = start;
         let mut i = 0usize;
 
@@ -441,7 +442,10 @@ impl Parser<'_> {
                 && word == "result"
                 && matches!(tokens.get(i + 1), Some(t) if matches!(t.kind, TokenKind::Punct(b'{')))
             {
-                match results::parse_result_block(Cursor::new(self, tokens, i + 1, end), tok.span) {
+                let (attempt, nested) =
+                    results::parse_result_block(Cursor::new(self, tokens, i + 1, end), tok.span);
+                result_nested_binds.extend(nested);
+                match attempt {
                     results::Attempt::Claimed(cur, byte_end, block) => {
                         flush_verbatim(&mut segments, seg_start, tok.span.start);
                         segments.push(Segment::ResultBlock(*block));
@@ -485,6 +489,7 @@ impl Parser<'_> {
             stray_if_lets,
             stray_results,
             result_missing_kw,
+            result_nested_binds,
         }
     }
 

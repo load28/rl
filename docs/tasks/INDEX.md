@@ -139,7 +139,8 @@
 | TASK-129 | Table 구축을 resolver 위로 (Phase 3 2/2, D5 종결) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-129](./TASK-129-table-from-resolver.md) |
 | TASK-130 | 에디터 semantic API가 semantic cache를 소비 (Phase 6 2/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-130](./TASK-130-editor-consumes-semantic-cache.md) |
 | TASK-131 | try·let-else 배치를 flow 사실로 (Phase 5 2/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-131](./TASK-131-try-placement-on-flow.md) |
+| TASK-132 | result 바인딩의 early-return 범위 확정 (Phase 5 3/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-132](./TASK-132-result-binding-scope.md) |
 
 ## 다음 태스크 번호
 
-**TASK-132**
+**TASK-133**
