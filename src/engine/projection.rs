@@ -605,6 +605,29 @@ fn source_extent(origin: mapper::DiagnosticOrigin) -> (usize, usize) {
     }
 }
 
+/// Whether a checker diagnostic origin is already explained by a direct RL
+/// cause. Display spans may be narrow; syntax-owner identity is what links
+/// a cause to consequences emitted elsewhere in the same lowering.
+pub(crate) fn origin_intersects_rl_error(
+    origin: mapper::DiagnosticOrigin,
+    rl_diagnostics: &[crate::Diagnostic],
+) -> bool {
+    let (start, end) = source_extent(origin);
+    rl_diagnostics.iter().any(|rl| {
+        if let (mapper::DiagnosticOrigin::Anchor(anchor), Some(owner)) = (origin, rl.owner)
+            && owner.start == anchor.src
+            && owner.end == anchor.owner_end
+        {
+            return true;
+        }
+        let Some(rl_start) = rl.start else {
+            return false;
+        };
+        let rl_end = rl.end.unwrap_or_else(|| rl_start.saturating_add(1));
+        start < rl_end && rl_start < end
+    })
+}
+
 pub(crate) fn diagnostic_intersects_recovery(
     file: &ProjectedDocument,
     diagnostic: &crate::typescript::backend::Diagnostic,
@@ -618,10 +641,9 @@ pub(crate) fn diagnostic_intersects_recovery(
         .any(|&(recovery_start, recovery_end)| start < recovery_end && recovery_start < end)
 }
 
-/// Whether a checker-proven assignability failure covers source already
-/// owned by a precise rl diagnostic. The rl diagnostic is the cause; the
-/// broader TypeScript mismatch is a consequence of lowering that invalid
-/// construct.
+/// Whether a checker diagnostic covers source already owned by a direct RL
+/// cause. The mismatch span, when available, is the checker's more precise
+/// statement of where the consequence originated.
 pub(crate) fn diagnostic_intersects_rl_error(
     file: &ProjectedDocument,
     diagnostic: &crate::typescript::backend::Diagnostic,
@@ -635,20 +657,7 @@ pub(crate) fn diagnostic_intersects_rl_error(
     let Some(origin) = diagnostic_origin(file, diagnostic_start, diagnostic_end) else {
         return false;
     };
-    let (start, end) = source_extent(origin);
-    file.rl_diagnostics.iter().any(|rl| {
-        if let (mapper::DiagnosticOrigin::Anchor(anchor), Some(owner)) = (origin, rl.owner)
-            && owner.start == anchor.src
-            && owner.end == anchor.owner_end
-        {
-            return true;
-        }
-        let Some(rl_start) = rl.start else {
-            return false;
-        };
-        let rl_end = rl.end.unwrap_or_else(|| rl_start.saturating_add(1));
-        start < rl_end && rl_start < end
-    })
+    origin_intersects_rl_error(origin, &file.rl_diagnostics)
 }
 
 #[cfg(test)]

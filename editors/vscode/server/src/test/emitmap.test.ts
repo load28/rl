@@ -426,3 +426,26 @@ test("a restated diagnostic names the case it is about", { skip }, async () => {
     /ts2322: Type 'Err<\{ kind: "OutOfRange"; value: number; \}>'/,
   );
 });
+
+test(
+  "a direct rl cause suppresses provisional checker consequences",
+  { skip },
+  async () => {
+    const source = [
+      "enum Conn { Up(value: number), Down }",
+      "export const mixed = (c: Conn): string =>",
+      '  match (c) { Up(value) => "up", 404 => "gone", Down => "down" };',
+      "",
+    ].join("\n");
+    const dir = fixture("rl-owned-diagnostic-test-", { "mixed.rl": source });
+    const diagnostics = await engine.tsDiagnostics(
+      COMPILER,
+      path.join(dir, "mixed.rl"),
+    );
+    assert.deepEqual(
+      diagnostics,
+      [],
+      "the direct RL diagnostic owns every checker consequence of this lowering",
+    );
+  },
+);

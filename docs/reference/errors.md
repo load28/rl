@@ -76,6 +76,9 @@ rlc가 만든 glue와 걸치면 해당 lowering 구문의 기본 범위로 돌�
 그 match의 생성 glue에서 낸 비교 오류는 같은 원인의 결과이므로 중복 표시하지
 않습니다. 이 소유 관계는 오류 번호나 메시지 문구가 아니라 source-map과 lowering
 anchor로 판정하며 CLI·서버·에디터가 공유합니다.
+에디터의 빠른 TypeScript 잠정 검사도 같은 projection에서 수집한 RL 원인과
+소유 범위를 먼저 적용하므로, 권위 있는 typed 검사를 기다리는 동안 연쇄 밑줄을
+잠시 표시하지 않습니다.
 
 ## enum
 

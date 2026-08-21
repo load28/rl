@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::project::Project;
-use super::projection::module_path_of;
+use super::projection::{self, module_path_of};
 use crate::EmitMapping;
 use crate::typescript::mapper;
 use crate::typescript::service::{Service, file_uri, service_binary, uri_path};
@@ -211,6 +211,10 @@ pub(crate) struct ServiceDoc {
     /// Parser-owned error ranges replaced only in this service projection.
     /// TypeScript diagnostics intersecting one are recovery cascades.
     recovered: Vec<(usize, usize)>,
+    /// Direct RL causes found while building this exact projection. The
+    /// quick checker layer uses their syntax owners before VSCode ever sees
+    /// a provisional consequence.
+    rl_diagnostics: Vec<crate::Diagnostic>,
 }
 
 /// A compiled completion probe: the buffer with `$rl_probe` spliced in at
@@ -805,13 +809,20 @@ impl Project {
             }
             let start = u16_offset(&doc.code, position_of(&item["range"]["start"]));
             let end = u16_offset(&doc.code, position_of(&item["range"]["end"]));
-            let Some((s, e, exact, projected_anchor)) = diagnostic_source_span(&doc, start, end)
-            else {
+            let Some((s, e, origin)) = diagnostic_source_span(&doc, start, end) else {
                 continue;
             };
             if recovery_intersects(&doc, s, e) {
                 continue;
             }
+            if projection::origin_intersects_rl_error(origin, &doc.rl_diagnostics) {
+                continue;
+            }
+            let (exact, projected_anchor) = match origin {
+                mapper::DiagnosticOrigin::Exact { .. } => (true, None),
+                mapper::DiagnosticOrigin::Anchor(anchor) => (false, Some(anchor)),
+                mapper::DiagnosticOrigin::Nearest { .. } => (false, None),
+            };
             // An empty span (an error at a position, not over one) would
             // render as an invisible squiggle; give it the character it
             // points at.
@@ -970,6 +981,7 @@ fn service_doc(path: &Path, text: String) -> ServiceDoc {
         mappings: emit.mappings,
         anchors: emit.anchors,
         recovered,
+        rl_diagnostics: report.diagnostics,
     }
 }
 
@@ -1305,29 +1317,20 @@ fn diagnostic_source_span(
     doc: &ServiceDoc,
     start: usize,
     end: usize,
-) -> Option<(usize, usize, bool, Option<crate::EmitAnchor>)> {
+) -> Option<(usize, usize, mapper::DiagnosticOrigin)> {
     let sb = mapper::from_utf16(&doc.code, start);
     let eb = mapper::from_utf16(&doc.code, end);
-    match mapper::diagnostic_origin(&doc.mappings, &doc.anchors, sb, eb)? {
-        mapper::DiagnosticOrigin::Exact { start, end } => Some((
-            mapper::to_utf16(&doc.source, start),
-            mapper::to_utf16(&doc.source, end),
-            true,
-            None,
-        )),
-        mapper::DiagnosticOrigin::Anchor(anchor) => Some((
-            mapper::to_utf16(&doc.source, anchor.src),
-            mapper::to_utf16(&doc.source, anchor.src_end),
-            false,
-            Some(anchor),
-        )),
-        mapper::DiagnosticOrigin::Nearest { start } => Some((
-            mapper::to_utf16(&doc.source, start),
-            mapper::to_utf16(&doc.source, start.saturating_add(1)),
-            false,
-            None,
-        )),
-    }
+    let origin = mapper::diagnostic_origin(&doc.mappings, &doc.anchors, sb, eb)?;
+    let (start, end) = match origin {
+        mapper::DiagnosticOrigin::Exact { start, end } => (start, end),
+        mapper::DiagnosticOrigin::Anchor(anchor) => (anchor.src, anchor.src_end),
+        mapper::DiagnosticOrigin::Nearest { start } => (start, start.saturating_add(1)),
+    };
+    Some((
+        mapper::to_utf16(&doc.source, start),
+        mapper::to_utf16(&doc.source, end),
+        origin,
+    ))
 }
 
 fn recovery_intersects(doc: &ServiceDoc, start: usize, end: usize) -> bool {

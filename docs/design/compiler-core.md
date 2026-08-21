@@ -219,6 +219,10 @@ differences, span }`으로 정규화한다. TypeScript 진단 문자열을 다�
   원인·결과를 묶는 syntax owner span을 따로 가진다. RL 원인과 checker 결과는
   같은 owner일 때만 억제한다. 이 분류기는 batch typed check와 언어 서비스가
   함께 사용한다.
+- TASK-146에서 language-service projection이 그 소스를 투영할 때 수집한 직접 RL
+  진단도 함께 보존한다. 빠른 checker 진단은 게시 전에 같은 owner 판정을 거친다.
+  따라서 잠정 진단과 batch typed 진단은 응답 시점만 다르고 원인·결과 경계는
+  동일하다. VSCode 계층에서 오류 코드나 위치를 추측해 지우지 않는다.
 
 ## 9. Flow IR (Phase 5)
 
