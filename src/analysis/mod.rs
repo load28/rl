@@ -526,7 +526,10 @@ impl PatternAnalyses {
 pub fn pattern_analyses(source: &str, externs: &[EnumSymbol]) -> PatternAnalyses {
     let program = crate::parser::parse(source);
     let table = Table::build(&program, externs);
-    analyze(&program, &table, Depth::Full)
+    let mut analyses = analyze(&program, &table, Depth::Full);
+    let decls: Vec<crate::resolve::ExternDecl> = externs.iter().map(Into::into).collect();
+    attach_resolution(&mut analyses, &program, &decls);
+    analyses
 }
 
 /// The coverage-only analysis of an already-parsed program — sema's input,
@@ -540,7 +543,107 @@ pub fn pattern_analyses(source: &str, externs: &[EnumSymbol]) -> PatternAnalyses
 /// for those.
 pub(crate) fn coverage_analyses(program: &Program, externs: &[ExternEnum]) -> PatternAnalyses {
     let table = Table::build_from_tags(program, externs);
-    analyze(program, &table, Depth::CoverageOnly)
+    let mut analyses = analyze(program, &table, Depth::CoverageOnly);
+    let decls: Vec<crate::resolve::ExternDecl> = externs.iter().map(Into::into).collect();
+    attach_resolution(&mut analyses, program, &decls);
+    analyses
+}
+
+/// Runs the resolver over the same program and copies its answers into the
+/// analysis' vocabulary: [`PatternAnalyses::unresolved`],
+/// [`PatternAnalyses::resolved`], and each match's
+/// [`MatchAnalysis::has_unresolved`]. Name resolution has **one**
+/// implementation — [`crate::resolve`] — and this is where its answers
+/// enter the surface sema and the editor already consume.
+fn attach_resolution(
+    analyses: &mut PatternAnalyses,
+    program: &Program,
+    externs: &[crate::resolve::ExternDecl],
+) {
+    use crate::resolve as res;
+    let mut hir = crate::hir::lower_program(crate::hir::FileId(0), program);
+    let resolution = crate::resolve::resolve_file(&mut hir, externs);
+
+    let span_of = |node: crate::hir::NodeId| {
+        hir.source_map
+            .node_span(node)
+            .map_or((0, 0), |s| (s.start, s.end))
+    };
+    let enum_origin = |def: crate::hir::DefId| match &resolution.defs[def].kind {
+        res::DefKind::Enum(data) => match &data.origin {
+            res::DeclOrigin::Local(_) => Origin::Local,
+            res::DeclOrigin::Imported { from } => Origin::Imported { from: from.clone() },
+            res::DeclOrigin::Builtin => Origin::Builtin,
+        },
+        res::DefKind::EnumValue { .. } => Origin::Local,
+    };
+
+    for miss in &resolution.unresolved {
+        let (start, end) = span_of(miss.node);
+        analyses.unresolved.push(UnresolvedName {
+            kind: match miss.kind {
+                res::UseKind::Case => NameKind::Case,
+                res::UseKind::Field => NameKind::Field,
+            },
+            name: miss.name.clone(),
+            start,
+            end,
+            enum_name: resolution.defs[miss.against].name.clone(),
+            origin: enum_origin(miss.against),
+            tag: miss.tag.clone(),
+            suggestion: miss.suggestion.clone(),
+        });
+    }
+    for (&node, answer) in &resolution.uses {
+        let (start, end) = span_of(node);
+        match answer {
+            res::Res::Variant(v) => analyses.resolved.push(ResolvedName {
+                kind: NameKind::Case,
+                name: resolution
+                    .variant(*v)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default(),
+                start,
+                end,
+                enum_name: resolution.defs[v.enum_def].name.clone(),
+                origin: enum_origin(v.enum_def),
+                tag: None,
+            }),
+            res::Res::Field(f) => analyses.resolved.push(ResolvedName {
+                kind: NameKind::Field,
+                name: resolution
+                    .field(*f)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default(),
+                start,
+                end,
+                enum_name: resolution.defs[f.variant.enum_def].name.clone(),
+                origin: enum_origin(f.variant.enum_def),
+                tag: resolution.variant(f.variant).map(|d| d.name.clone()),
+            }),
+            _ => {}
+        }
+    }
+    // Source order, so the error a file reports does not depend on which
+    // construct the resolver happened to reach first.
+    analyses.unresolved.sort_by_key(|u| u.start);
+    analyses.resolved.sort_by_key(|r| r.start);
+
+    // The recovery boundary: a match holding an unresolved name keeps its
+    // own coverage question suppressed. Sites and matches are joined by
+    // the construct's keyword offset — the head span's start on both sides.
+    let mut with_miss: Vec<usize> = resolution
+        .unresolved
+        .iter()
+        .filter_map(|miss| {
+            let site = &hir.sites[miss.site];
+            hir.source_map.node_span(site.node).map(|s| s.start)
+        })
+        .collect();
+    with_miss.sort_unstable();
+    for analysis in &mut analyses.matches {
+        analysis.has_unresolved = with_miss.binary_search(&analysis.keyword_off).is_ok();
+    }
 }
 
 /// How much of each match to analyze — bindings cost work no coverage
@@ -551,49 +654,9 @@ enum Depth {
     CoverageOnly,
 }
 
-/// The two halves of the resolution phase's answer, borrowed together —
-/// every name a pattern writes lands in one of them.
-/// The two vectors of `analyses`, borrowed as one carrier.
-fn names_of(analyses: &mut PatternAnalyses) -> Names<'_> {
-    Names {
-        unresolved: &mut analyses.unresolved,
-        resolved: &mut analyses.resolved,
-    }
-}
-
-struct Names<'a> {
-    unresolved: &'a mut Vec<UnresolvedName>,
-    resolved: &'a mut Vec<ResolvedName>,
-}
-
-impl Names<'_> {
-    fn resolved(
-        &mut self,
-        kind: NameKind,
-        name: &str,
-        span: (usize, usize),
-        entry: &Entry,
-        tag: Option<&str>,
-    ) {
-        self.resolved.push(ResolvedName {
-            kind,
-            name: name.to_string(),
-            start: span.0,
-            end: span.1,
-            enum_name: entry.name.clone(),
-            origin: entry.origin.clone(),
-            tag: tag.map(str::to_string),
-        });
-    }
-}
-
 fn analyze(program: &Program, table: &Table, depth: Depth) -> PatternAnalyses {
     let mut analyses = PatternAnalyses::default();
     walk(program, table, depth, &mut analyses);
-    // Source order, so the error a file reports does not depend on which
-    // construct the walk happened to reach first.
-    analyses.unresolved.sort_by_key(|u| u.start);
-    analyses.resolved.sort_by_key(|r| r.start);
     analyses.declarations = table
         .entries
         .iter()
@@ -762,58 +825,6 @@ impl Table {
         }
     }
 
-    /// The enum a pattern's names are *resolved against* — the resolution
-    /// phase's subject, which is a different question from both
-    /// [`Table::resolve`] (which declaration a type is read from) and
-    /// [`Table::resolve_coverage`] (which declaration exhaustiveness is
-    /// measured against).
-    ///
-    /// Two levels of evidence, in order:
-    ///
-    /// 1. an enum whose cases contain **every** tag — then nothing in the
-    ///    site is unresolved, and resolution has nothing to say;
-    /// 2. otherwise the single enum containing the **most** of them (at
-    ///    least one). Some tag of the site names that enum, so the site is
-    ///    about it, and the tags it does not contain are candidates for a
-    ///    misspelling report.
-    ///
-    /// A tie, or no containment at all, answers `None`: the site names no
-    /// enum this table knows — a hand-written tagged union, say, which
-    /// tag patterns match by design (`language.md` §3.2) — and rlc says
-    /// nothing about names it has no declaration for.
-    fn identify(&self, tags: &[&str]) -> Option<&Entry> {
-        if tags.is_empty() {
-            return None;
-        }
-        if let Some(entry) = self.candidates(tags).first() {
-            return Some(entry);
-        }
-        let mut best: Option<(&Entry, usize)> = None;
-        let mut tied = false;
-        for entry in &self.entries {
-            let hits = tags
-                .iter()
-                .filter(|t| entry.constructors.iter().any(|c| c.tag == **t))
-                .count();
-            if hits == 0 {
-                continue;
-            }
-            match best {
-                Some((_, most)) if hits < most => {}
-                Some((_, most)) if hits == most => tied = true,
-                _ => {
-                    best = Some((entry, hits));
-                    tied = false;
-                }
-            }
-        }
-        if tied {
-            None
-        } else {
-            best.map(|(entry, _)| entry)
-        }
-    }
-
     /// The enum a declared type text names: a bare (possibly dotted)
     /// identifier, optionally with type arguments — `Shape`,
     /// `Option<number>`, `ns.Token` — and nothing else. Type arguments are
@@ -937,7 +948,7 @@ fn walk(program: &Program, table: &Table, depth: Depth, out: &mut PatternAnalyse
             | Segment::Enum(_)
             | Segment::ValModifier(_) => {}
             Segment::Match(expr) => {
-                let analysis = analyze_match(expr, table, depth, &mut names_of(out));
+                let analysis = analyze_match(expr, table, depth);
                 out.matches.push(analysis);
                 walk(&expr.scrutinee, table, depth, out);
                 for arm in &expr.arms {
@@ -948,7 +959,7 @@ fn walk(program: &Program, table: &Table, depth: Depth, out: &mut PatternAnalyse
                 }
             }
             Segment::TupleMatch(expr) => {
-                let analysis = analyze_tuple_match(expr, table, depth, &mut names_of(out));
+                let analysis = analyze_tuple_match(expr, table, depth);
                 out.matches.push(analysis);
                 for (_, scrutinee) in &expr.scrutinees {
                     walk(scrutinee, table, depth, out);
@@ -962,7 +973,7 @@ fn walk(program: &Program, table: &Table, depth: Depth, out: &mut PatternAnalyse
             }
             Segment::Try(stmt) => walk(&stmt.expr, table, depth, out),
             Segment::LetElse(stmt) => {
-                let site = analyze_let_else(stmt, table, depth, &mut names_of(out));
+                let site = analyze_let_else(stmt, table, depth);
                 out.sites.push(site);
                 walk(&stmt.expr, table, depth, out);
                 walk(&stmt.else_body, table, depth, out);
@@ -997,7 +1008,7 @@ fn walk(program: &Program, table: &Table, depth: Depth, out: &mut PatternAnalyse
 }
 
 fn walk_if_let(stmt: &IfLetStmt, table: &Table, depth: Depth, out: &mut PatternAnalyses) {
-    let site = analyze_if_let(stmt, table, depth, &mut names_of(out));
+    let site = analyze_if_let(stmt, table, depth);
     out.sites.push(site);
     walk(&stmt.expr, table, depth, out);
     walk(&stmt.body, table, depth, out);
@@ -1008,15 +1019,10 @@ fn walk_if_let(stmt: &IfLetStmt, table: &Table, depth: Depth, out: &mut PatternA
     }
 }
 
-fn analyze_match(
-    expr: &MatchExpr,
-    table: &Table,
-    depth: Depth,
-    names: &mut Names,
-) -> MatchAnalysis {
-    let unresolved_before = names.unresolved.len();
-    // The subject is identified from *every* arm's tags, guarded or not —
-    // the same identification sema uses.
+fn analyze_match(expr: &MatchExpr, table: &Table, depth: Depth) -> MatchAnalysis {
+    // The subject is read from *every* arm's tags, guarded or not — the
+    // type-reading counterpart of the resolver's identification (name
+    // resolution itself is [`crate::resolve`]'s and attached afterwards).
     let tags: Vec<&str> = expr
         .arms
         .iter()
@@ -1026,16 +1032,6 @@ fn analyze_match(
         })
         .collect();
     let subject = table.resolve(&tags);
-
-    // Resolution runs over the same alternatives, against the enum the
-    // tags identify — before any question that assumes they resolved.
-    if let Some(entry) = table.identify(&tags) {
-        for arm in &expr.arms {
-            if let Pattern::Tags(alts) = &arm.pattern {
-                resolve_alternatives(alts, entry, table, names);
-            }
-        }
-    }
 
     let arms = expr
         .arms
@@ -1062,20 +1058,15 @@ fn analyze_match(
         subjects: vec![subject.map(to_subject)],
         arms,
         coverage,
-        has_unresolved: names.unresolved.len() > unresolved_before,
+        // Filled by `attach_resolution` — the resolver owns the answer.
+        has_unresolved: false,
     }
 }
 
-fn analyze_tuple_match(
-    expr: &TupleMatchExpr,
-    table: &Table,
-    depth: Depth,
-    names: &mut Names,
-) -> MatchAnalysis {
+fn analyze_tuple_match(expr: &TupleMatchExpr, table: &Table, depth: Depth) -> MatchAnalysis {
     let arity = expr.scrutinees.len();
-    let unresolved_before = names.unresolved.len();
-    // Each position resolves independently, from the tags every arm uses
-    // there — sema's tuple identification.
+    // Each position reads its subject independently, from the tags every
+    // arm uses there.
     let subjects: Vec<Option<(&str, &[MatchConstructor])>> = (0..arity)
         .map(|p| {
             let tags: Vec<&str> = expr
@@ -1091,17 +1082,6 @@ fn analyze_tuple_match(
                     TuplePattern::Wildcard => Vec::new(),
                 })
                 .collect();
-            // Each position is its own resolution question, against the
-            // enum that position's tags identify.
-            if let Some(entry) = table.identify(&tags) {
-                for arm in &expr.arms {
-                    if let TuplePattern::Elems(elems) = &arm.pattern
-                        && let Some(Pattern::Tags(alts)) = elems.get(p)
-                    {
-                        resolve_alternatives(alts, entry, table, names);
-                    }
-                }
-            }
             table.resolve(&tags)
         })
         .collect();
@@ -1142,7 +1122,8 @@ fn analyze_tuple_match(
         subjects: subjects.into_iter().map(|s| s.map(to_subject)).collect(),
         arms,
         coverage: tuple_coverage_of(expr, table),
-        has_unresolved: names.unresolved.len() > unresolved_before,
+        // Filled by `attach_resolution` — the resolver owns the answer.
+        has_unresolved: false,
     }
 }
 
@@ -1159,12 +1140,7 @@ fn to_subject((name, constructors): (&str, &[MatchConstructor])) -> MatchSubject
 /// no or-patterns, no nested patterns — so the analysis is the
 /// single-alternative case of [`analyze_group`] with the arm bookkeeping
 /// dropped.
-fn analyze_let_else(
-    stmt: &LetElseStmt,
-    table: &Table,
-    depth: Depth,
-    names: &mut Names,
-) -> PatternSite {
+fn analyze_let_else(stmt: &LetElseStmt, table: &Table, depth: Depth) -> PatternSite {
     let end = stmt.tag_off + stmt.tag.len();
     analyze_site(
         SiteKind::LetElse,
@@ -1175,13 +1151,12 @@ fn analyze_let_else(
         &stmt.bindings,
         table,
         depth,
-        names,
     )
 }
 
 /// Analyzes one `if let` link as a [`PatternSite`]. Chained `else if let`s
 /// are separate sites, recorded by the walk.
-fn analyze_if_let(stmt: &IfLetStmt, table: &Table, depth: Depth, names: &mut Names) -> PatternSite {
+fn analyze_if_let(stmt: &IfLetStmt, table: &Table, depth: Depth) -> PatternSite {
     let pattern = &stmt.pattern;
     analyze_site(
         SiteKind::IfLet,
@@ -1192,13 +1167,13 @@ fn analyze_if_let(stmt: &IfLetStmt, table: &Table, depth: Depth, names: &mut Nam
         pattern.bindings.as_deref().unwrap_or_default(),
         table,
         depth,
-        names,
     )
 }
 
-/// The body both single-pattern constructs share: identify the subject
-/// from the one tag, resolve the names against it, and record the
-/// bindings' declared types.
+/// The body both single-pattern constructs share: read the subject from
+/// the one tag and record the bindings' declared types. (Resolving the
+/// names — and the near-miss report when they do not resolve — is
+/// [`crate::resolve`]'s, attached afterwards.)
 #[allow(clippy::too_many_arguments)]
 fn analyze_site(
     kind: SiteKind,
@@ -1209,47 +1184,8 @@ fn analyze_site(
     bindings: &[Binding],
     table: &Table,
     depth: Depth,
-    names: &mut Names,
 ) -> PatternSite {
     let subject = table.resolve(&[tag]);
-    match table.identify(&[tag]).and_then(|entry| {
-        entry
-            .constructors
-            .iter()
-            .find(|c| c.tag == tag)
-            .map(|c| (entry, c))
-    }) {
-        // The tag resolved: its field set is as knowable as a match arm's.
-        Some((entry, constructor)) => {
-            names.resolved(
-                NameKind::Case,
-                tag,
-                (tag_off, tag_off + tag.len()),
-                entry,
-                None,
-            );
-            resolve_bindings(bindings, entry, constructor, table, names);
-        }
-        // It did not. One tag is thin evidence — no other tag in the site
-        // says which enum this is — so the licence is tightened to a
-        // *single* edit (transposition included) and to a unique nearest
-        // enum. Two-edit distances need the corroboration only a match's
-        // other arms can give.
-        None => {
-            if let Some((entry, suggestion)) = unique_near_case(table, tag) {
-                names.unresolved.push(UnresolvedName {
-                    kind: NameKind::Case,
-                    name: tag.to_string(),
-                    start: tag_off,
-                    end: tag_off + tag.len(),
-                    enum_name: entry.name.clone(),
-                    origin: entry.origin.clone(),
-                    tag: None,
-                    suggestion,
-                });
-            }
-        }
-    }
 
     let mut pattern_bindings = Vec::new();
     if depth == Depth::Full {
@@ -1276,254 +1212,6 @@ fn analyze_site(
         subject: subject.map(to_subject),
         pattern_bindings,
     }
-}
-
-/// The resolution phase over one alternative list: every tag against the
-/// identified enum's cases, then every binding against the case's fields.
-fn resolve_alternatives(alts: &[TagPattern], entry: &Entry, table: &Table, names: &mut Names) {
-    for alt in alts {
-        match entry.constructors.iter().find(|c| c.tag == alt.tag) {
-            Some(constructor) => {
-                names.resolved(
-                    NameKind::Case,
-                    &alt.tag,
-                    (alt.tag_off, alt.tag_off + alt.tag.len()),
-                    entry,
-                    None,
-                );
-                resolve_bindings(
-                    alt.bindings.as_deref().unwrap_or_default(),
-                    entry,
-                    constructor,
-                    table,
-                    names,
-                );
-            }
-            None => {
-                if let Some(suggestion) =
-                    nearest(&alt.tag, entry.constructors.iter().map(|c| c.tag.as_str()))
-                {
-                    names.unresolved.push(UnresolvedName {
-                        kind: NameKind::Case,
-                        name: alt.tag.clone(),
-                        start: alt.tag_off,
-                        end: alt.tag_off + alt.tag.len(),
-                        enum_name: entry.name.clone(),
-                        origin: entry.origin.clone(),
-                        tag: None,
-                        suggestion,
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// The resolution phase over one alternative's bindings: each field name
-/// against the constructor's declared fields, recursing through nested
-/// patterns via the field's declared type.
-///
-/// A constructor whose field list is unknown (`fields: None` — a unit
-/// case, or an imported declaration that carried tags only) has no names
-/// to compare against, so nothing is reported for it.
-fn resolve_bindings(
-    bindings: &[Binding],
-    entry: &Entry,
-    constructor: &MatchConstructor,
-    table: &Table,
-    names: &mut Names,
-) {
-    let Some(fields) = constructor.fields.as_deref() else {
-        return;
-    };
-    for b in bindings {
-        match fields.iter().find(|f| f.name == b.name) {
-            Some(field) => {
-                names.resolved(
-                    NameKind::Field,
-                    &b.name,
-                    (b.name_span.start, b.name_span.end),
-                    entry,
-                    Some(&constructor.tag),
-                );
-                // A nested pattern is resolved against the field's own
-                // declared type, when that type names an enum.
-                if let Some(inner) = &b.nested
-                    && let Some(nested_entry) = table.entry_of_type(&field.ty)
-                {
-                    match nested_entry
-                        .constructors
-                        .iter()
-                        .find(|c| c.tag == inner.tag)
-                    {
-                        Some(nested_constructor) => {
-                            names.resolved(
-                                NameKind::Case,
-                                &inner.tag,
-                                (inner.tag_off, inner.tag_off + inner.tag.len()),
-                                nested_entry,
-                                None,
-                            );
-                            resolve_bindings(
-                                inner.bindings.as_deref().unwrap_or_default(),
-                                nested_entry,
-                                nested_constructor,
-                                table,
-                                names,
-                            );
-                        }
-                        None => {
-                            if let Some(suggestion) = nearest(
-                                &inner.tag,
-                                nested_entry.constructors.iter().map(|c| c.tag.as_str()),
-                            ) {
-                                names.unresolved.push(UnresolvedName {
-                                    kind: NameKind::Case,
-                                    name: inner.tag.clone(),
-                                    start: inner.tag_off,
-                                    end: inner.tag_off + inner.tag.len(),
-                                    enum_name: nested_entry.name.clone(),
-                                    origin: nested_entry.origin.clone(),
-                                    tag: None,
-                                    suggestion,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            None => {
-                if let Some(suggestion) = nearest(&b.name, fields.iter().map(|f| f.name.as_str())) {
-                    names.unresolved.push(UnresolvedName {
-                        kind: NameKind::Field,
-                        name: b.name.clone(),
-                        start: b.name_span.start,
-                        end: b.name_span.end,
-                        enum_name: entry.name.clone(),
-                        origin: entry.origin.clone(),
-                        tag: Some(constructor.tag.clone()),
-                        suggestion,
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// The one enum of the table with a case exactly one edit from `tag` —
-/// the strict licence a single-pattern site reports under. `None` when no
-/// enum is that close, or when more than one is (an ambiguous suggestion
-/// is no suggestion).
-fn unique_near_case<'t>(table: &'t Table, tag: &str) -> Option<(&'t Entry, String)> {
-    let mut found: Option<(&Entry, String)> = None;
-    for entry in &table.entries {
-        let Some((suggestion, _)) =
-            nearest_within(tag, entry.constructors.iter().map(|c| c.tag.as_str()), 1)
-        else {
-            continue;
-        };
-        if found.is_some() {
-            return None;
-        }
-        found = Some((entry, suggestion));
-    }
-    found
-}
-
-/// The declared name `written` looks like a misspelling of, if any — the
-/// analysis' **licence to report** an unresolved name.
-///
-/// rlc does not know the scrutinee's type, so a name that resolves to
-/// nothing is not by itself wrong: tag patterns match hand-written tagged
-/// unions too, and their names are in no declaration table. What makes a
-/// report safe is being able to say what to write instead, so this is the
-/// whole rule — no suggestion, no error.
-///
-/// ```
-/// // a real typo resolves; an unrelated name does not
-/// let src = "enum Shape { Circle(radius: number), Empty }\n\
-///            const v = match (s) { Circel(radius) => radius, Empty => 0 };\n";
-/// let found = rlc::pattern_analyses(src, &[]);
-/// assert_eq!(found.unresolved[0].name, "Circel");
-/// assert_eq!(found.unresolved[0].suggestion, "Circle");
-/// ```
-pub(crate) fn nearest<'a>(
-    written: &str,
-    declared: impl Iterator<Item = &'a str>,
-) -> Option<String> {
-    nearest_within(written, declared, usize::MAX).map(|(name, _)| name)
-}
-
-/// [`nearest`] with an explicit ceiling on how far a name may be and still
-/// count — and the distance, so a caller can weigh the evidence.
-pub(crate) fn nearest_within<'a>(
-    written: &str,
-    declared: impl Iterator<Item = &'a str>,
-    ceiling: usize,
-) -> Option<(String, usize)> {
-    let mut best: Option<(&str, usize)> = None;
-    for name in declared {
-        if name == written {
-            return None;
-        }
-        let Some(distance) = typo_distance(written, name).filter(|d| *d <= ceiling) else {
-            continue;
-        };
-        if best.is_none_or(|(_, d)| distance < d) {
-            best = Some((name, distance));
-        }
-    }
-    best.map(|(name, distance)| (name.to_string(), distance))
-}
-
-/// The edit distance between two names when it is small enough to call a
-/// misspelling, `None` otherwise. Case alone always counts as one
-/// (`circle` for `Circle`); otherwise the budget scales with the shorter
-/// name, so short names — where every other name is "close" — are not
-/// suggested for each other (`Ok` is never a typo of `Err`).
-fn typo_distance(written: &str, declared: &str) -> Option<usize> {
-    if written.eq_ignore_ascii_case(declared) {
-        return Some(1);
-    }
-    let shortest = written.chars().count().min(declared.chars().count());
-    let budget = match shortest {
-        0..=2 => return None,
-        3 => 1,
-        _ => 2,
-    };
-    let distance = edit_distance(written, declared);
-    (distance <= budget).then_some(distance)
-}
-
-/// Optimal string alignment distance over characters — Levenshtein plus
-/// **transposition as a single edit**.
-///
-/// Transposing two letters (`Circel` for `Circle`) is the commonest typo
-/// there is; counting it as one edit rather than two is what lets a
-/// single-pattern site report it (see [`analyze_site`]).
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut grid = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for (i, row) in grid.iter_mut().enumerate() {
-        row[0] = i;
-    }
-    for (j, cell) in grid[0].iter_mut().enumerate() {
-        *cell = j;
-    }
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut best = (grid[i - 1][j] + 1)
-                .min(grid[i][j - 1] + 1)
-                .min(grid[i - 1][j - 1] + cost);
-            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                best = best.min(grid[i - 2][j - 2] + 1);
-            }
-            grid[i][j] = best;
-        }
-    }
-    grid[a.len()][b.len()]
 }
 
 /// Analyzes one alternative list (`A(x) | B(x)`): every alternative
@@ -2551,15 +2239,6 @@ mod tests {
             &[],
         );
         assert!(analyses.unresolved.is_empty());
-    }
-
-    #[test]
-    fn a_transposition_counts_as_one_edit() {
-        // Which is what lets a single-pattern site report `Circel`.
-        assert_eq!(edit_distance("Circel", "Circle"), 1);
-        assert_eq!(edit_distance("Cyrcla", "Circle"), 2);
-        assert_eq!(typo_distance("Ok", "Er"), None, "short names stay apart");
-        assert_eq!(typo_distance("circle", "Circle"), Some(1), "case alone");
     }
 
     #[test]

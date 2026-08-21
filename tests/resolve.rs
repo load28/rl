@@ -8,7 +8,8 @@ use rlc::resolve::{self, DefKind, Namespace, Res, Resolution, UseKind};
 
 fn resolved(source: &str, externs: &[ExternEnum]) -> (hir::HirFile, Resolution) {
     let mut hir = hir::lower_source(FileId(0), source);
-    let resolution = resolve::resolve_file(&mut hir, externs);
+    let decls: Vec<resolve::ExternDecl> = externs.iter().map(Into::into).collect();
+    let resolution = resolve::resolve_file(&mut hir, &decls);
     (hir, resolution)
 }
 

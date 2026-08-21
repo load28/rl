@@ -130,7 +130,8 @@
 | TASK-120 | 구조화 다중 진단 — Phase 0 (TASK-117 흡수) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-120](./TASK-120-structured-diagnostics.md) |
 | TASK-121 | HIR 기반 — Phase 1 (ID 체계, arena, lowering, source map) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-121](./TASK-121-hir-foundation.md) |
 | TASK-122 | 선언 수집과 이름 해석 — Phase 2 (resolve) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-122](./TASK-122-name-resolution.md) |
+| TASK-123 | 이름 해석의 단일화 — analysis가 resolver를 소비 (Phase 3 1/2) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-123](./TASK-123-resolver-owns-names.md) |
 
 ## 다음 태스크 번호
 
-**TASK-123**
+**TASK-124**

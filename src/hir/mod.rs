@@ -33,6 +33,7 @@ pub use ids::{
     Arena, BodyId, DefId, ExprId, FieldId, FileId, LocalId, NodeId, OwnerId, PatternId,
     PatternSiteId, ScopeId, VariantId,
 };
+pub(crate) use lower::lower_program;
 pub use lower::lower_source;
 
 /// A half-open byte range `[start, end)` in the lowered file's source.

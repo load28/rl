@@ -24,17 +24,70 @@
 
 use std::collections::HashMap;
 
-use crate::ExternEnum;
-use crate::analysis::{nearest, nearest_within};
 use crate::hir::{
     self, Arena, DefId, FieldBinding, HirFile, NodeId, Pat, PatternId, PatternSiteId, SiteKind,
     Span,
 };
 
+/// An imported declaration as the resolver receives it: the name it is
+/// known by in the importing file's scope (aliases applied), where it came
+/// from, and its variants — with payload fields when the collector had
+/// them ([`crate::EnumSymbol`]), tags only otherwise ([`crate::ExternEnum`]).
+#[derive(Debug, Clone)]
+pub struct ExternDecl {
+    /// The name in the importing file's scope.
+    pub name: String,
+    /// The import specifier, when recorded.
+    pub from: Option<String>,
+    /// The variants.
+    pub variants: Vec<ExternVariant>,
+}
+
+/// One variant of an [`ExternDecl`]: the tag, and — when the collector had
+/// them — the payload fields.
+pub type ExternVariant = (String, Option<Vec<ExternField>>);
+
+/// One payload field of an [`ExternVariant`]: `(name, optional, type text)`.
+pub type ExternField = (String, bool, String);
+
+impl From<&crate::ExternEnum> for ExternDecl {
+    fn from(e: &crate::ExternEnum) -> ExternDecl {
+        ExternDecl {
+            name: e.name.clone(),
+            from: e.from.clone(),
+            variants: e.tags.iter().map(|t| (t.clone(), None)).collect(),
+        }
+    }
+}
+
+impl From<&crate::EnumSymbol> for ExternDecl {
+    fn from(e: &crate::EnumSymbol) -> ExternDecl {
+        ExternDecl {
+            name: e.name.clone(),
+            from: None,
+            variants: e
+                .cases
+                .iter()
+                .map(|c| {
+                    (
+                        c.tag.clone(),
+                        c.fields.as_ref().map(|fields| {
+                            fields
+                                .iter()
+                                .map(|f| (f.name.clone(), f.optional, f.ty.clone()))
+                                .collect()
+                        }),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Resolves one lowered file against its imported declarations. Records
 /// definition name spans into the file's source map (local declarations
 /// only — an import or a built-in has no position in this file).
-pub fn resolve_file(hir: &mut HirFile, externs: &[ExternEnum]) -> Resolution {
+pub fn resolve_file(hir: &mut HirFile, externs: &[ExternDecl]) -> Resolution {
     let mut resolver = Resolver {
         resolution: Resolution::default(),
     };
@@ -244,6 +297,9 @@ pub struct SiteResolution {
 /// suggestion, no error — an unknown name may be a hand-written union's).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedUse {
+    /// The site the name was written in — the recovery boundary a
+    /// reporter suppresses that site's coverage question by.
+    pub site: PatternSiteId,
     /// The name's node (span = the name as written).
     pub node: NodeId,
     /// The name as written.
@@ -279,7 +335,7 @@ impl Resolver {
     /// then imported ones (shadowed by locals), then the built-ins
     /// (shadowed by both) — `Option` and `Result` enter as definitions
     /// like any other, not as string special cases.
-    fn collect(&mut self, hir: &mut HirFile, externs: &[ExternEnum]) {
+    fn collect(&mut self, hir: &mut HirFile, externs: &[ExternDecl]) {
         let locals: Vec<(String, EnumDef, Option<Span>)> = hir
             .items
             .iter()
@@ -327,24 +383,35 @@ impl Resolver {
         for (name, data, span) in locals {
             self.declare_enum(name, data, span, hir);
         }
-        for extern_enum in externs {
-            if self.resolution.type_ns.contains_key(&extern_enum.name) {
+        for extern_decl in externs {
+            if self.resolution.type_ns.contains_key(&extern_decl.name) {
                 continue; // shadowed by a local declaration
             }
             self.declare_enum(
-                extern_enum.name.clone(),
+                extern_decl.name.clone(),
                 EnumDef {
                     origin: DeclOrigin::Imported {
-                        from: extern_enum.from.clone(),
+                        from: extern_decl.from.clone(),
                     },
-                    variants: extern_enum
-                        .tags
+                    variants: extern_decl
+                        .variants
                         .iter()
-                        .map(|tag| VariantDecl {
+                        .map(|(tag, fields)| VariantDecl {
                             name: tag.clone(),
                             node: None,
                             hir: None,
-                            fields: None,
+                            fields: fields.as_ref().map(|fields| {
+                                fields
+                                    .iter()
+                                    .map(|(name, optional, ty)| FieldDecl {
+                                        name: name.clone(),
+                                        node: None,
+                                        hir: None,
+                                        optional: *optional,
+                                        ty_text: ty.clone(),
+                                    })
+                                    .collect()
+                            }),
                         })
                         .collect(),
                 },
@@ -424,12 +491,19 @@ impl Resolver {
             match subject {
                 Some(enum_def) => {
                     for arm in &site.arms {
-                        self.resolve_position(hir, arm.pattern, position, positions, enum_def);
+                        self.resolve_position(
+                            hir,
+                            site_id,
+                            arm.pattern,
+                            position,
+                            positions,
+                            enum_def,
+                        );
                     }
                 }
                 None if single_pattern => {
                     for arm in &site.arms {
-                        self.report_near_miss(hir, arm.pattern);
+                        self.report_near_miss(hir, site_id, arm.pattern);
                     }
                 }
                 None => {}
@@ -495,6 +569,7 @@ impl Resolver {
     fn resolve_position(
         &mut self,
         hir: &HirFile,
+        site: PatternSiteId,
         pattern: PatternId,
         position: usize,
         positions: usize,
@@ -504,22 +579,22 @@ impl Resolver {
             Pat::Wildcard | Pat::Literal(_) => {}
             Pat::Or(alts) => {
                 for &alt in alts {
-                    self.resolve_position(hir, alt, position, positions, enum_def);
+                    self.resolve_position(hir, site, alt, position, positions, enum_def);
                 }
             }
             Pat::Tuple(elems) => {
                 if positions > 1 {
                     if let Some(&elem) = elems.get(position) {
-                        self.resolve_position(hir, elem, 0, 1, enum_def);
+                        self.resolve_position(hir, site, elem, 0, 1, enum_def);
                     }
                 } else {
                     for &elem in elems {
-                        self.resolve_position(hir, elem, 0, 1, enum_def);
+                        self.resolve_position(hir, site, elem, 0, 1, enum_def);
                     }
                 }
             }
             Pat::Constructor { path, fields } => {
-                self.resolve_constructor(hir, path, fields.as_deref(), enum_def);
+                self.resolve_constructor(hir, site, path, fields.as_deref(), enum_def);
             }
         }
     }
@@ -527,6 +602,7 @@ impl Resolver {
     fn resolve_constructor(
         &mut self,
         hir: &HirFile,
+        site: PatternSiteId,
         path: &hir::UnresolvedPath,
         fields: Option<&[hir::FieldPat]>,
         enum_def: DefId,
@@ -548,7 +624,7 @@ impl Resolver {
                     .uses
                     .insert(path.node, Res::Variant(variant));
                 if let Some(fields) = fields {
-                    self.resolve_fields(hir, fields, variant);
+                    self.resolve_fields(hir, site, fields, variant);
                 }
             }
             None => {
@@ -561,6 +637,7 @@ impl Resolver {
                 self.resolution.uses.insert(path.node, Res::Unresolved);
                 if let Some(suggestion) = suggestion {
                     self.resolution.unresolved.push(UnresolvedUse {
+                        site,
                         node: path.node,
                         name: path.name.clone(),
                         kind: UseKind::Case,
@@ -573,7 +650,13 @@ impl Resolver {
         }
     }
 
-    fn resolve_fields(&mut self, hir: &HirFile, fields: &[hir::FieldPat], variant: VariantRef) {
+    fn resolve_fields(
+        &mut self,
+        hir: &HirFile,
+        site: PatternSiteId,
+        fields: &[hir::FieldPat],
+        variant: VariantRef,
+    ) {
         let Some(declared) = self.resolution.variant(variant).and_then(|v| {
             v.fields.as_ref().map(|fields| {
                 fields
@@ -611,7 +694,7 @@ impl Resolver {
                         && let Some(nested_enum) = self.enum_of_type(&declared[index].1)
                         && let Pat::Constructor { path, fields } = &hir.patterns[*inner]
                     {
-                        self.resolve_constructor(hir, path, fields.as_deref(), nested_enum);
+                        self.resolve_constructor(hir, site, path, fields.as_deref(), nested_enum);
                     }
                 }
                 None => {
@@ -622,6 +705,7 @@ impl Resolver {
                     self.resolution.uses.insert(field_pat.node, Res::Unresolved);
                     if let Some(suggestion) = suggestion {
                         self.resolution.unresolved.push(UnresolvedUse {
+                            site,
                             node: field_pat.node,
                             name: field_pat.name.clone(),
                             kind: UseKind::Field,
@@ -638,7 +722,7 @@ impl Resolver {
     /// The single-pattern near-miss licence: one tag is thin evidence, so
     /// an unidentified `if let`/let-else tag is reported only when exactly
     /// one enum has a case a *single* edit away (transposition included).
-    fn report_near_miss(&mut self, hir: &HirFile, pattern: PatternId) {
+    fn report_near_miss(&mut self, hir: &HirFile, site: PatternSiteId, pattern: PatternId) {
         let Pat::Constructor { path, .. } = &hir.patterns[pattern] else {
             return;
         };
@@ -663,6 +747,7 @@ impl Resolver {
         if let Some((enum_def, suggestion)) = found {
             self.resolution.uses.insert(path.node, Res::Unresolved);
             self.resolution.unresolved.push(UnresolvedUse {
+                site,
                 node: path.node,
                 name: path.name.clone(),
                 kind: UseKind::Case,
@@ -765,4 +850,111 @@ fn builtin_enums() -> Vec<(String, Vec<VariantDecl>)> {
             ],
         ),
     ]
+}
+
+/// The declared name `written` looks like a misspelling of, if any — the
+/// analysis' **licence to report** an unresolved name.
+///
+/// rlc does not know the scrutinee's type, so a name that resolves to
+/// nothing is not by itself wrong: tag patterns match hand-written tagged
+/// unions too, and their names are in no declaration table. What makes a
+/// report safe is being able to say what to write instead, so this is the
+/// whole rule — no suggestion, no error.
+///
+/// ```
+/// // a real typo resolves; an unrelated name does not
+/// let src = "enum Shape { Circle(radius: number), Empty }\n\
+///            const v = match (s) { Circel(radius) => radius, Empty => 0 };\n";
+/// let found = rlc::pattern_analyses(src, &[]);
+/// assert_eq!(found.unresolved[0].name, "Circel");
+/// assert_eq!(found.unresolved[0].suggestion, "Circle");
+/// ```
+fn nearest<'a>(written: &str, declared: impl Iterator<Item = &'a str>) -> Option<String> {
+    nearest_within(written, declared, usize::MAX).map(|(name, _)| name)
+}
+
+/// [`nearest`] with an explicit ceiling on how far a name may be and still
+/// count — and the distance, so a caller can weigh the evidence.
+fn nearest_within<'a>(
+    written: &str,
+    declared: impl Iterator<Item = &'a str>,
+    ceiling: usize,
+) -> Option<(String, usize)> {
+    let mut best: Option<(&str, usize)> = None;
+    for name in declared {
+        if name == written {
+            return None;
+        }
+        let Some(distance) = typo_distance(written, name).filter(|d| *d <= ceiling) else {
+            continue;
+        };
+        if best.is_none_or(|(_, d)| distance < d) {
+            best = Some((name, distance));
+        }
+    }
+    best.map(|(name, distance)| (name.to_string(), distance))
+}
+
+/// The edit distance between two names when it is small enough to call a
+/// misspelling, `None` otherwise. Case alone always counts as one
+/// (`circle` for `Circle`); otherwise the budget scales with the shorter
+/// name, so short names — where every other name is "close" — are not
+/// suggested for each other (`Ok` is never a typo of `Err`).
+fn typo_distance(written: &str, declared: &str) -> Option<usize> {
+    if written.eq_ignore_ascii_case(declared) {
+        return Some(1);
+    }
+    let shortest = written.chars().count().min(declared.chars().count());
+    let budget = match shortest {
+        0..=2 => return None,
+        3 => 1,
+        _ => 2,
+    };
+    let distance = edit_distance(written, declared);
+    (distance <= budget).then_some(distance)
+}
+
+/// Optimal string alignment distance over characters — Levenshtein plus
+/// **transposition as a single edit**.
+///
+/// Transposing two letters (`Circel` for `Circle`) is the commonest typo
+/// there is; counting it as one edit rather than two is what lets a
+/// single-pattern site report it (see [`analyze_site`]).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut grid = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in grid.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in grid[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (grid[i - 1][j] + 1)
+                .min(grid[i][j - 1] + 1)
+                .min(grid[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(grid[i - 2][j - 2] + 1);
+            }
+            grid[i][j] = best;
+        }
+    }
+    grid[a.len()][b.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_transposition_counts_as_one_edit() {
+        // Which is what lets a single-pattern site report `Circel`.
+        assert_eq!(edit_distance("Circel", "Circle"), 1);
+        assert_eq!(edit_distance("Cyrcla", "Circle"), 2);
+        assert_eq!(typo_distance("Ok", "Er"), None, "short names stay apart");
+        assert_eq!(typo_distance("circle", "Circle"), Some(1), "case alone");
+    }
 }
