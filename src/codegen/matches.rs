@@ -22,6 +22,55 @@ use crate::ast::{
     Arm, Binding, LiteralPattern, MatchExpr, Pattern, TagPattern, TupleMatchExpr, TuplePattern,
 };
 use crate::scanner::contains_await;
+use std::collections::HashSet;
+
+fn binding_name(binding: &Binding) -> &str {
+    binding.alias.as_deref().unwrap_or(&binding.name)
+}
+
+struct BindingRecovery {
+    available: HashSet<String>,
+    emitted: HashSet<String>,
+    discard_sequence: usize,
+}
+
+impl BindingRecovery {
+    fn from_bindings(bindings: &[&Binding]) -> Self {
+        let mut available = HashSet::new();
+        for binding in bindings {
+            Self::collect_names(binding, &mut available);
+        }
+        Self {
+            available,
+            emitted: HashSet::new(),
+            discard_sequence: 0,
+        }
+    }
+
+    fn collect_names(binding: &Binding, names: &mut HashSet<String>) {
+        if let Some(nested) = &binding.nested {
+            for inner in nested.bindings.as_deref().unwrap_or_default() {
+                Self::collect_names(inner, names);
+            }
+        } else {
+            names.insert(binding_name(binding).to_owned());
+        }
+    }
+
+    fn replacement(&mut self, binding: &Binding) -> Option<String> {
+        let name = binding_name(binding);
+        if self.emitted.insert(name.to_owned()) {
+            return None;
+        }
+        loop {
+            let candidate = format!("$rl_discard{}", self.discard_sequence);
+            self.discard_sequence += 1;
+            if self.available.insert(candidate.clone()) {
+                return Some(candidate);
+            }
+        }
+    }
+}
 
 /// True when the alternative carries a nested pattern — the arm then needs
 /// per-path conditions, which only the if-chain form can express.
@@ -101,6 +150,16 @@ pub(super) fn binding_list<'a, 'b>(
     e: &Emitter<'a>,
     bindings: impl Iterator<Item = &'b Binding>,
 ) -> Rope<'a> {
+    let bindings: Vec<&Binding> = bindings.collect();
+    let mut recovery = BindingRecovery::from_bindings(&bindings);
+    binding_list_with_recovery(e, bindings.into_iter(), &mut recovery)
+}
+
+fn binding_list_with_recovery<'a, 'b>(
+    e: &Emitter<'a>,
+    bindings: impl Iterator<Item = &'b Binding>,
+    recovery: &mut BindingRecovery,
+) -> Rope<'a> {
     let mut rope = Rope::new();
     for (i, b) in bindings.enumerate() {
         if i > 0 {
@@ -108,7 +167,10 @@ pub(super) fn binding_list<'a, 'b>(
         }
         let (name, at) = e.src_slice(b.name_span.start, b.name_span.end);
         rope.push_src(name, at);
-        if let Some(span) = b.alias_span {
+        if let Some(replacement) = recovery.replacement(b) {
+            rope.push_lit(": ");
+            rope.push_lit(replacement);
+        } else if let Some(span) = b.alias_span {
             rope.push_lit(": ");
             let (alias, at) = e.src_slice(span.start, span.end);
             rope.push_src(alias, at);
@@ -125,11 +187,19 @@ pub(super) fn binding_list<'a, 'b>(
 /// point the editor at an arbitrary alternative and let a rename rewrite
 /// that one alone.
 pub(super) fn binding_list_lit(bindings: &[Binding]) -> String {
+    let refs: Vec<&Binding> = bindings.iter().collect();
+    let mut recovery = BindingRecovery::from_bindings(&refs);
     bindings
         .iter()
-        .map(|b| match &b.alias {
-            Some(alias) => format!("{}: {}", b.name, alias),
-            None => b.name.clone(),
+        .map(|b| {
+            if let Some(replacement) = recovery.replacement(b) {
+                format!("{}: {replacement}", b.name)
+            } else {
+                match &b.alias {
+                    Some(alias) => format!("{}: {}", b.name, alias),
+                    None => b.name.clone(),
+                }
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -152,14 +222,37 @@ fn bind_rope_from<'a>(
     var: &str,
     mapped: bool,
 ) -> Rope<'a> {
+    let refs: Vec<&Binding> = bindings.as_deref().unwrap_or_default().iter().collect();
+    let mut recovery = BindingRecovery::from_bindings(&refs);
+    bind_rope_from_with_recovery(e, bindings, var, mapped, &mut recovery)
+}
+
+fn bind_rope_from_with_recovery<'a>(
+    e: &Emitter<'a>,
+    bindings: &Option<Vec<Binding>>,
+    var: &str,
+    mapped: bool,
+    recovery: &mut BindingRecovery,
+) -> Rope<'a> {
     let mut rope = Rope::new();
     match bindings {
         Some(bindings) if !bindings.is_empty() => {
             rope.push_lit("const { ");
             if mapped {
-                rope.append(binding_list(e, bindings.iter()));
+                rope.append(binding_list_with_recovery(e, bindings.iter(), recovery));
             } else {
-                rope.push_lit(binding_list_lit(bindings));
+                let rendered = bindings
+                    .iter()
+                    .map(|binding| match recovery.replacement(binding) {
+                        Some(replacement) => format!("{}: {replacement}", binding.name),
+                        None => match &binding.alias {
+                            Some(alias) => format!("{}: {alias}", binding.name),
+                            None => binding.name.clone(),
+                        },
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                rope.push_lit(rendered);
             }
             rope.push_lit(format!(" }} = {var}; "));
         }
@@ -179,6 +272,17 @@ pub(super) fn pattern_conds_binds<'a>(
     alt: &TagPattern,
     root: &str,
 ) -> (Rope<'a>, Rope<'a>) {
+    let binding_refs: Vec<&Binding> = alt.bindings.as_deref().unwrap_or_default().iter().collect();
+    let mut recovery = BindingRecovery::from_bindings(&binding_refs);
+    pattern_conds_binds_with_recovery(e, alt, root, &mut recovery)
+}
+
+fn pattern_conds_binds_with_recovery<'a>(
+    e: &Emitter<'a>,
+    alt: &TagPattern,
+    root: &str,
+    recovery: &mut BindingRecovery,
+) -> (Rope<'a>, Rope<'a>) {
     let mut conds: Vec<(String, Option<(usize, usize)>)> =
         vec![(format!("{root}.kind === \"{}\"", alt.tag), None)];
     let mut binds = Rope::new();
@@ -188,6 +292,7 @@ pub(super) fn pattern_conds_binds<'a>(
         root,
         &mut conds,
         &mut binds,
+        recovery,
     );
     // The conditions are glue, but each nested link *starts* with the
     // receiver expression that link tests — the one place a checker can be
@@ -244,11 +349,12 @@ fn collect_conds_binds<'a>(
     root: &str,
     conds: &mut Vec<(String, Option<(usize, usize)>)>,
     binds: &mut Rope<'a>,
+    recovery: &mut BindingRecovery,
 ) {
     let mut plain = bindings.iter().filter(|b| b.nested.is_none()).peekable();
     if plain.peek().is_some() {
         binds.push_lit("const { ");
-        binds.append(binding_list(e, plain));
+        binds.append(binding_list_with_recovery(e, plain, recovery));
         binds.push_lit(format!(" }} = {root}; "));
     }
     for b in bindings {
@@ -265,6 +371,7 @@ fn collect_conds_binds<'a>(
                 &path,
                 conds,
                 binds,
+                recovery,
             );
         }
     }
@@ -406,13 +513,23 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
                 inner.push_lit("\n");
             }
             TuplePattern::Elems(elems) => {
+                let binding_refs: Vec<&Binding> = elems
+                    .iter()
+                    .filter_map(|elem| match elem {
+                        Pattern::Tags(alts) => alts.first(),
+                        Pattern::Wildcard | Pattern::Literals(_) => None,
+                    })
+                    .flat_map(|alt| alt.bindings.as_deref().unwrap_or_default())
+                    .collect();
+                let mut recovery = BindingRecovery::from_bindings(&binding_refs);
                 let mut conds: Vec<Rope> = Vec::new();
                 let mut bind = Rope::new();
                 for (i, elem) in elems.iter().enumerate() {
                     let var = format!("$rl_m{i}");
                     if let Pattern::Tags(alts) = elem {
                         if alts.len() == 1 {
-                            let (cond, b) = pattern_conds_binds(e, &alts[0], &var);
+                            let (cond, b) =
+                                pattern_conds_binds_with_recovery(e, &alts[0], &var, &mut recovery);
                             conds.push(cond);
                             bind.append(b);
                         } else {
@@ -426,7 +543,13 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
                             let mut alt_cond = Rope::new();
                             alt_cond.push_lit(format!("({cond})"));
                             conds.push(alt_cond);
-                            bind.append(bind_rope_from(e, &alts[0].bindings, &var, false));
+                            bind.append(bind_rope_from_with_recovery(
+                                e,
+                                &alts[0].bindings,
+                                &var,
+                                false,
+                                &mut recovery,
+                            ));
                         }
                     }
                 }

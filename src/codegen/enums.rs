@@ -3,6 +3,7 @@
 
 use crate::ast::EnumDecl;
 use crate::scanner::*;
+use std::collections::HashSet;
 
 pub(super) fn emit_enum(decl: &EnumDecl) -> String {
     let EnumDecl {
@@ -41,8 +42,10 @@ pub(super) fn emit_enum(decl: &EnumDecl) -> String {
     } else {
         format!("<{}>", generic_param_names(generics).join(", "))
     };
+    let mut emitted_tags: HashSet<&str> = HashSet::new();
     let ctors: Vec<String> = cases
         .iter()
+        .filter(|case| emitted_tags.insert(case.tag.as_str()))
         .map(|c| match &c.fields {
             None => {
                 // unit case: a singleton value, kept narrow via `as const`

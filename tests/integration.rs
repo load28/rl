@@ -67,6 +67,30 @@ fn typecheck(src: &str) -> (bool, String) {
     )
 }
 
+/// Type-check code emitted despite recoverable rl diagnostics.
+fn typecheck_recovery(src: &str) -> (bool, String) {
+    let report = rlc::compile_report(&as_module(src), &Options::default());
+    assert!(!report.diagnostics.is_empty(), "expected an rl diagnostic");
+    let code = report
+        .emit
+        .expect("recoverable diagnostics still emit")
+        .code;
+    let dir = tmpdir();
+    let ts = dir.join("main.ts");
+    fs::write(&ts, &code).unwrap();
+    let out = Command::new("tsc")
+        .arg(&ts)
+        .arg("--noEmit")
+        .args(TSC_FLAGS)
+        .output()
+        .expect("failed to run tsc");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    (
+        out.status.success(),
+        format!("{text}\n---compiled---\n{code}"),
+    )
+}
+
 /// Type-check a snippet that imports the standard library: the std module is
 /// written next to it as `rl.ts` and both files go through tsc (`--noEmit`).
 /// Returns (ok, tsc output + compiled source).
@@ -95,6 +119,22 @@ fn typecheck_with_std(src: &str) -> (bool, String) {
         out.status.success(),
         format!("{text}\n---compiled---\n{code}"),
     )
+}
+
+#[test]
+fn recoverable_codegen_errors_do_not_create_tsc_errors() {
+    if !have("tsc") {
+        return;
+    }
+
+    let duplicate_case = "enum E { A(x: number), B, A(y: number) }\n";
+    let (ok, out) = typecheck_recovery(duplicate_case);
+    assert!(ok, "tsc rejected duplicate-case recovery:\n{out}");
+
+    let duplicate_binding = "enum E { A(left: number, right: number), B }\n\
+        const value = match (E.A(1, 2)) { A(left: x, right: x) => x, B => 0 };\n";
+    let (ok, out) = typecheck_recovery(duplicate_binding);
+    assert!(ok, "tsc rejected duplicate-binding recovery:\n{out}");
 }
 
 /// Compile rl source, emit JS with tsc, execute with node, return stdout lines.

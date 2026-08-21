@@ -3709,6 +3709,92 @@ fn compile_report_still_emits_under_recoverable_errors() {
 }
 
 #[test]
+fn duplicate_enum_case_emits_only_one_constructor_property() {
+    let src = "enum E { A(x: number), B, A(y: number) }\n";
+    let report = rlc::compile_report(src, &Options::default());
+    assert_eq!(report.diagnostics.len(), 1, "{:#?}", report.diagnostics);
+    assert_eq!(
+        report.diagnostics[0].code,
+        rlc::DiagnosticCode::EnumDuplicateCase
+    );
+    let code = report.emit.expect("duplicate cases are recoverable").code;
+    assert_eq!(code.matches("  A:").count(), 1, "{code}");
+    assert!(code.contains("  A: (x: number)"), "{code}");
+}
+
+#[test]
+fn duplicate_pattern_binding_is_renamed_in_recovery_output() {
+    let src = "enum E { A(left: number, right: number), B }\n\
+        const value = match (E.A(1, 2)) { A(left: x, right: x) => x, B => 0 };\n";
+    let report = rlc::compile_report(src, &Options::default());
+    assert_eq!(report.diagnostics.len(), 1, "{:#?}", report.diagnostics);
+    assert_eq!(
+        report.diagnostics[0].code,
+        rlc::DiagnosticCode::PatternDuplicateBinding
+    );
+    let code = report
+        .emit
+        .expect("duplicate bindings are recoverable")
+        .code;
+    assert!(
+        code.contains("const { left: x, right: $rl_discard0 } = $rl_m;"),
+        "{code}"
+    );
+}
+
+#[test]
+fn duplicate_nested_binding_is_renamed_across_destructuring_statements() {
+    let src = "enum Inner { Some(value: number), None }\n\
+        enum Outer { Ok(value: Inner, error: number), Err }\n\
+        const value = match (Outer.Err) {\n\
+          Ok(value: Some(value), error: value) => value,\n\
+          Err => 0,\n\
+        };\n";
+    let report = rlc::compile_report(src, &Options::default());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == rlc::DiagnosticCode::PatternDuplicateBinding),
+        "{:#?}",
+        report.diagnostics
+    );
+    let code = report
+        .emit
+        .expect("duplicate bindings are recoverable")
+        .code;
+    assert!(
+        code.contains(
+            "const { error: value } = $rl_m; const { value: $rl_discard0 } = $rl_m.value;"
+        ),
+        "{code}"
+    );
+}
+
+#[test]
+fn duplicate_tuple_binding_is_renamed_across_tuple_elements() {
+    let src = "enum E { A(value: number), B }\n\
+        const value = match (E.A(1), E.A(2)) { (A(value: x), A(value: x)) => x, _ => 0 };\n";
+    let report = rlc::compile_report(src, &Options::default());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == rlc::DiagnosticCode::PatternDuplicateBinding),
+        "{:#?}",
+        report.diagnostics
+    );
+    let code = report
+        .emit
+        .expect("duplicate bindings are recoverable")
+        .code;
+    assert!(
+        code.contains("const { value: x } = $rl_m0; const { value: $rl_discard0 } = $rl_m1;"),
+        "{code}"
+    );
+}
+
+#[test]
 fn compile_report_withholds_emission_when_the_output_cannot_be_typescript() {
     // A stray `|>` passes through verbatim, so the output would not parse:
     // that diagnostic blocks projection.
