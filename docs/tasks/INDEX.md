@@ -128,7 +128,8 @@
 | TASK-118 | 타입 에러 문안에서 구조적 타입을 선언 이름으로 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-118](./TASK-118-named-error-types-in-messages.md) |
 | TASK-119 | 컴파일러 중심부 전환 설계 (umbrella) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-119](./TASK-119-compiler-core-design.md) |
 | TASK-120 | 구조화 다중 진단 — Phase 0 (TASK-117 흡수) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-120](./TASK-120-structured-diagnostics.md) |
+| TASK-121 | HIR 기반 — Phase 1 (ID 체계, arena, lowering, source map) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-121](./TASK-121-hir-foundation.md) |
 
 ## 다음 태스크 번호
 
-**TASK-121**
+**TASK-122**
