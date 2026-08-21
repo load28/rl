@@ -459,6 +459,27 @@ fn a_restated_diagnostic_calls_a_case_by_its_declared_name() {
 }
 
 #[test]
+fn a_pattern_typo_suppresses_typed_exhaustiveness_for_that_match() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/typo.rl",
+        "enum Shape { Circle(radius: number), Square(size: number) }\n\
+         export function area(shape: Shape): number {\n\
+         \x20 return match (shape) { Circel(radius) => radius, Square(size) => size * size };\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("has no case `Circel`"),
+        "the cause is reported: {out}"
+    );
+    assert!(
+        !out.contains("not exhaustive"),
+        "the typo's typed cascade is suppressed: {out}"
+    );
+}
+
+#[test]
 fn a_ts_file_and_an_rl_file_share_one_project_graph() {
     let root = require_tsgo!();
     let dir = project(&[

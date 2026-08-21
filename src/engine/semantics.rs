@@ -175,6 +175,31 @@ pub(crate) fn translate(
     }
 }
 
+fn ts_message(code: u32, message: &str, declarations: &[DeclaredEnum]) -> String {
+    match name_types(message, declarations) {
+        Some(named) => format!("ts({code}): {message} (in rl's names: {named})"),
+        None => format!("ts({code}): {message}"),
+    }
+}
+
+fn finish_diagnostics(mut diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    diagnostics.sort_by(|left, right| {
+        (&left.path, left.position, left.end, &left.message).cmp(&(
+            &right.path,
+            right.position,
+            right.end,
+            &right.message,
+        ))
+    });
+    diagnostics.dedup_by(|right, left| {
+        left.path == right.path
+            && left.position == right.position
+            && left.end == right.end
+            && left.message == right.message
+    });
+    diagnostics
+}
+
 /// The message again, with every structural case type the declaration table
 /// **uniquely** recognizes written as the rl name it lowers from — `None`
 /// when it recognizes none of them and the restatement would be the message
@@ -203,7 +228,7 @@ pub(crate) fn translate(
 /// The restatement is a reading aid and never replaces the original — the
 /// caller carries TypeScript's own text along with it, because a name rl
 /// got wrong has to be checkable against what the checker actually said.
-fn name_types(message: &str, declarations: &[DeclaredEnum]) -> Option<String> {
+pub(crate) fn name_types(message: &str, declarations: &[DeclaredEnum]) -> Option<String> {
     let members = case_members(message, declarations);
     if members.is_empty() {
         return None;
@@ -504,7 +529,16 @@ pub(crate) fn report(
         // meant, it says that — over the construct's own text. The
         // declaration table its wording names types from is built only for
         // a file that has a diagnostic on glue at all, and once for it.
-        if projection::glue_anchor(file, diagnostic.start).is_some() {
+        if let Some(anchor) = projection::glue_anchor(file, diagnostic.start) {
+            if anchor.kind == AnchorKind::Match
+                && semantics.get(&file.source_path).is_some_and(|semantics| {
+                    semantics.analyses.matches.iter().any(|analysis| {
+                        analysis.keyword_off == anchor.src && analysis.has_unresolved
+                    })
+                })
+            {
+                continue;
+            }
             let declared: &[DeclaredEnum] = semantics
                 .get(&file.source_path)
                 .map(|s| s.analyses.declarations.as_slice())
@@ -527,6 +561,10 @@ pub(crate) fn report(
                 continue;
             }
         }
+        let declared: &[DeclaredEnum] = semantics
+            .get(&file.source_path)
+            .map(|s| s.analyses.declarations.as_slice())
+            .unwrap_or_default();
         match projection::diagnostic_source_offset(file, diagnostic.start) {
             Some((nearest, exact)) => {
                 // Exact: the user's own text, so the diagnostic covers
@@ -549,9 +587,8 @@ pub(crate) fn report(
                     position: Some(crate::line_col(&file.source, offset)),
                     end: end.map(|at| crate::line_col(&file.source, at)),
                     message: format!(
-                        "ts({}): {}{}",
-                        diagnostic.code,
-                        diagnostic.message,
+                        "{}{}",
+                        ts_message(diagnostic.code, &diagnostic.message, declared),
                         // By the error-layer contract rlc's output must not
                         // draw type errors, so say where it came from rather
                         // than pinning it on the line the position landed
@@ -667,6 +704,15 @@ pub(crate) fn report(
         for (offset, coverage) in
             crate::analysis::checked_coverage(&file.source, externs, asked, asked_payloads)
         {
+            if semantics.get(&file.source_path).is_some_and(|semantics| {
+                semantics
+                    .analyses
+                    .matches
+                    .iter()
+                    .any(|analysis| analysis.keyword_off == offset && analysis.has_unresolved)
+            }) {
+                continue;
+            }
             // A single match's witness is one pattern, quoted the way the
             // default path quotes one; a tuple match's is a combination of
             // positions, written as one `(a, b)` and left unquoted — the
@@ -846,7 +892,7 @@ pub(crate) fn report(
         });
     }
 
-    out
+    finish_diagnostics(out)
 }
 
 /// Matches the compiler's emitted declarations back to the snapshot's files.
@@ -1053,5 +1099,35 @@ mod tests {
             name_types("Type '{ kind: \"A\" | \"B\"; }'.", &declarations),
             None
         );
+    }
+
+    #[test]
+    fn an_ordinary_ts_message_also_uses_rl_names() {
+        let declarations = table("enum E { A(x: number), B }\n");
+        let said = ts_message(
+            2322,
+            "Type '{ kind: \"A\"; x: number; }' is not assignable.",
+            &declarations,
+        );
+        assert_eq!(
+            said,
+            "ts(2322): Type '{ kind: \"A\"; x: number; }' is not assignable. \
+             (in rl's names: Type 'E.A' is not assignable.)"
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_source_sorted_and_display_duplicates_are_merged() {
+        let at = |line, code: &str| Diagnostic {
+            path: PathBuf::from("/p/a.rl"),
+            position: Some((line, 1)),
+            end: Some((line, 2)),
+            message: "same".to_string(),
+            code: Some(code.to_string()),
+        };
+        let finished = finish_diagnostics(vec![at(2, "ts9999"), at(1, "ts1000"), at(2, "ts1001")]);
+        assert_eq!(finished.len(), 2);
+        assert_eq!(finished[0].position, Some((1, 1)));
+        assert_eq!(finished[1].position, Some((2, 1)));
     }
 }

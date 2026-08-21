@@ -846,7 +846,16 @@ impl Project {
                 }
                 continue;
             }
-            let mut message = raw;
+            let declared = declarations.get_or_insert_with(|| {
+                self.semantic_analyses(&path, &doc.source)
+                    .analyses
+                    .declarations
+                    .clone()
+            });
+            let mut message = match crate::engine::semantics::name_types(&raw, declared) {
+                Some(named) => format!("{raw} (in rl's names: {named})"),
+                None => raw,
+            };
             if !exact {
                 message.push_str(" (in code rlc generated for this construct)");
             }
