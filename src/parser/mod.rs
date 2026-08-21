@@ -370,6 +370,46 @@ fn recovery_statement_span(tokens: &[Token], start_idx: usize, range_end: usize)
     }
 }
 
+fn starts_statement(src: &str, tokens: &[Token], idx: usize, in_ternary: bool) -> bool {
+    if in_ternary {
+        return false;
+    }
+    let Some(previous) = idx.checked_sub(1).and_then(|idx| tokens.get(idx)) else {
+        return true;
+    };
+    if matches!(previous.kind, TokenKind::Punct(b'{' | b'}' | b';' | b':')) {
+        return true;
+    }
+    if matches!(previous.kind, TokenKind::Ident)
+        && matches!(&src[previous.span.start..previous.span.end], "else" | "do")
+    {
+        return true;
+    }
+    if !matches!(previous.kind, TokenKind::Punct(b')')) {
+        return false;
+    }
+    let mut depth = 0usize;
+    for open in (0..idx).rev() {
+        match tokens[open].kind {
+            TokenKind::Punct(b')') => depth += 1,
+            TokenKind::Punct(b'(') => {
+                depth -= 1;
+                if depth == 0 {
+                    return open.checked_sub(1).is_some_and(|before| {
+                        matches!(tokens[before].kind, TokenKind::Ident)
+                            && matches!(
+                                &src[tokens[before].span.start..tokens[before].span.end],
+                                "if" | "for" | "while" | "with"
+                            )
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 impl Parser<'_> {
     /// Parses a lexed token range covering `bytes[start..end]` into a
     /// [`Program`] whose segments cover the byte range exactly, in source
@@ -528,6 +568,24 @@ impl Parser<'_> {
                 && let Some((cur, byte_end, mut stmt)) =
                     tries::parse_try_stmt(Cursor::new(self, tokens, i + 1, end), tok.span)
             {
+                if !starts_statement(self.src, tokens, i, expr.1) {
+                    malformed.push(
+                        crate::error::RlError::span(
+                            stmt.span.start,
+                            stmt.span.end,
+                            "`try` is a statement, not an expression — bind its value first with \
+                             `const value = try <expression>;`"
+                                .to_string(),
+                        )
+                        .code(crate::DiagnosticCode::TryPlacement),
+                    );
+                    recoveries.push(RecoveryNode {
+                        span: stmt.span,
+                        kind: RecoveryKind::Expression,
+                    });
+                    i = cur.idx;
+                    continue;
+                }
                 stmt.in_function = crate::flow::in_function_body(self.src, tokens, i);
                 flush_verbatim(&mut segments, seg_start, tok.span.start);
                 segments.push(Segment::Try(stmt));

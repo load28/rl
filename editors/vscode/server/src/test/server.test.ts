@@ -547,3 +547,23 @@ test(
     assert.equal(covered(source, failed.range), "match");
   },
 );
+
+test(
+  "return try is diagnosed as an expression placement error",
+  { skip, timeout },
+  async () => {
+    const source = [
+      "const a = () => Result.Err(10);",
+      "",
+      "function Test(): Result<string, string> {",
+      "  return try a();",
+      "}",
+      "",
+    ].join("\n");
+    const diagnostics = await published(source);
+    const failed = diagnostics.find((d: any) => d.code === "try-placement");
+    assert.ok(failed, `no placement error in: ${JSON.stringify(diagnostics)}`);
+    assert.match(failed.message, /statement, not an expression/);
+    assert.equal(covered(source, failed.range), "try a()");
+  },
+);

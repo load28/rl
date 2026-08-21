@@ -117,6 +117,28 @@ test("diagnostics come back at positions in the .rl source", { skip }, async () 
   assert.equal(sliceOf(RENDER, error!.range), "bad");
 });
 
+test(
+  "a malformed rl construct does not hide an independent try type error",
+  { skip },
+  async () => {
+    const { rl } = workspace();
+    const source = [
+      "export function tryNonResult(value: number): number {",
+      "  const n = try value;",
+      "  return n;",
+      "}",
+      "const broken = 1 |> ;",
+      "",
+    ].join("\n");
+    engine.openDocument(COMPILER, rl, source);
+    const diagnostics = await engine.tsDiagnostics(COMPILER, rl);
+    const error = diagnostics.find((d) => d.code === 2339);
+    assert.ok(error, JSON.stringify(diagnostics));
+    assert.equal(sliceOf(source, error!.range), "try value");
+    engine.closeDocument(COMPILER, rl);
+  },
+);
+
 test("references find every use, in source coordinates", { skip }, async () => {
   const { rl } = workspace();
   const references = await engine.references(

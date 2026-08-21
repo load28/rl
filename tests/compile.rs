@@ -757,6 +757,29 @@ fn try_at_module_top_level_is_an_error() {
 }
 
 #[test]
+fn try_cannot_be_used_in_expression_position() {
+    for src in [
+        "function f() { return try read(); }\n",
+        "function f() { const run = () => try read(); }\n",
+        "function f(c: boolean) { const x = c ? 0 : try read(); }\n",
+    ] {
+        let diagnostics = rlc::analyze(src, &Options::default());
+        assert_eq!(diagnostics.len(), 1, "{src}\n{diagnostics:#?}");
+        assert_eq!(diagnostics[0].code, rlc::DiagnosticCode::TryPlacement);
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("statement, not an expression"),
+            "{src}\n{:#?}",
+            diagnostics[0]
+        );
+        let start = diagnostics[0].start.expect("placement start");
+        let end = diagnostics[0].end.expect("placement end");
+        assert_eq!(&src[start..end], "try read()");
+    }
+}
+
+#[test]
 fn try_inside_a_function_inside_a_scrutinee_is_allowed() {
     let out = ok(
         "const x = match (run(() => { try g(); return h(); })) {\n  Ok(value) => value,\n  Err(error) => 0,\n};\n",

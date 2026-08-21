@@ -217,6 +217,7 @@ rlc: nav.rl:4:15: match on (Conn, Mode) is not exhaustive: missing (Offline, Man
 
 | 메시지 | 원인과 해결 |
 |--------|-------------|
+| `` `try` is a statement, not an expression — bind its value first with `const value = try <expression>;` `` | `return try f()`·화살표 함수 본문·삼항식처럼 값을 요구하는 자리에 `try`를 직접 사용했습니다. `try` 선언문으로 값을 먼저 바인딩한 뒤 사용하세요. 위치는 `try <식>` |
 | `` `try` cannot be used here — it compiles to a `return`, which would exit this construct's own IIFE ... `` | match(스크루티니·암 본문)·`result` 블록·템플릿 보간 안의 문장 위치: 그 자리의 `return`은 둘러싼 함수가 아니라 구성물의 IIFE에서 반환됩니다. 그 자리에 **함수를 쓰면** 그 안의 `try`는 허용됩니다(Rust의 클로저 안 `?`) — 판정은 제어 흐름 기반입니다. 로직을 함수로 추출하거나, `result` 블록 안이라면 `<-` 바인딩을 쓰세요 ([§5.4](./language.md#54-사용-위치-제약)). 위치는 `try` |
 | `` `try` must be inside a function — it compiles to a `return` that propagates the `Err` ... `` | 모듈 최상위(또는 namespace 본문 등 함수 아닌 스코프)의 `try`: 방출되는 `return`이 나갈 함수가 없습니다. 함수 안으로 옮기세요 ([§5.4](./language.md#54-사용-위치-제약)). 위치는 `try` |
 | `` let-else cannot be used here — its `else` block's exit ... would leave this construct's own IIFE ... `` | `try`와 같은 제어 흐름 판정 — rl 구성물의 문장 영역에 직접 쓴 let-else만 에러이고, 그 자리에 쓴 함수 안에서는 허용됩니다. 모듈 최상위는 허용 ([§6.4](./language.md#64-사용-위치와-발산-제약)). 위치는 선언 키워드 |

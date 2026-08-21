@@ -25,9 +25,9 @@ use std::sync::Arc;
 
 use super::project::Project;
 use super::projection::module_path_of;
+use crate::EmitMapping;
 use crate::typescript::mapper;
 use crate::typescript::service::{Service, file_uri, service_binary, uri_path};
-use crate::{EmitMapping, MappedEmit};
 
 /// A position in a document: zero-based line, UTF-16 code units — the LSP
 /// convention, so an adapter converts nothing.
@@ -208,6 +208,9 @@ pub(crate) struct ServiceDoc {
     /// The glue each construct wrote — what a diagnostic landing outside
     /// every mapping is *about* (`crate::EmitAnchor`).
     anchors: Vec<crate::EmitAnchor>,
+    /// Parser-owned error ranges replaced only in this service projection.
+    /// TypeScript diagnostics intersecting one are recovery cascades.
+    recovered: Vec<(usize, usize)>,
 }
 
 /// A compiled completion probe: the buffer with `$rl_probe` spliced in at
@@ -775,10 +778,10 @@ impl Project {
     /// construct, matching the batch typed-check path.
     pub fn service_diagnostics(&mut self, path: &Path) -> Result<Vec<ServiceDiagnostic>, String> {
         let (doc, path) = self.serve(path)?;
-        // The checker may recover from malformed TypeScript and invent
-        // diagnostics throughout the file. Whether that recovery is safe
-        // is a property of the projected text, not of TypeScript's numeric
-        // diagnostic categories.
+        // An unhandled projection failure still gets the old raw emit-map
+        // fallback. Do not trust TypeScript's recovery from that malformed
+        // document; parser-owned recoveries have already made ordinary edit
+        // states valid before this point.
         if !projection_accepts_diagnostics(&doc.code) {
             return Ok(Vec::new());
         }
@@ -805,6 +808,9 @@ impl Project {
             let Some((s, e, exact)) = diagnostic_source_span(&doc, start, end) else {
                 continue;
             };
+            if recovery_intersects(&doc, s, e) {
+                continue;
+            }
             // An empty span (an error at a position, not over one) would
             // render as an invisible squiggle; give it the character it
             // points at.
@@ -945,6 +951,27 @@ fn projection_accepts_diagnostics(code: &str) -> bool {
     crate::verify::verify_output(code).is_ok()
 }
 
+fn service_doc(path: &Path, text: String) -> ServiceDoc {
+    let options = crate::Options {
+        filename: Some(path.to_str().unwrap_or("<input>")),
+        defer_to_checker: true,
+        rewrite_imports: crate::ImportRewrite::Off,
+        ..crate::Options::default()
+    };
+    let report = crate::compile_projection_report(&text, &options);
+    let (emit, recovered) = match report.emit {
+        Some(emit) => (emit, report.recovered),
+        None => (crate::emit_mapped(&text), Vec::new()),
+    };
+    ServiceDoc {
+        source: text,
+        code: emit.code,
+        mappings: emit.mappings,
+        anchors: emit.anchors,
+        recovered,
+    }
+}
+
 /// Serves one `.rl` file's projection, creating or refreshing it from the
 /// overlay or the disk. `None` when the file cannot be read.
 fn serve_one(
@@ -959,18 +986,7 @@ fn serve_one(
     let doc = match session.docs.get(path) {
         Some(doc) if doc.source == text => doc.clone(),
         _ => {
-            let MappedEmit {
-                code,
-                mappings,
-                anchors,
-                ..
-            } = crate::emit_mapped(&text);
-            let doc = Arc::new(ServiceDoc {
-                source: text,
-                code,
-                mappings,
-                anchors,
-            });
+            let doc = Arc::new(service_doc(path, text));
             session.docs.insert(path.to_path_buf(), doc.clone());
             doc
         }
@@ -1238,18 +1254,7 @@ fn serve_doc_only(
     match session.docs.get(path) {
         Some(doc) if doc.source == text => Some(doc.clone()),
         _ => {
-            let MappedEmit {
-                code,
-                mappings,
-                anchors,
-                ..
-            } = crate::emit_mapped(&text);
-            let doc = Arc::new(ServiceDoc {
-                source: text,
-                code,
-                mappings,
-                anchors,
-            });
+            let doc = Arc::new(service_doc(path, text));
             session.docs.insert(path.to_path_buf(), doc.clone());
             Some(doc)
         }
@@ -1317,6 +1322,15 @@ fn diagnostic_source_span(
     let (ss, exact) = mapper::to_source_or_nearest(&doc.mappings, sb)?;
     let s = mapper::to_utf16(&doc.source, ss);
     Some((s, s + 1, exact))
+}
+
+fn recovery_intersects(doc: &ServiceDoc, start: usize, end: usize) -> bool {
+    let end = end.max(start + 1);
+    doc.recovered.iter().any(|&(recovery_start, recovery_end)| {
+        let recovery_start = mapper::to_utf16(&doc.source, recovery_start);
+        let recovery_end = mapper::to_utf16(&doc.source, recovery_end);
+        start < recovery_end && recovery_start < end
+    })
 }
 
 /// A `[start, end)` pair of UTF-16 offsets as a [`Range`] over `text`.
@@ -1519,6 +1533,17 @@ mod tests {
             "const value = { A: 1, A: 2 };"
         ));
         assert!(!projection_accepts_diagnostics("const = ;"));
+    }
+
+    #[test]
+    fn service_projection_recovers_parser_error_nodes() {
+        let source = "function f(value: number) { const n = try value; return n; }\n\
+            const broken = 1 |> ;\n";
+        let doc = service_doc(Path::new("/p/src/a.rl"), source.to_string());
+        assert!(projection_accepts_diagnostics(&doc.code), "{}", doc.code);
+        assert_eq!(doc.recovered.len(), 1);
+        assert!(doc.code.contains("$rl_t0.kind"), "{}", doc.code);
+        assert!(doc.code.contains("const broken = 0"), "{}", doc.code);
     }
 
     #[test]
