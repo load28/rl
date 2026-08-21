@@ -126,7 +126,8 @@
 | TASK-116 | 진단을 정확한 구문 범위로 — 스팬 있는 에러 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-116](./TASK-116-diagnostic-spans.md) |
 | TASK-117 | 한 파일의 rl 에러를 여러 개 보고한다 (문제 기록) | 대기 | — | — | [TASK-117](./TASK-117-multiple-rl-diagnostics.md) |
 | TASK-118 | 타입 에러 문안에서 구조적 타입을 선언 이름으로 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-118](./TASK-118-named-error-types-in-messages.md) |
+| TASK-119 | 컴파일러 중심부 전환 설계 (umbrella) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-119](./TASK-119-compiler-core-design.md) |
 
 ## 다음 태스크 번호
 
-**TASK-119**
+**TASK-120**
