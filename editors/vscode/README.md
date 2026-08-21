@@ -91,7 +91,7 @@ head와 맞지 않아 콤비네이터 파라미터가 `unknown`으로 추론되�
 
 `val` 경로의 built-in 변경 메서드 판정과 리터럴/좁혀진 타입 기준 소진성은
 **타입이 있어야** 답할 수 있어 `rlc --check`가 내지 못합니다
-([`language.md` §10.4](../../docs/reference/language.md#104-built-in-변경-메서드---types)).
+(`rlc help val`).
 그래서 서버는 편집 중인 버퍼를 그 파일이 프로젝트에서 차지하는 자리에
 그대로 얹어(`rlc --check-types --rl-only --overlay <path>`) 컴파일러에게 묻고,
 돌아온 문장을 **그대로** 표시합니다 — 무엇이 변경인지는 에디터가 판단하지

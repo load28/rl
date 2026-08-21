@@ -10,12 +10,12 @@
 //! constructors are the one deliberate deviation: they are typed by the
 //! variant each builds (`Ok<T>` / `Err<E>`) rather than by the whole
 //! `Result<T, E>`, so a function with several `try`s infers a union of the
-//! real error types instead of `unknown` (see `docs/reference/std.md`).
+//! real error types instead of `unknown`.
 
 /// TypeScript source of the rl standard library module: `Option<T>`,
 /// `Result<T, E>` and their functional combinators (`map`, `andThen`,
-/// `unwrapOr`, ...). Written out by `rlc --emit-std <file>`; see
-/// `docs/reference/std.md` for the module's API.
+/// `unwrapOr`, ...). Written out by `rlc --emit-std <file>`; run
+/// `rlc help std` for the module's user-facing API.
 pub const STD_SOURCE: &str = include_str!("stdlib/rl_std.ts");
 
 /// The bare specifier a `.rl` file uses to reach [`STD_SOURCE`].

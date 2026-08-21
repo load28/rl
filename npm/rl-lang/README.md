@@ -1,10 +1,9 @@
 # rl-lang
 
 **rl** is a tiny preprocessor language that compiles to TypeScript. It adds
-exactly six things on top of 100%-compatible TypeScript: Rust-style `enum`
-(tagged unions), `match` expressions (with or-patterns, guards, tuple match
-and nested patterns), error-propagating `try`, value-extracting `let-else`
-and `if let`, and the pipeline operator `|>`.
+Rust-style tagged unions and pattern matching, concise `Option`/`Result`
+control flow, pipelines, and mutation-safe bindings while keeping valid
+TypeScript valid.
 
 This package installs `rlc`, the rl compiler, as a prebuilt native binary —
 no Rust toolchain required.

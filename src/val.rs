@@ -37,8 +37,7 @@
 //! What it does *not* do is inference: no effect system, no borrow
 //! checker, no analysis of what an arbitrary imported function does with
 //! its argument, and no verdict on a method call it cannot resolve to a
-//! built-in. The limits are normative and documented in
-//! `docs/reference/language.md` §10.
+//! built-in. Run `rlc help val` for the user-facing limits.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -158,8 +157,8 @@ pub(crate) fn modifier_end(src: &str, keyword_end: usize) -> usize {
 /// `val` path.
 ///
 /// TypeScript has no effect system, so which of its own methods mutate is
-/// rl's policy, and this list is that policy (`Array#push`, `Map#set`, ...
-/// — `docs/reference/language.md` §10.4). The other half is the checker's:
+/// rl's policy, and this list is that policy (`Array#push`, `Map#set`, ...).
+/// The other half is the checker's:
 /// whether the method's symbol is declared entirely in TypeScript's own
 /// lib files. `rlc --check-types` reports a call only when **both** hold,
 /// so a user-defined `set` is never a mutation and a built-in `get` never

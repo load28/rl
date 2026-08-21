@@ -7,7 +7,7 @@
 //! only fully-parsed rl constructs, is what upholds the passthrough contract.
 //!
 //! The emitted code is plain TypeScript with no type-level tricks; the code
-//! shapes are normative and documented in `docs/reference/language.md`.
+//! shapes are covered by the compiler's output tests.
 //!
 //! Emission assembles a [`rope::Rope`] so every source-copied chunk keeps
 //! its source offset; [`emit`] discards the resulting mappings, while
@@ -404,7 +404,7 @@ impl<'a> Emitter<'a> {
     /// each helper call infers concretely from the previous step's return
     /// type — the composed generics tsc cannot infer are the ones a
     /// library `flow(f, g, h)` loses too, so the first step is what fixes
-    /// the input type (docs/reference/language.md §7.5).
+    /// the input type (`rlc help pipe`).
     ///
     /// A method step becomes an arrow in the helper's argument position,
     /// where the parameter type `(b: B) => C` types `$rl_v` contextually —

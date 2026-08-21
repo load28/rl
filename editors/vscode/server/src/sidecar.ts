@@ -4,7 +4,7 @@
  * A `.ts` file importing `"./x.rl"` only type-checks when a declaration file
  * sits next to the module, and "go to definition" only lands in the original
  * when that declaration carries a map whose `sources` is the `.rl` file
- * (see `docs/reference/cli.md`, "에디터 사이드카").
+ * (see `rlc --help`, `--sidecar`).
  *
  * Both come from one `rlc` run: the compiler lowers the `.rl` files, hands
  * them to the real TypeScript project the workspace is configured with, and

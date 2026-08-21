@@ -76,9 +76,8 @@ id에 `.ts`를 붙이는 이유는 **호스트의 TypeScript 처리에 그대로
 rlc --types src/        # .rl-types/<이름>.rl.d.ts + .map
 ```
 
-자세한 내용은 [`docs/reference/cli.md`](../../docs/reference/cli.md)와
-[VSCode 확장](../../editors/vscode/README.md)을 참조하세요. 확장은 저장할
-때마다 사이드카를 갱신합니다.
+CLI에서 `rlc help workflow`를 실행하거나 [VSCode 확장](../../editors/vscode/README.md)을
+참조하세요. 확장은 저장할 때마다 사이드카를 갱신합니다.
 
 ## 알려진 제약
 

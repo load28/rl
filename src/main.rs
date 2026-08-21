@@ -661,7 +661,7 @@ where
 /// project once, take a snapshot per pass, print what the check found. The
 /// engine owns the state (documents, projections, the running compiler);
 /// this driver owns the terminal — wording, order and exit codes are the
-/// CLI's contract (`docs/reference/cli.md`).
+/// CLI's contract.
 fn typed_check_mode(inputs: &[String], options: &TypedCheckOptions<'_>) -> ExitCode {
     let engine = rlc::engine::Engine::new(options.node.map(Path::to_path_buf));
     let mut project = match engine.open_project(

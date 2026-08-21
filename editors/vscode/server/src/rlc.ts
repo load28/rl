@@ -3,7 +3,7 @@
  * (`rlc --server`, see engine.ts) when one is available, and through the
  * one-shot commands otherwise — the two produce the same diagnostics, so
  * the fallback is invisible. Editor errors are byte-for-byte the compiler's
- * own (`file:line:col: message` — docs/reference/errors.md).
+ * own (`file:line:col: message`).
  * ----------------------------------------------------------------------- */
 import { execFile } from "child_process";
 import * as crypto from "crypto";
@@ -203,7 +203,7 @@ function runCheckOnce(
 }
 
 /* ----------------------------------------------------------------------
- * Symbol interface (`rlc --symbols`, docs/reference/cli.md): the compiler
+ * Symbol interface (`rlc --symbols`): the compiler
  * reports a file's rl enum declarations (with 1-based positions) and its
  * direct relative `.rl` imports, including each referenced file's exported
  * declarations — the server consumes this for cross-file features instead

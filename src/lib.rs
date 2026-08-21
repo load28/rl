@@ -47,10 +47,9 @@
 //!
 //! # Documentation
 //!
-//! - `docs/reference/language.md` — normative language reference (grammar,
-//!   enum/TS-enum disambiguation, emitted code shapes, exhaustiveness).
-//! - `docs/reference/cli.md` / `docs/reference/errors.md` — CLI and
-//!   diagnostics reference.
+//! - `README.md` / `README.ko.md` — installation, language overview, and
+//!   contributor setup.
+//! - `rlc help <topic>` — the language and workflow guide embedded in the CLI.
 //! - `docs/design/` — architecture and design decisions.
 
 mod analysis;
@@ -535,8 +534,8 @@ pub fn emit_mapped(source: &str) -> MappedEmit {
 /// A caller that has a TypeScript checker does better: the binding a
 /// mutation belongs to is the one whose declaration shares its *symbol*, and
 /// symbol identity is not an approximation of scope — it is scope, as
-/// TypeScript resolved it. `rlc --check-types` pairs them that way; see
-/// `docs/reference/language.md` §10 for what `val` means either way.
+/// TypeScript resolved it. `rlc --check-types` pairs them that way; run
+/// `rlc help val` for the user-facing behavior.
 ///
 /// ```
 /// let probes = rlc::val_probes("val const xs = [];\nxs.push(1);\nys.push(2);\n");
@@ -655,8 +654,7 @@ impl Default for Options<'_> {
 /// duplicate or misplaced `match` arms, and non-exhaustive matches over enums
 /// declared in this source. With [`Options::verify`] enabled, a final
 /// self-check that the generated output parses as TypeScript can also fail
-/// (reported without a position). See `docs/reference/errors.md` for the
-/// full catalogue.
+/// (reported without a position). Run `rlc help errors` for guidance.
 ///
 /// ```
 /// use rlc::{compile, Options};
@@ -678,7 +676,7 @@ pub fn compile(source: &str, options: &Options) -> Result<String, CompileError> 
 ///
 /// Callers that report a tsc diagnostic over the emitted TypeScript use
 /// these to name the position in the `.rl` source instead of one in a file
-/// that was never written (`rlc --types`, `docs/reference/cli.md` §types).
+/// that was never written (`rlc --types`).
 ///
 /// ```
 /// use rlc::{compile_mapped, Options};

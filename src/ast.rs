@@ -53,7 +53,7 @@ pub(crate) struct Program {
     /// Byte spans of `result` bindings written **below** a block's top
     /// level (inside an `if` body, a loop, a function written in the
     /// block) — a binding early-returns the block's IIFE, and only a
-    /// top-level statement can (`docs/reference/language.md` §8). Same
+    /// top-level statement can (`rlc help result`). Same
     /// reporting story as [`Self::stray_pipes`]: the shape is never valid
     /// TypeScript, so it cannot pass through either.
     pub result_nested_binds: Vec<Span>,

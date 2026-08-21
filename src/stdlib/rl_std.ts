@@ -4,7 +4,7 @@
 // (`kind`-tagged objects), so `match` works on these values and rlc checks
 // exhaustiveness of `Some`/`None` and `Ok`/`Err` arms. `Result`'s variants
 // additionally get names of their own (`Ok<T>`/`Err<E>`) so each constructor
-// can be typed by what its value really carries. See docs/reference/std.md.
+// can be typed by what its value really carries.
 
 /** An optional value: either `Some` carrying a `value`, or `None`. */
 export type Option<T> =
@@ -26,7 +26,7 @@ export type Result<T, E> =
  * The error type carried by a result type — every `Err` arm of it, unioned:
  * `ErrorOf<Result<T, E>>` is `E`, and `ErrorOf<Ok<T> | Err<E1> | Err<E2>>`
  * (what a function with two `try`s infers) is `E1 | E2`. `andThen` uses it to
- * add its own failure to whatever came in. See docs/reference/std.md.
+ * add its own failure to whatever came in.
  */
 export type ErrorOf<R> = R extends Err<infer E> ? E : never;
 
@@ -153,7 +153,7 @@ export const Result = {
   // `Ok(v)` is an `Ok<T>`, `Err(e)` is an `Err<E>`. A `Result<T, E>` is the
   // union of the two, so both still fit wherever one is expected — and a
   // function with several `try`s gets `Ok<T> | Err<E1> | Err<E2>` inferred
-  // instead of an `unknown` error. See docs/reference/std.md.
+  // instead of an `unknown` error.
   Ok: <T>(value: T): Ok<T> => ({ kind: "Ok", value }),
   Err: <E>(error: E): Err<E> => ({ kind: "Err", error }),
 
@@ -262,7 +262,7 @@ export const Result = {
    *
    * The chained function is what fixes `T`, so an inline callback needs its
    * parameter annotated (`Result.andThenP((u: User) => ...)`) — passing a
-   * named function needs nothing. See docs/reference/std.md.
+   * named function needs nothing.
    */
   andThenP:
     <T, U, F>(f: (value: T) => Result<U, F>) =>

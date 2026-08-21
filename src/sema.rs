@@ -9,7 +9,7 @@
 //! per construct: a match whose names did not resolve keeps its own
 //! exhaustiveness question suppressed, nobody else's).
 //!
-//! Error layering (see `docs/reference/errors.md`): every rule here is an
+//! Error layering: every rule here is an
 //! rl-level rule, reported by rlc itself with an exact position. Nothing is
 //! delegated to tsc — in particular exhaustiveness, which this module
 //! *reports* but no longer computes: [`crate::analysis`] owns the subject

@@ -80,7 +80,7 @@ CI가 동일한 게이트를 강제합니다. 새 기능에는 반드시 테스�
 - TS 통과 계약 → `tests/passthrough.rs`
 - 타입/런타임 의미 → `tests/integration.rs`
 
-언어 표면(구문, 판별 규칙, 방출 코드, 에러 메시지, CLI 동작)을 바꾸는 변경은
-규범 레퍼런스인 [`docs/reference/`](./docs/reference/)의 해당 문서를 함께
-갱신해야 합니다. 공개 Rust API를 바꾸면 rustdoc(과 doctest)도 갱신하세요 —
-doctest는 `cargo test`에서 함께 실행됩니다.
+언어 표면(구문, 판별 규칙, 에러 메시지, CLI 동작)을 바꾸는 변경은 컴파일러에
+내장되는 [`docs/ai/rl.md`](./docs/ai/rl.md)를 함께 갱신해야 합니다. 사용자가
+처음 접하는 기능이면 영문·한글 README에도 반영하세요. 공개 Rust API를 바꾸면
+rustdoc과 doctest도 갱신하세요. doctest는 `cargo test`에서 함께 실행됩니다.
