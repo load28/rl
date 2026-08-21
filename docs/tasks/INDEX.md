@@ -140,7 +140,8 @@
 | TASK-130 | 에디터 semantic API가 semantic cache를 소비 (Phase 6 2/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-130](./TASK-130-editor-consumes-semantic-cache.md) |
 | TASK-131 | try·let-else 배치를 flow 사실로 (Phase 5 2/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-131](./TASK-131-try-placement-on-flow.md) |
 | TASK-132 | result 바인딩의 early-return 범위 확정 (Phase 5 3/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-132](./TASK-132-result-binding-scope.md) |
+| TASK-133 | let-else·`if let`의 or-패턴 (GAP-6 마지막 항목) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-133](./TASK-133-or-patterns-in-let-else-if-let.md) |
 
 ## 다음 태스크 번호
 
-**TASK-133**
+**TASK-134**
