@@ -775,22 +775,19 @@ impl Project {
     /// construct, matching the batch typed-check path.
     pub fn service_diagnostics(&mut self, path: &Path) -> Result<Vec<ServiceDiagnostic>, String> {
         let (doc, path) = self.serve(path)?;
+        // The checker may recover from malformed TypeScript and invent
+        // diagnostics throughout the file. Whether that recovery is safe
+        // is a property of the projected text, not of TypeScript's numeric
+        // diagnostic categories.
+        if !projection_accepts_diagnostics(&doc.code) {
+            return Ok(Vec::new());
+        }
         let session = self.session();
         let answer = session.client.request(
             "textDocument/diagnostic",
             serde_json::json!({ "textDocument": { "uri": served_uri(&path) } }),
         )?;
         let items = answer["items"].as_array().cloned().unwrap_or_default();
-        // TypeScript numbers its parse errors 1000–1999 and its checker
-        // errors from 2000 up. A text with a parse error is not TypeScript
-        // at all, and the checker's recovery invents errors all through it,
-        // so none of them is reported.
-        if items
-            .iter()
-            .any(|item| item["code"].as_u64().is_some_and(|code| code < 2000))
-        {
-            return Ok(Vec::new());
-        }
         let mut out = Vec::new();
         // The declaration table a translated message names its types from,
         // built on the first translation of this pass: most passes
@@ -924,6 +921,10 @@ impl Project {
     fn session(&mut self) -> &mut ServiceSession {
         self.service.as_mut().expect("serve started it")
     }
+}
+
+fn projection_accepts_diagnostics(code: &str) -> bool {
+    crate::verify::verify_output(code).is_ok()
 }
 
 /// Serves one `.rl` file's projection, creating or refreshing it from the
@@ -1493,6 +1494,14 @@ fn ensure_std_module(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_projection_depends_on_parseability_not_diagnostic_numbers() {
+        assert!(projection_accepts_diagnostics(
+            "const value = { A: 1, A: 2 };"
+        ));
+        assert!(!projection_accepts_diagnostics("const = ;"));
+    }
 
     #[test]
     fn u16_positions_round_trip_over_multibyte_text() {
