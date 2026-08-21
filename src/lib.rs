@@ -63,6 +63,7 @@ pub mod hir;
 mod lexer;
 mod parser;
 mod probe;
+pub mod resolve;
 mod scanner;
 mod sema;
 mod sidecar;

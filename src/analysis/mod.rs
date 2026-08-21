@@ -1447,13 +1447,16 @@ fn unique_near_case<'t>(table: &'t Table, tag: &str) -> Option<(&'t Entry, Strin
 /// assert_eq!(found.unresolved[0].name, "Circel");
 /// assert_eq!(found.unresolved[0].suggestion, "Circle");
 /// ```
-fn nearest<'a>(written: &str, declared: impl Iterator<Item = &'a str>) -> Option<String> {
+pub(crate) fn nearest<'a>(
+    written: &str,
+    declared: impl Iterator<Item = &'a str>,
+) -> Option<String> {
     nearest_within(written, declared, usize::MAX).map(|(name, _)| name)
 }
 
 /// [`nearest`] with an explicit ceiling on how far a name may be and still
 /// count — and the distance, so a caller can weigh the evidence.
-fn nearest_within<'a>(
+pub(crate) fn nearest_within<'a>(
     written: &str,
     declared: impl Iterator<Item = &'a str>,
     ceiling: usize,
