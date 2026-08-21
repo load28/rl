@@ -244,20 +244,36 @@ compiler API가 대체한 뒤 VSCode 확장의 정규식/마스킹 rl 구현(D6)
 
 ## 13. 페이즈 → 태스크 매핑
 
-| Phase | 내용 | 태스크 |
-|---|---|---|
-| 0 | 구조화 다중 진단, recoverable projection, 문안 통일 (TASK-117 흡수) | TASK-120 |
-| 1 | HIR 기반: ID, arena, lowering, source map | TASK-121 |
-| 2 | 선언 수집·이름 해석: scope graph, DefId, builtins | TASK-122 |
-| 3 | typed pattern: usefulness를 resolved HIR 위로 | TASK-123 |
-| 4 | 타입 query: TypeRequestSet/TypedFacts 정규화 | TASK-124 |
-| 5 | flow/effect: 최소 CFG로 try/result/let-else/if let/val 이동 | TASK-125 |
-| 6 | query engine: snapshot query cache + dependency invalidation | TASK-126 |
-| 7 | codegen 정리: lowering plan 소비, 중복 판단 제거 | TASK-127 |
+| Phase | 내용 | 태스크 | 상태 |
+|---|---|---|---|
+| 0 | 구조화 다중 진단, recoverable projection, 문안 통일 (TASK-117 흡수) | TASK-120 | 완료 |
+| 1 | HIR 기반: ID, arena, lowering, source map | TASK-121 | 완료 |
+| 2 | 선언 수집·이름 해석: scope graph, DefId, builtins | TASK-122 | 완료 |
+| 3 | typed pattern: 해석의 단일화(1/2) — analysis가 resolver 소비 | TASK-123 | 완료 (2/2는 후속) |
+| 4 | 타입 query: TypedFacts 경계 확정 — 백엔드 실패 강등 | TASK-124 | 완료 |
+| 5 | flow/effect: 최소 CFG — let-else 발산부터 | TASK-125 | 완료 (1/n) |
+| 6 | query engine: cross-snapshot semantic cache + 무효화 | TASK-126 | 완료 (1/n) |
+| 7 | codegen 정리 | TASK-127에서 실측 정산 | 재계산 없음 확인 |
+| — | 에디터 shadow 제거 (D6, 완료 기준의 마지막 항목) | TASK-127·128 | 완료 |
 
 각 페이즈는 독립 태스크·독립 테스트·독립 커밋으로 완료 가능해야 하고, 다음
 페이즈를 위해 저장소를 깨진 상태로 두지 않는다. 태스크 번호는 착수 시점의
 INDEX 상태에 따라 조정될 수 있다 — 확정 번호는 INDEX가 진실이다.
+
+### 남은 후속 (등록 대기)
+
+- **Phase 3 2/2** — coverage/usefulness와 `analysis::Table` 구축을
+  resolver의 identity 위로 완전히 이동(현재 Table 구축 규칙이 resolve의
+  collect와 병존하며 동등성 테스트로 고정됨). usefulness 내부의 태그
+  문자열 비교는 열의 alphabet이 한 enum으로 고정된 뒤의 비교라 의미론적
+  결함은 아니다(TASK-123 정산).
+- **Phase 5 잔여** — `try` 배치·`result` early-return 범위·분기별 초기화의
+  flow 이동, flow의 HIR body 연동(`Branch { condition: ExprId }`).
+- **Phase 6 잔여** — 에디터 semantic API(`language.rs`)의 semantic cache
+  소비, query 세분화(pattern_analysis/flow_body 단위).
+- **Phase 7 실체** — 안정화된 HIR node의 codegen 이동(검증된 lowering
+  plan 소비의 실질 형태).
+- let-else·`if let`의 or-패턴(언어 표면 확장 — rust-parity-analysis GAP-6).
 
 ## 14. 완료 기준
 
