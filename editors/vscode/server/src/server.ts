@@ -294,6 +294,7 @@ const TYPED_CHECK_DELAY_MS = 250;
 interface VersionedDiagnostics {
   version: number;
   diagnostics: Diagnostic[];
+  replacesTypes?: boolean;
 }
 
 /** What `--check` and the TypeScript layer found, as last published. */
@@ -310,14 +311,37 @@ let warnedTypedCheckUnavailable = false;
  * same place. One squiggle per position, and the pass that already ran wins
  * — its message is the one the user has been reading.
  */
-function mergeTyped(into: Diagnostic[], typed: Diagnostic[]): void {
-  const taken = new Set(
-    into.map((d) => `${d.range.start.line}:${d.range.start.character}`),
-  );
+function mergeTyped(
+  into: Diagnostic[],
+  typed: Diagnostic[],
+  replacesTypes = false,
+): void {
+  if (replacesTypes) {
+    // Language-service diagnostics are the fast provisional layer. Once the
+    // compiler answers with its structured checker diagnostics, replace that
+    // layer as a whole so consequences suppressed by the compiler cannot
+    // remain visible in the editor.
+    for (let i = into.length - 1; i >= 0; i--) {
+      if (into[i].source === "ts") into.splice(i, 1);
+    }
+  }
+  const positionKey = (d: Diagnostic) =>
+    `${d.range.start.line}:${d.range.start.character}`;
+  const codeKey = (d: Diagnostic) => String(d.code ?? "").replace(/^ts/, "");
   for (const d of typed) {
-    const key = `${d.range.start.line}:${d.range.start.character}`;
-    if (taken.has(key)) continue;
-    taken.add(key);
+    const sameDiagnostic = into.findIndex(
+      (base) =>
+        positionKey(base) === positionKey(d) &&
+        codeKey(base) !== "" &&
+        codeKey(base) === codeKey(d),
+    );
+    if (sameDiagnostic >= 0) {
+      // The service answer is provisional. The compiler pass carries the
+      // structured RL rendering and replaces the same checker diagnostic.
+      into[sameDiagnostic] = d;
+      continue;
+    }
+    if (into.some((base) => positionKey(base) === positionKey(d))) continue;
     into.push(d);
   }
 }
@@ -327,26 +351,43 @@ function mergeTyped(into: Diagnostic[], typed: Diagnostic[]): void {
 function publish(uri: string, version: number, base: Diagnostic[]): void {
   const diagnostics = [...base];
   const typed = typedDiagnostics.get(uri);
-  if (typed?.version === version) mergeTyped(diagnostics, typed.diagnostics);
+  if (typed?.version === version) {
+    mergeTyped(diagnostics, typed.diagnostics, typed.replacesTypes);
+  }
   void connection.sendDiagnostics({ uri, diagnostics });
 }
 
-function scheduleTypedCheck(doc: TextDocument, compiler: string): void {
+function scheduleTypedCheck(
+  doc: TextDocument,
+  compiler: string,
+  includeTypes: boolean,
+  includeTypedRl: boolean,
+): void {
   const existing = pendingTypedCheck.get(doc.uri);
   if (existing !== undefined) clearTimeout(existing);
   pendingTypedCheck.set(
     doc.uri,
     setTimeout(() => {
       pendingTypedCheck.delete(doc.uri);
-      void typedCheck(doc, compiler);
+      void typedCheck(doc, compiler, includeTypes, includeTypedRl);
     }, TYPED_CHECK_DELAY_MS),
   );
 }
 
-async function typedCheck(doc: TextDocument, compiler: string): Promise<void> {
+async function typedCheck(
+  doc: TextDocument,
+  compiler: string,
+  includeTypes: boolean,
+  includeTypedRl: boolean,
+): Promise<void> {
   const uri = URI.parse(doc.uri);
   if (uri.scheme !== "file") return;
-  const result = await rlc.runTypedCheck(compiler, doc.getText(), uri.fsPath);
+  const result = await rlc.runTypedCheck(
+    compiler,
+    doc.getText(),
+    uri.fsPath,
+    includeTypes,
+  );
 
   // The buffer may have moved on while the compiler ran.
   const fresh = documents.get(doc.uri);
@@ -370,7 +411,10 @@ async function typedCheck(doc: TextDocument, compiler: string): Promise<void> {
 
   typedDiagnostics.set(doc.uri, {
     version: doc.version,
-    diagnostics: result.diagnostics.map((d) => toDiagnostic(fresh, d)),
+    replacesTypes: includeTypes,
+    diagnostics: result.diagnostics
+      .filter((d) => includeTypedRl || String(d.code ?? "").startsWith("ts"))
+      .map((d) => toDiagnostic(fresh, d)),
   });
   const base = baseDiagnostics.get(doc.uri);
   if (base?.version === doc.version) publish(doc.uri, doc.version, base.diagnostics);
@@ -436,7 +480,14 @@ async function validate(doc: TextDocument): Promise<void> {
   // the TypeScript diagnostics so that wait does not push it further out.
   // Publication order is safe either way: publish() merges the typed layer
   // only when both layers were computed for this very version.
-  if (settings.typedChecks) scheduleTypedCheck(doc, compiler);
+  if (settings.typedChecks || settings.typeDiagnostics) {
+    scheduleTypedCheck(
+      doc,
+      compiler,
+      settings.typeDiagnostics,
+      settings.typedChecks,
+    );
+  }
 
   if (settings.typeDiagnostics) {
     diagnostics.push(...(await typeDiagnostics(doc, compiler)));

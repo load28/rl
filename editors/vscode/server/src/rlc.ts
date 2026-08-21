@@ -305,6 +305,7 @@ export async function runTypedCheck(
   compiler: string,
   text: string,
   fsPath: string,
+  includeTypes = false,
 ): Promise<ValCheckResult> {
   // The overlay stands in for a file of the project, so there has to be one:
   // a buffer that was never saved has no place in the project graph yet.
@@ -318,7 +319,7 @@ export async function runTypedCheck(
   const answer = await engineRequest(
     compiler,
     "typedCheck",
-    { path: fsPath, text },
+    { path: fsPath, text, includeTypes },
     TYPED_CHECK_TIMEOUT_MS,
   );
   if (answer && "error" in answer) {
@@ -368,21 +369,24 @@ export async function runTypedCheck(
       })),
     };
   }
-  return runTypedCheckOnce(compiler, text, fsPath);
+  return runTypedCheckOnce(compiler, text, fsPath, includeTypes);
 }
 
-/** The one-shot `rlc --check-types --rl-only --overlay`. */
+/** The one-shot `rlc --check-types --overlay` fallback. */
 function runTypedCheckOnce(
   compiler: string,
   text: string,
   fsPath: string,
+  includeTypes: boolean,
 ): Promise<ValCheckResult> {
   // Run from the file's own directory so the compiler's paths print as the
   // bare file name (it shows paths relative to the working directory), and
   // a file of the same name elsewhere in the project stays distinguishable.
   const cwd = path.dirname(fsPath);
   const shown = path.basename(fsPath);
-  const args = ["--check-types", "--rl-only", "--overlay", fsPath, fsPath];
+  const args = ["--check-types"];
+  if (!includeTypes) args.push("--rl-only");
+  args.push("--overlay", fsPath, fsPath);
 
   return new Promise((resolve) => {
     let child: ReturnType<typeof execFile>;

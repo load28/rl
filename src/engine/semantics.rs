@@ -200,6 +200,63 @@ fn ts_message(code: u32, message: &str, declarations: &[DeclaredEnum]) -> String
     }
 }
 
+fn named_type(text: &str, declarations: &[DeclaredEnum]) -> String {
+    name_types(text, declarations).unwrap_or_else(|| text.to_string())
+}
+
+/// Renders checker-owned assignability facts without depending on the text
+/// or nesting of a TypeScript diagnostic message. This is the common CLI and
+/// editor wording; the raw checker message is only the fallback when the
+/// backend could not prove an expected/found relation.
+fn diagnostic_message(diagnostic: &TsDiagnostic, declarations: &[DeclaredEnum]) -> String {
+    let Some(mismatch) = &diagnostic.mismatch else {
+        return ts_message(diagnostic.code, &diagnostic.message, declarations);
+    };
+    let expected = named_type(&mismatch.expected, declarations);
+    let found = named_type(&mismatch.found, declarations);
+    let differences: Vec<(String, String)> = mismatch
+        .differences
+        .iter()
+        .map(|difference| {
+            (
+                named_type(&difference.expected, declarations),
+                named_type(&difference.found, declarations),
+            )
+        })
+        .collect();
+    let leaf_expected = differences.first().map(|pair| pair.0.as_str());
+    let one_expected = leaf_expected.is_some()
+        && differences
+            .iter()
+            .all(|pair| Some(pair.0.as_str()) == leaf_expected);
+    if one_expected {
+        let expected_leaf = leaf_expected.expect("checked above");
+        let mut found_leaves: Vec<&str> = Vec::new();
+        for (_, leaf) in &differences {
+            if !found_leaves.contains(&leaf.as_str()) {
+                found_leaves.push(leaf);
+            }
+        }
+        let found_leaf = found_leaves.join(" | ");
+        let mut message =
+            format!("type mismatch: expected `{expected_leaf}`, found `{found_leaf}`");
+        if expected_leaf != expected || found_leaf != found {
+            message.push_str(&format!("\n  required type: `{expected}`"));
+        }
+        return message;
+    }
+    format!("type mismatch: expected `{expected}`, found `{found}`")
+}
+
+fn diagnostic_span(diagnostic: &TsDiagnostic) -> (usize, usize) {
+    diagnostic
+        .mismatch
+        .as_ref()
+        .map_or((diagnostic.start, diagnostic.end), |mismatch| {
+            (mismatch.start, mismatch.end)
+        })
+}
+
 fn finish_diagnostics(mut diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
     diagnostics.sort_by(|left, right| {
         (&left.path, left.position, left.end, &left.message).cmp(&(
@@ -530,8 +587,21 @@ pub(crate) fn report(
     // TypeScript's own diagnostics, at the position in the `.rl` file the
     // offending code was written at.
     let type_diagnostics: &[TsDiagnostic] = if rl_only { &[] } else { &answers.diagnostics };
+    let structured_glue: HashSet<(PathBuf, usize, AnchorKind)> = type_diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.mismatch.is_some())
+        .filter_map(|diagnostic| {
+            let file = files
+                .iter()
+                .find(|file| file.module_path == diagnostic.file)?;
+            let (start, _) = diagnostic_span(diagnostic);
+            let anchor = projection::glue_anchor(file, start)?;
+            Some((file.source_path.clone(), anchor.src, anchor.kind))
+        })
+        .collect();
     let mut translated_seen: HashSet<(PathBuf, usize, AnchorKind, &'static str)> = HashSet::new();
     for diagnostic in type_diagnostics {
+        let (diagnostic_start, diagnostic_end) = diagnostic_span(diagnostic);
         let Some(file) = files.iter().find(|f| f.module_path == diagnostic.file) else {
             // A hand-written file: TypeScript's own coordinates already name
             // a file the user can open, so they are used as they are.
@@ -539,7 +609,7 @@ pub(crate) fn report(
                 path: diagnostic.file.clone(),
                 position: None,
                 end: None,
-                message: format!("ts({}): {}", diagnostic.code, diagnostic.message),
+                message: diagnostic_message(diagnostic, &[]),
                 code: Some(format!("ts{}", diagnostic.code)),
             });
             continue;
@@ -547,11 +617,16 @@ pub(crate) fn report(
         if projection::diagnostic_intersects_recovery(file, diagnostic) {
             continue;
         }
+        if diagnostic.mismatch.is_some()
+            && projection::diagnostic_intersects_rl_error(file, diagnostic)
+        {
+            continue;
+        }
         // Glue is not the user's code. When rlc can say what the construct
         // meant, it says that — over the construct's own text. The
         // declaration table its wording names types from is built only for
         // a file that has a diagnostic on glue at all, and once for it.
-        if let Some(anchor) = projection::glue_anchor(file, diagnostic.start) {
+        if let Some(anchor) = projection::glue_anchor(file, diagnostic_start) {
             if anchor.kind == AnchorKind::Match
                 && semantics.get(&file.source_path).is_some_and(|semantics| {
                     semantics.analyses.matches.iter().any(|analysis| {
@@ -559,6 +634,35 @@ pub(crate) fn report(
                     })
                 })
             {
+                continue;
+            }
+            let structured_key = (file.source_path.clone(), anchor.src, anchor.kind);
+            if structured_glue.contains(&structured_key) {
+                // Several checker diagnostics can describe one failed
+                // lowering. The contextual expected/found relation is the
+                // cause; property and comparison errors on the same glue are
+                // consequences and must not become separate user errors.
+                if diagnostic.mismatch.is_none()
+                    || !translated_seen.insert((
+                        file.source_path.clone(),
+                        anchor.src,
+                        anchor.kind,
+                        "structured-type-mismatch",
+                    ))
+                {
+                    continue;
+                }
+                let declared: &[DeclaredEnum] = semantics
+                    .get(&file.source_path)
+                    .map(|s| s.analyses.declarations.as_slice())
+                    .unwrap_or_default();
+                out.push(Diagnostic {
+                    path: file.source_path.clone(),
+                    position: Some(crate::line_col(&file.source, anchor.src)),
+                    end: Some(crate::line_col(&file.source, anchor.src_end)),
+                    message: diagnostic_message(diagnostic, declared),
+                    code: Some(format!("ts{}", diagnostic.code)),
+                });
                 continue;
             }
             if let Some(class) = translation_class(anchor.kind, diagnostic.code)
@@ -597,17 +701,17 @@ pub(crate) fn report(
             .get(&file.source_path)
             .map(|s| s.analyses.declarations.as_slice())
             .unwrap_or_default();
-        match projection::diagnostic_source_offset(file, diagnostic.start) {
+        match projection::diagnostic_source_offset(file, diagnostic_start) {
             Some((nearest, exact)) => {
                 // Exact: the user's own text, so the diagnostic covers
                 // exactly what TypeScript underlined. On glue: the
                 // construct that wrote it, which is the honest extent —
                 // and better than the nearest byte before the glue.
-                let anchor = projection::glue_anchor(file, diagnostic.start);
+                let anchor = projection::glue_anchor(file, diagnostic_start);
                 let (offset, end) = match (exact, anchor) {
                     (true, _) => (
                         nearest,
-                        projection::diagnostic_source_offset(file, diagnostic.end)
+                        projection::diagnostic_source_offset(file, diagnostic_end)
                             .filter(|(at, exact)| *exact && *at >= nearest)
                             .map(|(at, _)| at),
                     ),
@@ -620,7 +724,7 @@ pub(crate) fn report(
                     end: end.map(|at| crate::line_col(&file.source, at)),
                     message: format!(
                         "{}{}",
-                        ts_message(diagnostic.code, &diagnostic.message, declared),
+                        diagnostic_message(diagnostic, declared),
                         // By the error-layer contract rlc's output must not
                         // draw type errors, so say where it came from rather
                         // than pinning it on the line the position landed
@@ -638,7 +742,7 @@ pub(crate) fn report(
                 path: file.source_path.clone(),
                 position: None,
                 end: None,
-                message: format!("ts({}): {}", diagnostic.code, diagnostic.message),
+                message: diagnostic_message(diagnostic, declared),
                 code: Some(format!("ts{}", diagnostic.code)),
             }),
         }

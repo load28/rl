@@ -620,9 +620,8 @@ fn overlay_checks_the_buffer_rather_than_the_saved_file() {
     assert!(err.contains("src/main.rl:2:1:"), "{err}");
 }
 
-/// `--rl-only` drops TypeScript's layer and keeps rl's. The editor already
-/// has the type errors from its own language server; it would draw them
-/// twice otherwise.
+/// `--rl-only` drops TypeScript's layer and keeps rl's. The editor uses this
+/// form when its type-diagnostic setting is disabled.
 #[test]
 fn rl_only_keeps_the_rl_layer_and_drops_the_type_layer() {
     require_types_toolchain!();
@@ -632,12 +631,15 @@ fn rl_only_keeps_the_rl_layer_and_drops_the_type_layer() {
                   export const n = scores.size + wrong;\n";
 
     let full = types_stderr_overlay(source, source, false);
-    assert!(full.contains("ts(2322)"), "{full}");
+    assert!(
+        full.contains("type mismatch: expected `number`, found `\"not a number\"`"),
+        "{full}"
+    );
     assert!(full.contains("cannot call mutating method `set`"), "{full}");
 
     let rl_only = types_stderr_overlay(source, source, true);
     assert!(
-        !rl_only.contains("ts("),
+        !rl_only.contains("type mismatch:"),
         "no type error should survive --rl-only:\n{rl_only}"
     );
     assert!(

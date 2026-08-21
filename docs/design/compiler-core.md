@@ -181,6 +181,12 @@ tsgo protocol object·UTF-16 좌표는 backend/mapper 안에서 변환한다.
 backend가 실패해도 rl semantic pass 전체를 중단하지 않는다: 해당 typed
 fact를 `Unknown`으로 두고 독립적으로 판정 가능한 rl 오류는 계속 보고한다.
 
+대입 불일치 진단도 backend가 `TypeMismatch { expected, found,
+differences, span }`으로 정규화한다. TypeScript 진단 문자열을 다시 파싱하지
+않고 checker의 contextual type과 assignability 관계를 사용한다. 렌더러는
+구문 종류를 모르며, 제네릭·유니언을 따라 내려간 최소 차이와 전체 obligation을
+모든 소비자에 같은 형태로 제공한다.
+
 ## 8. 구조화 진단 (Phase 0 — 선행 조건)
 
 `compile()`/`sema::check()`가 첫 `RlError`에서 종료되는 구조를 먼저 없앤다
@@ -203,6 +209,10 @@ fact를 `Unknown`으로 두고 독립적으로 판정 가능한 rl 오류는 계
   오류 노드로 보존한다. 정상 방출은 원문 통과 계약을 유지하고, typed projection만
   오류 노드를 같은 길이의 유효 TypeScript로 바꾼다. 억제 범위도 이 span으로
   한정해 같은 파일의 독립적인 TypeScript 진단을 계속 보고한다.
+- TASK-144에서 한 원인 범위에 속한 checker 진단의 우선순위를 정한다. 구조화된
+  expected/found 관계가 있으면 이를 원인으로 선택하고 같은 lowering anchor의
+  프로퍼티·비교 진단은 결과로 분류한다. 정확한 rl 진단 범위와 겹치는 구조화된
+  타입 결과도 rl 원인 뒤에 중복 표시하지 않는다.
 
 ## 9. Flow IR (Phase 5)
 

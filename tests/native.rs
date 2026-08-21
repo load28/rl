@@ -237,7 +237,7 @@ fn a_hand_written_ts_file_imports_an_rl_file_by_the_specifier_it_writes() {
     // The import resolved — the only error is the deliberate one, reported
     // in the hand-written file at TypeScript's own coordinates.
     assert!(
-        out.contains("src/use.ts: ts(2322)"),
+        out.contains("src/use.ts: type mismatch: expected `number`"),
         "the .ts file's own error, in one project with the .rl: {out}"
     );
     assert!(
@@ -424,8 +424,7 @@ fn a_diagnostic_on_generated_code_is_restated_in_rls_words() {
 fn a_restated_diagnostic_calls_a_case_by_its_declared_name() {
     let root = require_tsgo!();
     // TypeScript has no word for an rl case, so a narrowed one prints as
-    // the object type it lowers to. rl knows whose case that is and says
-    // so (TASK-118) — while the original, structural, rides along.
+    // the object type it lowers to. rl names both sides from declarations.
     let dir = project(&[(
         "src/named.rl",
         "import { Result } from \"@rl/std\";\n\
@@ -442,19 +441,104 @@ fn a_restated_diagnostic_calls_a_case_by_its_declared_name() {
     )]);
     let out = check(&dir, &root);
     assert!(
-        out.contains("the `Err` this `try` propagates does not fit"),
-        "in rl's words: {out}"
+        out.contains("type mismatch: expected `ParseError`, found `Wire.OutOfRange`")
+            && out.contains("required type: `Result<number, ParseError>`"),
+        "the case and surrounding obligation use rl declaration names: {out}"
     );
     assert!(
-        out.contains(
-            "(in rl's names: Type 'Err<Wire.OutOfRange>' is not assignable to type \
-             'Result<number, ParseError>'.)"
-        ),
-        "the case by its declaration, the full union by its enum: {out}"
+        !out.contains("{ kind: \"OutOfRange\"; value: number; }") && !out.contains("in rl's names"),
+        "the lowered representation and duplicate prose stay hidden: {out}"
+    );
+}
+
+#[test]
+fn assignability_diagnostics_report_the_minimal_type_difference() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/mismatch.rl",
+        "import { Result } from \"@rl/std\";\n\
+         enum InputError { Empty, NotANumber(raw: string) }\n\
+         enum RangeError { TooLarge(value: number, max: number) }\n\
+         export function port(value: number): Result<number, InputError> {\n\
+         \x20 return value > 65535\n\
+         \x20   ? Result.Err(RangeError.TooLarge(value, 65535))\n\
+         \x20   : Result.Err(InputError.Empty);\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("type mismatch: expected `InputError`, found `RangeError`"),
+        "minimal incompatible leaf: {out}"
     );
     assert!(
-        out.contains("(ts2322: Type 'Err<{ kind: \"OutOfRange\"; value: number; }>'"),
-        "with TypeScript's own text alongside: {out}"
+        out.contains("required type: `Result<number, InputError>`"),
+        "the surrounding obligation remains visible: {out}"
+    );
+    assert!(
+        !out.contains("Property 'raw' is missing") && !out.contains("in rl's names"),
+        "the nested checker prose is not duplicated: {out}"
+    );
+}
+
+#[test]
+fn structured_type_mismatches_are_not_tied_to_an_rl_construct() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/plain.rl",
+        "const annotated: string = 1;\n\
+         function takesString(value: string): void {}\n\
+         takesString(2);\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("type mismatch: expected `string`, found `1`")
+            && out.contains("type mismatch: expected `string`, found `2`"),
+        "annotation and call argument use the same relation: {out}"
+    );
+}
+
+#[test]
+fn one_structured_cause_replaces_try_lowering_consequences() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/try.rl",
+        "import { Result } from \"@rl/std\";\n\
+         const a = () => Result.Err(10);\n\
+         function test(): Result<string, string> {\n\
+         \x20 const value = try a();\n\
+         \x20 return value;\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert_eq!(
+        out.matches("type mismatch:").count(),
+        1,
+        "one failed type obligation is one diagnostic: {out}"
+    );
+    assert!(
+        out.contains("expected `string`, found `number`")
+            && out.contains("required type: `Result<string, string>`"),
+        "the checker-proven incompatible types are reported: {out}"
+    );
+    assert!(
+        !out.contains("`try` needs a Result") && !out.contains("no overlap"),
+        "property and comparison consequences from lowering are suppressed: {out}"
+    );
+}
+
+#[test]
+fn a_precise_rl_error_owns_an_overlapping_type_consequence() {
+    let root = require_tsgo!();
+    let dir = project(&[(
+        "src/field.rl",
+        "enum Shape { Circle(radius: number), Point }\n\
+         export const radiusOf = (shape: Shape): number =>\n\
+         \x20 match (shape) { Circle(radiuz) => radiuz, Point => 0 };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("case `Circle` has no field `radiuz`") && !out.contains("type mismatch:"),
+        "the direct rl cause replaces its broader checker consequence: {out}"
     );
 }
 
@@ -512,7 +596,8 @@ fn parser_errors_do_not_hide_an_independent_type_error_in_the_same_file() {
         "the malformed construct remains visible: {out}"
     );
     assert!(
-        out.contains("ts(2322)") && out.contains("Err<number>"),
+        out.contains("type mismatch: expected `Result<number, string>`")
+            && out.contains("Err<number>"),
         "the independent bindNonResult type error survives recovery: {out}"
     );
     fs::remove_dir_all(&dir).ok();
@@ -809,7 +894,9 @@ fn an_answer_past_the_pipe_buffer_still_arrives() {
     let dir = project(&[("src/big.rl", source.as_str())]);
     let out = check(&dir, &root);
     assert_eq!(
-        out.lines().filter(|l| l.contains("ts(2322)")).count(),
+        out.lines()
+            .filter(|l| l.contains("type mismatch: expected `number`"))
+            .count(),
         400,
         "every diagnostic of a >64 KB answer arrives: {out}"
     );
@@ -890,8 +977,9 @@ fn a_type_error_is_reported_at_its_position_in_the_rl_source() {
     )]);
     let out = check(&dir, &root);
     assert!(
-        out.starts_with("src/bad.rl:2:9: ts(2322):") || out.contains("bad.rl:2:9: ts(2322):"),
-        "the diagnostic belongs at the declaration in the .rl file: {out}"
+        out.starts_with("src/bad.rl:2:22: type mismatch:")
+            || out.contains("bad.rl:2:22: type mismatch:"),
+        "the diagnostic belongs at the incompatible expression in the .rl file: {out}"
     );
 }
 

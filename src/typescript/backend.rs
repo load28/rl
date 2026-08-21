@@ -111,6 +111,32 @@ pub(crate) struct Diagnostic {
     /// TypeScript's error code (`2322` for `TS2322`).
     pub code: u32,
     pub message: String,
+    /// Structured assignability facts when the checker identified the
+    /// expression and its contextual type. The raw message remains the
+    /// lossless fallback; renderers prefer these facts.
+    pub mismatch: Option<TypeMismatch>,
+}
+
+/// A checker-proven type mismatch, independent of the syntax that placed
+/// the expression in a typed context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypeMismatch {
+    /// UTF-16 range of the expression whose type was compared.
+    pub start: usize,
+    pub end: usize,
+    /// The complete contextual and actual types.
+    pub expected: String,
+    pub found: String,
+    /// Minimal incompatible leaves found by descending through unions and
+    /// matching generic aliases. Empty means no safe reduction was found.
+    pub differences: Vec<TypeDifference>,
+}
+
+/// The smallest expected/found pair the checker can prove incompatible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypeDifference {
+    pub expected: String,
+    pub found: String,
 }
 
 /// The literals a [`LiteralQuery`]'s arms fail to cover. Present only when

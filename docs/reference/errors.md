@@ -350,37 +350,41 @@ passed through from the source or an rlc bug; use --no-verify to bypass.
 
 ## 타입 에러 (tsc)
 
-타입 에러는 rlc가 내는 에러가 아닙니다 — tsc가 냅니다. 다만 `.rl`은 tsc가
-읽는 파일이 아니므로, rlc가 그 진단을 **원본 `.rl`의 행·열로 옮겨** 전달합니다.
+타입 관계의 판정은 TypeScript checker가 합니다. rlc는 checker가 확인한
+기대 타입·실제 타입·대입 불가능 관계를 구조화된 사실로 받아, 가장 작은 타입
+차이를 **원본 `.rl`의 행·열**에서 표시합니다.
 
 | 어디서 | 형식 | 비고 |
 |--------|------|------|
-| `rlc --check-types` / `--types` | `rlc: <파일>.rl:<행>:<열>: ts(<코드>): <메시지>` | 타입 에러가 있어도 `--types`의 사이드카는 방출되고 종료 코드만 1 ([`cli.md`](./cli.md#타입-검사---check-types---types)) |
-| VSCode 확장 | 진단 `source: ts`, `code`는 TS 에러 번호 | `rl.typeDiagnostics`로 끌 수 있음 |
+| `rlc --check-types` / `--types` | `rlc: <파일>.rl:<행>:<열>: type mismatch: expected ...` | 타입 에러가 있어도 `--types`의 사이드카는 방출되고 종료 코드만 1 ([`cli.md`](./cli.md#타입-검사---check-types---types)) |
+| VSCode 확장 | CLI와 같은 메시지, `source: ts`, `code: ts<번호>` | `rl.typeDiagnostics`로 끌 수 있음 |
 
 두 경로 모두 `match` 암·`|>` 파이프라인·`try`/let-else/`if let` **안쪽**의
 타입 에러까지 잡습니다. 방출물은 순수 TypeScript이므로 rl 구문이 타입 추론을
 가리지 않습니다.
 
 ```rl
-const bad = evaluate() |> Result.mapP((n) => n.length);
-// rlc: eval.rl:1:48: ts(2339): Property 'length' does not exist on type 'number'.
+function parse(): Result<number, InputError> {
+  return Result.Err(RangeError.TooLarge(70000, 65535));
+}
+// type mismatch: expected `InputError`, found `RangeError`
+//   required type: `Result<number, InputError>`
 ```
 
-계층은 그대로입니다: 위의 rl 수준 에러는 **전부 rlc가**, 타입 에러는
-**전부 tsc가** 냅니다. 겹치지 않습니다.
+제네릭·유니언의 바깥 모양을 반복하지 않고 checker가 증명한 첫 불일치 타입을
+주 메시지로 냅니다. 전체 기대 타입이 맥락에 필요하면 `required type`으로 한 번만
+붙입니다. 구조화할 수 없는 TypeScript 진단은 원문을 그대로 전달합니다.
 
 ### 생성된 코드에서 난 타입 에러
 
-사용자 코드가 잘못됐을 때 tsc가 **rlc가 쓴 글루**에서 에러를 낼 수 있습니다
-(`try`의 대상이 `Result`가 아닌 경우 등). 그런 진단은 사용자가 쓰지 않은
-줄과 이름(`$rl_t0`)을 가리키므로, rlc가 **자기 구문의 말로 옮겨** 자기
-위치에서 보고합니다.
+사용자 코드가 잘못됐을 때 checker가 **rlc가 쓴 글루**에서 여러 에러를 낼 수
+있습니다. rlc는 같은 구문에서 확인된 기대/실제 타입 관계를 원인으로 선택하고,
+그 결과로 생긴 프로퍼티·비교 에러는 표시하지 않습니다.
 
 | 구문 | tsc 코드 | rlc가 하는 말 |
 |------|----------|---------------|
 | `try` | 2339·2551·2571 | `` `try` needs a `Result` — this expression is not one `` |
-| `try` | 2322·2345 | `` the `Err` this `try` propagates does not fit the enclosing function's return type — ... `` |
+| 모든 구문 | 구조화된 대입 불일치 | ``type mismatch: expected `<타입>`, found `<타입>` `` |
 | `result`의 `<-` | 2339·2551·2571 | `` `<-` needs a `Result` — this expression is not one `` |
 | let-else / `if let` | 2339·2571 | `` ... needs a value with a `kind` discriminant — this expression has none `` |
 | `match` | 2339·2571 | `` match on a tag pattern needs a value with a `kind` discriminant — this scrutinee has none (a plain TypeScript `enum` is not one) `` |
@@ -391,31 +395,23 @@ rlc: f.rl:2:13: `try` needs a `Result` — this expression is not one
      (ts2339: Property 'kind' does not exist on type 'number'.)
 ```
 
-- 원문이 괄호 안에 함께 실립니다 — 옮긴 말이 틀렸을 때 사용자가 직접 판단할
-  수 있어야 하기 때문입니다.
+- 구조화된 대입 불일치는 TypeScript 진단 문장을 파싱하지 않습니다. checker의
+  타입 객체와 `isTypeAssignableTo` 결과를 사용합니다.
 - 표에 없는 코드는 **옮기지 않고** 그대로 전달합니다(`(in code rlc generated
   for this construct)` 꼬리표가 붙습니다). 아닌 것을 아는 척하는 것보다
   못생긴 메시지가 낫습니다.
-- 한 구문의 글루가 같은 뜻의 진단을 여러 개 그리면 하나로 합칩니다.
+- 한 구문의 글루에서 원인 타입 불일치가 확인되면 그 원인 하나만 표시합니다.
 - 매핑이 있는 자리(사용자가 쓴 텍스트)의 타입 에러는 **옮기지 않습니다** —
-  그건 사용자의 코드이고 tsc가 말할 몫입니다.
+  같은 구조화 렌더러로 원래 위치에서 표시합니다.
 
 #### 구조적 타입을 선언 이름으로
 
-tsc에는 rl 케이스를 가리킬 말이 없습니다. `Wire.OutOfRange`는 유니언의 한
-멤버로 낮아지므로, 그 케이스에 대한 진단은 낮아진 모양
-(`{ kind: "OutOfRange"; value: number; }`)을 그대로 찍습니다. rlc는 그게 누구의
-케이스인지 알기 때문에, 옮긴 말 쪽에 **rl 이름으로 다시 쓴 문장**을 함께
-싣습니다(`(in rl's names: ...)`).
+checker에는 rl 케이스를 가리킬 말이 없습니다. rlc는 구조화된 타입 사실을
+선언 표와 대조해 낮아진 객체 타입을 `Wire.OutOfRange` 같은 이름으로 바꿉니다.
 
 ```
-rlc: a.rl:12:13: the `Err` this `try` propagates does not fit the enclosing
-     function's return type — rl has no automatic conversion, so widen the
-     return type or convert the error
-     (in rl's names: Type 'Err<Wire.OutOfRange>' is not assignable to type
-      'Result<number, ParseError>'.)
-     (ts2322: Type 'Err<{ kind: "OutOfRange"; value: number; }>' is not
-      assignable to type 'Result<number, { kind: "NotANumber"; text: string; }>'.)
+rlc: a.rl:12:13: type mismatch: expected `ParseError`, found `Wire.OutOfRange`
+  required type: `Result<number, ParseError>`
 ```
 
 이름은 선언 표(파일의 enum + 임포트가 이름 붙여 들여온 enum + 내장
@@ -431,9 +427,7 @@ rlc: a.rl:12:13: the `Err` this `try` propagates does not fit the enclosing
 - 임포트한 enum은 **임포트가 준 이름**으로 부릅니다
   (`import { Wire as W }` → `W.OutOfRange`).
 
-원문은 그대로 실립니다 — 이름은 읽기를 돕는 것이지 원문을 대신하지 않습니다.
-rl이 이름을 잘못 붙였을 때 사용자가 tsc가 실제로 한 말과 맞춰볼 수 있어야
-합니다.
+이름을 유일하게 확인할 수 없으면 checker가 준 구조적 타입 표기를 유지합니다.
 
 ## CLI
 

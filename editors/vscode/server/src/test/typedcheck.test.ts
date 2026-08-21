@@ -95,3 +95,30 @@ test(
     );
   },
 );
+
+test(
+  "the authoritative editor pass uses the compiler's structured type message",
+  { skip, timeout },
+  async () => {
+    const dir = tmpProject();
+    const file = path.join(dir, "main.rl");
+    fs.writeFileSync(file, "export const saved = 0;\n");
+
+    const result = await runTypedCheck(
+      COMPILER,
+      "const wrong: string = 1;\n",
+      file,
+      true,
+    );
+    if (result.kind === "unavailable") return;
+    const mismatch = result.diagnostics.find((d) => d.code === "ts2322");
+    assert.equal(
+      mismatch?.message,
+      "type mismatch: expected `string`, found `1`",
+    );
+    assert.deepEqual(
+      [mismatch?.line, mismatch?.col, mismatch?.endLine, mismatch?.endCol],
+      [1, 23, 1, 24],
+    );
+  },
+);

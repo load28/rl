@@ -607,6 +607,35 @@ pub(crate) fn diagnostic_intersects_recovery(
         .any(|&(recovery_start, recovery_end)| start < recovery_end && recovery_start < end)
 }
 
+/// Whether a checker-proven assignability failure covers source already
+/// owned by a precise rl diagnostic. The rl diagnostic is the cause; the
+/// broader TypeScript mismatch is a consequence of lowering that invalid
+/// construct.
+pub(crate) fn diagnostic_intersects_rl_error(
+    file: &ProjectedDocument,
+    diagnostic: &crate::typescript::backend::Diagnostic,
+) -> bool {
+    let (diagnostic_start, diagnostic_end) = diagnostic
+        .mismatch
+        .as_ref()
+        .map_or((diagnostic.start, diagnostic.end), |mismatch| {
+            (mismatch.start, mismatch.end)
+        });
+    let Some((start, _)) = diagnostic_source_offset(file, diagnostic_start) else {
+        return false;
+    };
+    let Some((end, _)) = diagnostic_source_offset(file, diagnostic_end) else {
+        return false;
+    };
+    let end = end.max(start.saturating_add(1));
+    file.rl_diagnostics.iter().any(|rl| {
+        let (Some(rl_start), Some(rl_end)) = (rl.start, rl.end) else {
+            return false;
+        };
+        start < rl_end && rl_start < end
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,6 +655,7 @@ mod tests {
             end: at + needle.len(),
             code,
             message: message.to_string(),
+            mismatch: None,
         }
     }
 

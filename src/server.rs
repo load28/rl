@@ -560,8 +560,9 @@ fn emit_map(params: &serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(json!({ "code": emit.code, "mappings": mappings }))
 }
 
-/// `--check-types --rl-only --overlay <path>` for a buffer, against the live
-/// project it belongs to.
+/// `--check-types --overlay <path>` for a buffer, against the live project
+/// it belongs to. `includeTypes` controls whether TypeScript diagnostics are
+/// included; typed rl facts are always computed by the same pass.
 fn typed_check(
     sessions: &mut Sessions,
     params: &serde_json::Value,
@@ -572,6 +573,7 @@ fn typed_check(
         .ok_or_else(|| "typedCheck needs a \"path\"".to_string())?
         .to_string();
     let text = text_param(params)?.to_string();
+    let include_types = params["includeTypes"].as_bool().unwrap_or(false);
     let canonical = PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| format!("--overlay {path}: {e}"))?;
@@ -608,7 +610,7 @@ fn typed_check(
                 &snapshot,
                 &CheckRequest {
                     emit_declarations: false,
-                    rl_only: true,
+                    rl_only: !include_types,
                 },
             );
             match checked {

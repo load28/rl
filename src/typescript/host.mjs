@@ -26,7 +26,7 @@
  *            tagChecks: [{ module, start, covered: [...] }],
  *            symbolChecks: [{ module, start }],
  *            emitDeclarations: boolean }
- *       →  { diagnostics: [{ file, start, end, code, message }],
+ *       →  { diagnostics: [{ file, start, end, code, message, mismatch? }],
  *            literalMissing: [{ index, missing }],
  *            tagMissing: [{ index, missing }],
  *            tagMembers: [{ index, tags }],
@@ -158,8 +158,12 @@ async function main() {
   }
 
   let API;
+  let isExpression;
   try {
     ({ API } = await import(open.apiModule));
+    ({ isExpression } = await import(
+      path.resolve(path.dirname(open.apiModule), "../../ast/index.js")
+    ));
   } catch (e) {
     fail(2, "rlc host: cannot load the TypeScript API from " + open.apiModule + ": " + e.message);
   }
@@ -235,18 +239,19 @@ async function main() {
     // and an `.rl` are in one project, so an error in either is this run's to
     // report. Which file it lands in decides how it is positioned, and that
     // is rlc's half.
+    const checker = project.checker;
     for (const d of project.program.getSemanticDiagnostics()) {
       if (!d.fileName) continue;
+      const mismatch = contextualMismatch(project, checker, d, isExpression);
       out.diagnostics.push({
         file: d.fileName,
         start: d.pos,
         end: d.end,
         code: d.code,
         message: d.text,
+        ...(mismatch ? { mismatch } : {}),
       });
     }
-
-    const checker = project.checker;
     /**
      * Whether a declaration lives in one of TypeScript's own lib files.
      * Answered from the program's per-file metadata when the client has it
@@ -400,6 +405,123 @@ async function main() {
     }
     return out;
   }
+}
+
+/**
+ * Finds the expression TypeScript compared with a contextual type for a
+ * diagnostic. This is syntax-neutral: return values, annotated initializers,
+ * call arguments and future lowered constructs all participate through the
+ * checker’s contextual typing relation.
+ */
+function contextualMismatch(project, checker, diagnostic, isExpression) {
+  const sourceFile = project.program.getSourceFile(diagnostic.fileName);
+  if (!sourceFile) return null;
+
+  const chain = [];
+  const visit = (node) => {
+    if (node.pos > diagnostic.pos || node.end < diagnostic.end) return;
+    chain.push(node);
+    node.forEachChild(visit);
+  };
+  visit(sourceFile);
+
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const node = chain[i];
+    const candidates = [];
+    if (isExpression(node)) candidates.push(node);
+    node.forEachChild((child) => {
+      if (isExpression(child)) candidates.push(child);
+    });
+    candidates.sort((left, right) => right.getWidth(sourceFile) - left.getWidth(sourceFile));
+    for (const expression of candidates) {
+      let found;
+      let expected;
+      try {
+        found = checker.getTypeAtLocation(expression);
+        expected = checker.getContextualType(expression);
+      } catch {
+        continue;
+      }
+      if (!found || !expected || found.isErrorType?.() || expected.isErrorType?.()) continue;
+      if (checker.isTypeAssignableTo(found, expected)) continue;
+      return {
+        start: expression.getStart(sourceFile),
+        end: expression.getEnd(),
+        expected: checker.typeToString(expected),
+        found: checker.typeToString(found),
+        differences: incompatibleLeaves(checker, found, expected),
+      };
+    }
+  }
+  return null;
+}
+
+/** The union constituents of a type, or the type itself as one constituent. */
+function typeConstituents(type) {
+  return type.isUnionType?.() ? (type.getTypes?.() ?? [type]) : [type];
+}
+
+/** A stable structural identity used only to align comparable generic arms. */
+function typeIdentity(type) {
+  return type.getAliasSymbol?.()?.id ?? type.getSymbol?.()?.id ?? null;
+}
+
+/** Generic arguments retained by an alias or reference type. */
+function typeArguments(checker, type) {
+  const aliases = type.getAliasTypeArguments?.() ?? [];
+  if (aliases.length > 0) return aliases;
+  return type.isTypeReference?.() ? checker.getTypeArguments(type) : [];
+}
+
+/**
+ * Descends through unions and matching generic aliases until it reaches the
+ * smallest checker-proven incompatible pair. No language construct or type
+ * name is special-cased here.
+ */
+function incompatibleLeaf(checker, found, expected, depth = 0) {
+  if (depth >= 8 || checker.isTypeAssignableTo(found, expected)) return null;
+
+  const identity = typeIdentity(found);
+  if (identity !== null) {
+    const counterpart = typeConstituents(expected).find(
+      (candidate) => typeIdentity(candidate) === identity,
+    );
+    if (counterpart) {
+      const foundArgs = typeArguments(checker, found);
+      const expectedArgs = typeArguments(checker, counterpart);
+      if (foundArgs.length === expectedArgs.length && foundArgs.length > 0) {
+        for (let i = 0; i < foundArgs.length; i++) {
+          if (!checker.isTypeAssignableTo(foundArgs[i], expectedArgs[i])) {
+            return (
+              incompatibleLeaf(checker, foundArgs[i], expectedArgs[i], depth + 1) ?? {
+                expected: checker.typeToString(expectedArgs[i]),
+                found: checker.typeToString(foundArgs[i]),
+              }
+            );
+          }
+        }
+      }
+    }
+  }
+  return {
+    expected: checker.typeToString(expected),
+    found: checker.typeToString(found),
+  };
+}
+
+function incompatibleLeaves(checker, found, expected) {
+  const leaves = [];
+  const seen = new Set();
+  for (const constituent of typeConstituents(found)) {
+    if (checker.isTypeAssignableTo(constituent, expected)) continue;
+    const leaf = incompatibleLeaf(checker, constituent, expected);
+    if (!leaf) continue;
+    const key = `${leaf.expected}\0${leaf.found}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    leaves.push(leaf);
+  }
+  return leaves;
 }
 
 /**

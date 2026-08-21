@@ -378,6 +378,7 @@ fn parse_answers(stdout: &str) -> Result<Answers, String> {
             end: d["end"].as_u64().unwrap_or_default() as usize,
             code: d["code"].as_u64().unwrap_or_default() as u32,
             message: d["message"].as_str().unwrap_or_default().to_string(),
+            mismatch: parse_type_mismatch(&d["mismatch"]),
         });
     }
     for m in array(&value, "literalMissing") {
@@ -430,6 +431,28 @@ fn parse_answers(stdout: &str) -> Result<Answers, String> {
         });
     }
     Ok(answers)
+}
+
+fn parse_type_mismatch(value: &serde_json::Value) -> Option<TypeMismatch> {
+    let object = value.as_object()?;
+    let differences = object
+        .get("differences")?
+        .as_array()?
+        .iter()
+        .filter_map(|difference| {
+            Some(TypeDifference {
+                expected: difference["expected"].as_str()?.to_string(),
+                found: difference["found"].as_str()?.to_string(),
+            })
+        })
+        .collect();
+    Some(TypeMismatch {
+        start: object.get("start")?.as_u64()? as usize,
+        end: object.get("end")?.as_u64()? as usize,
+        expected: object.get("expected")?.as_str()?.to_string(),
+        found: object.get("found")?.as_str()?.to_string(),
+        differences,
+    })
 }
 
 fn array<'a>(value: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value] {

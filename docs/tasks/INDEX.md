@@ -151,7 +151,8 @@
 | TASK-141 | codex 브랜치 정밀 진단 이식 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-141](./TASK-141-port-codex-diagnostics.md) |
 | TASK-142 | 오류 구문 단위 typed projection 복구 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-142](./TASK-142-local-projection-recovery.md) |
 | TASK-143 | 에디터가 typed recovery projection을 공유 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-143](./TASK-143-editor-recovery-projection.md) |
+| TASK-144 | 구조화된 타입 진단과 공통 렌더링 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-144](./TASK-144-structured-type-diagnostics.md) |
 
 ## 다음 태스크 번호
 
-**TASK-144**
+**TASK-145**
