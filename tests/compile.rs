@@ -343,11 +343,16 @@ fn or_pattern_double_pipe_is_not_rl_syntax() {
     // `A || B` is not an or-pattern; the candidate fails to parse and the
     // (invalid-TS) text passes through to the output self-check.
     let e = err("const r = match (x) { A || B => 1 };");
+    // Reported where the text that failed is — the `match` that stayed
+    // verbatim — not at a position in the generated module.
     assert!(
-        e.message.contains("generated TypeScript failed to parse"),
+        e.message
+            .contains("`match` here did not parse as an rl `match`"),
         "{}",
         e.message
     );
+    assert_eq!((e.line, e.col), (1, 11));
+    assert_eq!((e.end_line, e.end_col), (1, 16));
 }
 
 /* ------------------------------------------------------------------ */
@@ -459,10 +464,12 @@ fn wildcard_with_guard_is_not_rl_syntax() {
     // through and the output self-check reports it.
     let e = err("const r = match (x) { A => 1, _ if c => 0 };");
     assert!(
-        e.message.contains("generated TypeScript failed to parse"),
+        e.message
+            .contains("`match` here did not parse as an rl `match`"),
         "{}",
         e.message
     );
+    assert_eq!((e.line, e.col), (1, 11));
 }
 
 #[test]
@@ -684,11 +691,16 @@ fn try_without_semicolon_is_not_recognized() {
     // No terminating `;` → not rl syntax; the (invalid-TS) source passes
     // through and the output self-check reports it.
     let e = err("function f(): X {\n  const n = try g()\n  return h(n);\n}\n");
+    // The `try` that did not parse is the thing to look at, and the
+    // message says why the output no longer parses.
     assert!(
-        e.message.contains("generated TypeScript failed to parse"),
+        e.message
+            .contains("`try` here did not parse as an rl `try`"),
         "{}",
         e.message
     );
+    assert_eq!((e.line, e.col), (2, 13));
+    assert_eq!((e.end_line, e.end_col), (2, 16));
 }
 
 #[test]
@@ -701,7 +713,9 @@ fn try_inside_match_arm_is_an_error() {
         "{}",
         e.message
     );
-    assert_eq!((e.line, e.col), (2, 18)); // points at the `const`
+    // The propagation, not the declaration it is written in.
+    assert_eq!((e.line, e.col), (2, 28));
+    assert_eq!((e.end_line, e.end_col), (2, 40));
 }
 
 #[test]
@@ -3208,4 +3222,82 @@ const a = match (o) {
     let out = ok(&pasted);
     // ...and it really is the No case, not a binding that swallows Wrap.
     assert!(out.contains("$rl_m.inner.kind === \"No\""), "{out}");
+}
+
+/* ------------------------------------------------------------------ */
+/* diagnostic ranges (TASK-116)                                        */
+/* ------------------------------------------------------------------ */
+
+/// The source text an error's range covers — what an editor underlines.
+fn covered(src: &str, e: &rlc::CompileError) -> String {
+    let offset = |line: usize, col: usize| {
+        src.split_inclusive('\n')
+            .take(line - 1)
+            .map(str::len)
+            .sum::<usize>()
+            + col
+            - 1
+    };
+    src[offset(e.line, e.col)..offset(e.end_line, e.end_col)].to_string()
+}
+
+#[test]
+fn a_non_exhaustive_match_covers_its_head() {
+    // The head — not the word the position lands on, and not the arms
+    // below it, which are the user's own code.
+    let src = "enum S { A(x: number), B }\nconst v = match (s) { A(x) => x };\n";
+    let e = err(src);
+    assert!(e.message.contains("is not exhaustive"), "{}", e.message);
+    assert_eq!((e.line, e.col), (2, 11));
+    assert_eq!(covered(src, &e), "match (s)");
+}
+
+#[test]
+fn a_tuple_match_covers_every_scrutinee() {
+    let src = "enum S { A(x: number), B }\nenum T { C(), D }\nconst v = match (s, t) { (A(x), C) => x };\n";
+    let e = err(src);
+    assert!(e.message.contains("is not exhaustive"), "{}", e.message);
+    assert_eq!(covered(src, &e), "match (s, t)");
+}
+
+#[test]
+fn a_duplicate_arm_covers_the_tag_it_repeats() {
+    let src = "enum S { A(x: number), B }\nconst v = match (s) { A(x) => x, A(x) => 0, B => 1 };\n";
+    let e = err(src);
+    assert!(e.message.contains("duplicate arm"), "{}", e.message);
+    assert_eq!(covered(src, &e), "A");
+}
+
+#[test]
+fn a_misspelled_case_covers_the_name_as_written() {
+    let src = "enum Shape { Circle(r: number), Square(s: number) }\nconst v = match (s) { Circel(r) => r, Square(s) => s };\n";
+    let e = err(src);
+    assert!(e.message.contains("did you mean"), "{}", e.message);
+    assert_eq!(covered(src, &e), "Circel");
+}
+
+#[test]
+fn a_misplaced_try_covers_the_propagation() {
+    let src = "const x = match (r) {\n  Ok(v) => { const y = try f(v); return y; },\n  Err(e) => 0,\n};\n";
+    let e = err(src);
+    assert!(e.message.contains("`try` cannot be used"), "{}", e.message);
+    assert_eq!(covered(src, &e), "try f(v)");
+}
+
+#[test]
+fn a_val_mutation_covers_the_binding() {
+    let src = "function f() {\n  val const cfg = { a: 1 };\n  cfg.a = 2;\n}\n";
+    let e = err(src);
+    assert!(e.message.contains("cannot mutate"), "{}", e.message);
+    assert_eq!(covered(src, &e), "cfg");
+}
+
+#[test]
+fn an_error_without_a_known_extent_reports_a_position_only() {
+    // No end means "the consumer decides the width" — the editor then
+    // underlines the word at the position, as it always has.
+    let src = "enum S { A(x: number), B }\nconst v = match (s) { A(x) => x, _ => 0, B => 1 };\n";
+    let e = err(src);
+    assert!(e.message.contains("must be the last arm"), "{}", e.message);
+    assert_eq!(covered(src, &e), "_");
 }

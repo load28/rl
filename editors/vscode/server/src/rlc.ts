@@ -24,6 +24,14 @@ export interface RlcDiagnostic {
   line: number;
   /** 1-based; 0 means "no position". */
   col: number;
+  /** End of the range the diagnostic covers, past its last character;
+   * 1-based, 0 (or absent) when the compiler reported a position only —
+   * the squiggle then falls back to the word at the position. The compiler
+   * sends this for a construct it knows the extent of, so the underline
+   * covers `try parse(text)` or `match (shape)` as a whole. */
+  endLine?: number;
+  /** See {@link RlcDiagnostic.endLine}. */
+  endCol?: number;
   message: string;
 }
 
@@ -135,6 +143,8 @@ export async function runCheck(
       diagnostics: (result.diagnostics ?? []).map((d) => ({
         line: d.line,
         col: d.col,
+        endLine: d.endLine,
+        endCol: d.endCol,
         message: d.message,
       })),
     };
@@ -316,7 +326,14 @@ export async function runTypedCheck(
   if (answer && "result" in answer) {
     const result = answer.result as {
       blocked?: boolean;
-      diagnostics?: { path: string; line: number; col: number; message: string }[];
+      diagnostics?: {
+        path: string;
+        line: number;
+        col: number;
+        endLine?: number;
+        endCol?: number;
+        message: string;
+      }[];
     };
     const all = result.diagnostics ?? [];
     let real = fsPath;
@@ -340,6 +357,8 @@ export async function runTypedCheck(
       diagnostics: mine.map((d) => ({
         line: d.line,
         col: d.col,
+        endLine: d.endLine,
+        endCol: d.endCol,
         message: d.message,
       })),
     };

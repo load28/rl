@@ -45,6 +45,9 @@ const timeout = 60_000;
 interface Client {
   request(method: string, params: unknown): Promise<any>;
   notify(method: string, params: unknown): void;
+  /** The next notification of `method` that satisfies `want` — the server
+   * publishes diagnostics on its own schedule, so a test waits for one. */
+  waitFor(method: string, want: (params: any) => boolean): Promise<any>;
   stop(): void;
 }
 
@@ -54,6 +57,13 @@ function connect(): Client {
     stdio: ["pipe", "pipe", "ignore"],
   });
   const pending = new Map<number, (body: any) => void>();
+  interface Waiter {
+    method: string;
+    want: (params: any) => boolean;
+    resolve: (params: any) => void;
+  }
+  const waiters = new Map<number, Waiter>();
+  let nextWaiter = 1;
   let nextId = 1;
   let buf = Buffer.alloc(0);
 
@@ -74,6 +84,15 @@ function connect(): Client {
       if (resolve) {
         pending.delete(body.id);
         resolve(body);
+        continue;
+      }
+      if (body.method !== undefined) {
+        for (const [n, waiter] of [...waiters.entries()]) {
+          if (waiter.method === body.method && waiter.want(body.params)) {
+            waiters.delete(n);
+            waiter.resolve(body.params);
+          }
+        }
       }
     }
   });
@@ -92,6 +111,10 @@ function connect(): Client {
         send({ id, method, params });
       }),
     notify: (method, params) => send({ method, params }),
+    waitFor: (method, want) =>
+      new Promise((resolve) => {
+        waiters.set(nextWaiter++, { method, want, resolve });
+      }),
     stop: () => child.kill(),
   };
 }
@@ -449,3 +472,80 @@ test("pattern positions complete cases and fields", { skip, timeout }, async () 
     stop();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* diagnostic ranges (TASK-116)                                        */
+/* ------------------------------------------------------------------ */
+
+/** The text a published range covers, as the editor would underline it. */
+function covered(source: string, range: any): string {
+  const lines = source.split("\n");
+  const at = (p: { line: number; character: number }) =>
+    lines.slice(0, p.line).reduce((n, l) => n + l.length + 1, 0) + p.character;
+  return source.slice(at(range.start), at(range.end));
+}
+
+/** The diagnostics the server publishes for `source`, once it has some. */
+async function published(source: string): Promise<any[]> {
+  const { client, uri, stop } = await open(source);
+  try {
+    const params = await client.waitFor(
+      "textDocument/publishDiagnostics",
+      (p) => p.uri === uri && p.diagnostics.length > 0,
+    );
+    return params.diagnostics;
+  } finally {
+    stop();
+  }
+}
+
+test(
+  "a diagnostic underlines the construct it is about",
+  { skip, timeout },
+  async () => {
+    const source = [
+      "enum Shape { Circle(r: number), Square(s: number), Tri(a: number) }",
+      "export function area(shape: Shape): number {",
+      "  return match (shape) {",
+      "    Circle(r) => r * r,",
+      "    Square(s) => s * s,",
+      "  };",
+      "}",
+      "",
+    ].join("\n");
+    const diagnostics = await published(source);
+    const missing = diagnostics.find((d: any) =>
+      d.message.includes("is not exhaustive"),
+    );
+    assert.ok(missing, `no exhaustiveness error in: ${JSON.stringify(diagnostics)}`);
+    // The whole head, not just the word the position lands on.
+    assert.equal(covered(source, missing.range), "match (shape)");
+  },
+);
+
+test(
+  "a construct that did not parse is reported where it is written",
+  { skip, timeout },
+  async () => {
+    // A `match` without its scrutinee parens is not rl syntax, so it passes
+    // through — and the generated module no longer parses. The error used
+    // to arrive with no position at all and land on line 1.
+    const source = [
+      "enum Shape { Circle(r: number), Square(s: number) }",
+      "export function area(shape: Shape): number {",
+      "  return match shape {",
+      "    Circle(r) => r,",
+      "    Square(s) => s,",
+      "  };",
+      "}",
+      "",
+    ].join("\n");
+    const diagnostics = await published(source);
+    const failed = diagnostics.find((d: any) =>
+      d.message.includes("did not parse as an rl `match`"),
+    );
+    assert.ok(failed, `no parse report in: ${JSON.stringify(diagnostics)}`);
+    assert.equal(failed.range.start.line, 2);
+    assert.equal(covered(source, failed.range), "match");
+  },
+);

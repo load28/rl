@@ -36,6 +36,10 @@ pub(super) fn parse_try_stmt<'t>(
         byte_end,
         TryStmt {
             keyword_off: kw_span.start,
+            span: Span {
+                start: kw_span.start,
+                end: expr_span.end,
+            },
             decl: None,
             expr,
         },
@@ -78,12 +82,14 @@ pub(super) fn parse_try_decl<'t>(
     }
     cur.idx = eq_idx + 1;
 
-    match cur.peek() {
+    let try_off = match cur.peek() {
         Some(t) if matches!(t.kind, TokenKind::Ident) && cur.text(t) == "try" => {
+            let at = t.span.start;
             cur.bump();
+            at
         }
         _ => return None,
-    }
+    };
 
     let (cur, byte_end, expr_span, expr_tokens) = parse_try_tail(cur)?;
     let expr = cur
@@ -94,6 +100,12 @@ pub(super) fn parse_try_decl<'t>(
         byte_end,
         TryStmt {
             keyword_off: kw_span.start,
+            // The propagation, not the declaration: a diagnostic about the
+            // `Err` belongs on `try <expr>`, not on `const x = `.
+            span: Span {
+                start: try_off,
+                end: expr_span.end,
+            },
             decl: Some((
                 cur.parser.src[kw_span.start..kw_span.end].to_string(),
                 binding_span,

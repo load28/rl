@@ -30,6 +30,15 @@ pub struct Diagnostic {
     /// 1-based line and column (columns count UTF-8 code points), or `None`
     /// when the diagnostic has no position in a file the user wrote.
     pub position: Option<(usize, usize)>,
+    /// Where the diagnostic's range ends — 1-based line and column, past
+    /// the last character it covers. `None` when only a position is known;
+    /// a consumer that draws a range then decides its own width (the
+    /// editor underlines the word at the position).
+    ///
+    /// This is what makes a diagnostic point at the *construct*: `try
+    /// parse(text)`, `match (shape)`, the mutated binding — the same span
+    /// Rust underlines, rather than the first character of the statement.
+    pub end: Option<(usize, usize)>,
     /// The full message, as it is shown.
     pub message: String,
 }
@@ -142,17 +151,18 @@ pub(crate) fn report(
             out.push(Diagnostic {
                 path: diagnostic.file.clone(),
                 position: None,
+                end: None,
                 message: format!("ts({}): {}", diagnostic.code, diagnostic.message),
             });
             continue;
         };
         // Glue is not the user's code. When rlc can say what the construct
-        // meant, it says that — at the construct's own keyword.
-        if let Some((offset, said)) = projection::translate_on_glue(file, diagnostic) {
-            let (line, col) = crate::line_col(&file.source, offset);
+        // meant, it says that — over the construct's own text.
+        if let Some((anchor, said)) = projection::translate_on_glue(file, diagnostic) {
             let entry = Diagnostic {
                 path: file.source_path.clone(),
-                position: Some((line, col)),
+                position: Some(crate::line_col(&file.source, anchor.src)),
+                end: Some(crate::line_col(&file.source, anchor.src_end)),
                 message: said,
             };
             // One construct's glue can draw several TypeScript errors that
@@ -163,11 +173,26 @@ pub(crate) fn report(
             continue;
         }
         match projection::diagnostic_source_offset(file, diagnostic.start) {
-            Some((offset, exact)) => {
-                let (line, col) = crate::line_col(&file.source, offset);
+            Some((nearest, exact)) => {
+                // Exact: the user's own text, so the diagnostic covers
+                // exactly what TypeScript underlined. On glue: the
+                // construct that wrote it, which is the honest extent —
+                // and better than the nearest byte before the glue.
+                let anchor = projection::glue_anchor(file, diagnostic.start);
+                let (offset, end) = match (exact, anchor) {
+                    (true, _) => (
+                        nearest,
+                        projection::diagnostic_source_offset(file, diagnostic.end)
+                            .filter(|(at, exact)| *exact && *at >= nearest)
+                            .map(|(at, _)| at),
+                    ),
+                    (false, Some(anchor)) => (anchor.src, Some(anchor.src_end)),
+                    (false, None) => (nearest, None),
+                };
                 out.push(Diagnostic {
                     path: file.source_path.clone(),
-                    position: Some((line, col)),
+                    position: Some(crate::line_col(&file.source, offset)),
+                    end: end.map(|at| crate::line_col(&file.source, at)),
                     message: format!(
                         "ts({}): {}{}",
                         diagnostic.code,
@@ -187,6 +212,7 @@ pub(crate) fn report(
             None => out.push(Diagnostic {
                 path: file.source_path.clone(),
                 position: None,
+                end: None,
                 message: format!("ts({}): {}", diagnostic.code, diagnostic.message),
             }),
         }
@@ -201,10 +227,10 @@ pub(crate) fn report(
         let Some(file) = files.iter().find(|f| f.source_path == anchor.source_path) else {
             continue;
         };
-        let (line, col) = crate::line_col(&file.source, anchor.offset);
         out.push(Diagnostic {
             path: file.source_path.clone(),
-            position: Some((line, col)),
+            position: Some(crate::line_col(&file.source, anchor.offset)),
+            end: Some(crate::line_col(&file.source, anchor.end)),
             message: format!(
                 "match on literal union is not exhaustive: missing {} \
                  (add the missing arms or a final `_` arm)",
@@ -234,6 +260,8 @@ pub(crate) fn report(
     // they name the alphabet of a `(constructor, field)` column, which is
     // the one thing rl cannot work out from declarations alone.
     let mut payloads: HashMap<PathBuf, Vec<PayloadAlphabet>> = HashMap::new();
+    // `(file, match keyword) -> end of `match (scrutinee)``.
+    let mut match_ends: HashMap<(PathBuf, usize), usize> = HashMap::new();
     for members in &answers.tag_members {
         if let Some(anchor) = probes.tags.get(members.index) {
             let per_match = by_file.entry(anchor.source_path.clone()).or_default();
@@ -241,6 +269,9 @@ pub(crate) fn report(
                 Some((_, positions)) => positions.push(members.tags.clone()),
                 None => per_match.push((anchor.offset, vec![members.tags.clone()])),
             }
+            // The keyword offset keys the alphabets; the range it opens is
+            // what the diagnostic underlines.
+            match_ends.insert((anchor.source_path.clone(), anchor.offset), anchor.end);
             continue;
         }
         let Some(anchor) = probes
@@ -314,10 +345,12 @@ pub(crate) fn report(
             } else {
                 uncovered.join(", ")
             };
-            let (line, col) = crate::line_col(&file.source, offset);
             out.push(Diagnostic {
                 path: file.source_path.clone(),
-                position: Some((line, col)),
+                position: Some(crate::line_col(&file.source, offset)),
+                end: match_ends
+                    .get(&(file.source_path.clone(), offset))
+                    .map(|at| crate::line_col(&file.source, *at)),
                 message: format!(
                     "match is not exhaustive: missing {shown} \
                      (add the missing arms or a final `_` arm)"
@@ -368,7 +401,6 @@ pub(crate) fn report(
         else {
             continue;
         };
-        let (line, col) = crate::line_col(&file.source, mutation.anchor.offset);
         let message = match &mutation.method_name {
             // The built-in itself is not named: the compiler answered
             // "this method is one of TypeScript's own", which is the
@@ -388,7 +420,8 @@ pub(crate) fn report(
         };
         out.push(Diagnostic {
             path: file.source_path.clone(),
-            position: Some((line, col)),
+            position: Some(crate::line_col(&file.source, mutation.anchor.offset)),
+            end: Some(crate::line_col(&file.source, mutation.anchor.end)),
             message,
         });
     }
@@ -451,10 +484,10 @@ pub(crate) fn report(
         else {
             continue;
         };
-        let (line, col) = crate::line_col(&file.source, pass.anchor.offset);
         out.push(Diagnostic {
             path: file.source_path.clone(),
-            position: Some((line, col)),
+            position: Some(crate::line_col(&file.source, pass.anchor.offset)),
+            end: Some(crate::line_col(&file.source, pass.anchor.end)),
             message: format!(
                 "cannot pass val binding `{}` to mutable parameter {} of \
                  `{}` (the parameter is not declared with `val`, so the function may mutate \

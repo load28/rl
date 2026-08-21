@@ -162,6 +162,7 @@ pub(crate) fn assemble(
             probes.literals.push(SourceAnchor {
                 source_path: file.source_path.clone(),
                 offset: probe.offset,
+                end: scrutinee_end(&file.source, probe.scrutinee_end),
             });
         }
 
@@ -188,6 +189,7 @@ pub(crate) fn assemble(
                 probes.tags.push(SourceAnchor {
                     source_path: file.source_path.clone(),
                     offset: probe.offset,
+                    end: scrutinee_end(&file.source, probe.scrutinee_end),
                 });
             }
         }
@@ -245,6 +247,7 @@ pub(crate) fn assemble(
                 anchor: SourceAnchor {
                     source_path: file.source_path.clone(),
                     offset: mutation.root,
+                    end: mutation.root + mutation.name.len(),
                 },
                 name: mutation.name.clone(),
                 root: query.symbols.len() - 1,
@@ -288,6 +291,7 @@ pub(crate) fn assemble(
                 anchor: SourceAnchor {
                     source_path: file.source_path.clone(),
                     offset: pass.offset,
+                    end: pass.offset + pass.name.len(),
                 },
                 name: pass.name.clone(),
                 callee: pass.callee.clone(),
@@ -336,11 +340,27 @@ pub(crate) fn assemble(
     (query, probes)
 }
 
-/// Where a question's answer is reported: a byte in the `.rl` source.
+/// The end of a `match`'s underlined range: the scrutinee's last byte,
+/// extended over the whitespace and closing paren that follow it so the
+/// span reads as the construct the user wrote — `match (shape)`.
+fn scrutinee_end(source: &str, after_scrutinee: usize) -> usize {
+    let rest = source.get(after_scrutinee..).unwrap_or_default();
+    let closing = rest.trim_start();
+    if closing.starts_with(')') {
+        after_scrutinee + (rest.len() - closing.len()) + 1
+    } else {
+        after_scrutinee
+    }
+}
+
+/// Where a question's answer is reported: a byte range in the `.rl`
+/// source. `offset` is the position the CLI prints; `end` closes the range
+/// an editor underlines (`offset` again when the anchor is a single point).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceAnchor {
     pub source_path: PathBuf,
     pub offset: usize,
+    pub end: usize,
 }
 
 /// One mutation, with the symbol questions that decide whether it is one.
@@ -447,7 +467,7 @@ fn scrutinee_position(emit: &MappedEmit, keyword_offset: usize) -> Option<usize>
 /// message says so. By the error-layer contract it should not happen at
 /// all: rlc's own output must not draw type errors.
 /// The rl wording for a TypeScript diagnostic that landed on glue, with
-/// the source offset to report it at — `None` when the diagnostic is not
+/// the source span to report it over — `None` when the diagnostic is not
 /// on glue, or when nothing in the whitelist covers it.
 ///
 /// A diagnostic whose span *is* mapped is the user's own code and is never
@@ -455,14 +475,23 @@ fn scrutinee_position(emit: &MappedEmit, keyword_offset: usize) -> Option<usize>
 pub(crate) fn translate_on_glue(
     file: &ProjectedDocument,
     diagnostic: &crate::typescript::backend::Diagnostic,
-) -> Option<(usize, String)> {
-    let out = mapper::from_utf16(&file.emit.code, diagnostic.start);
+) -> Option<(crate::EmitAnchor, String)> {
+    let anchor = glue_anchor(file, diagnostic.start)?;
+    let said = super::semantics::translate(anchor.kind, diagnostic.code, &diagnostic.message)?;
+    Some((anchor, said))
+}
+
+/// The construct whose glue a diagnostic's start lands in — `None` when the
+/// position is the user's own text (mapped) or belongs to no construct.
+pub(crate) fn glue_anchor(
+    file: &ProjectedDocument,
+    utf16_start: usize,
+) -> Option<crate::EmitAnchor> {
+    let out = mapper::from_utf16(&file.emit.code, utf16_start);
     if mapper::to_source_inclusive(&file.emit.mappings, out).is_some() {
         return None;
     }
-    let anchor = file.emit.anchor_at(out)?;
-    let said = super::semantics::translate(anchor.kind, diagnostic.code, &diagnostic.message)?;
-    Some((anchor.src, said))
+    file.emit.anchor_at(out).copied()
 }
 
 pub(crate) fn diagnostic_source_offset(
@@ -510,11 +539,10 @@ mod tests {
             2339,
             "Property 'kind' does not exist on type 'number'.",
         );
-        let (offset, said) = translate_on_glue(&file, &diagnostic).expect("translated");
-        assert!(
-            file.source[offset..].starts_with("const a = try"),
-            "reported at the construct, not the glue"
-        );
+        let (anchor, said) = translate_on_glue(&file, &diagnostic).expect("translated");
+        // The propagation itself is the span — not the whole declaration,
+        // and not one character of it.
+        assert_eq!(&file.source[anchor.src..anchor.src_end], "try plain()");
         assert!(said.starts_with("`try` needs a `Result`"), "{said}");
         // The original rides along — a translation the user can check.
         assert!(said.contains("ts2339: Property 'kind'"), "{said}");
@@ -547,8 +575,8 @@ mod tests {
             2339,
             "Property 'kind' does not exist on type 'Plain'.",
         );
-        let (offset, said) = translate_on_glue(&file, &diagnostic).expect("translated");
-        assert!(file.source[offset..].starts_with("match"), "at the match");
+        let (anchor, said) = translate_on_glue(&file, &diagnostic).expect("translated");
+        assert_eq!(&file.source[anchor.src..anchor.src_end], "match (e)");
         assert!(said.starts_with("match on a tag pattern"), "{said}");
     }
 

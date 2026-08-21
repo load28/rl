@@ -431,6 +431,12 @@ pub struct EmitAnchor {
     /// Byte offset in the source of the construct's keyword — where a
     /// diagnostic about this glue belongs.
     pub src: usize,
+    /// Byte offset just past the construct's own source text — the end of
+    /// what a diagnostic about this glue should underline. The range it
+    /// closes (`src..src_end`) is the construct as the user wrote it, not
+    /// the whole statement: for `try` it is `try <expr>`, for a `match` the
+    /// keyword and its scrutinee.
+    pub src_end: usize,
     /// What kind of construct wrote it.
     pub kind: AnchorKind,
 }
@@ -678,11 +684,17 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
             Some(off) => line_col(source, off),
             None => (0, 0),
         };
+        let (end_line, end_col) = match e.end {
+            Some(off) => line_col(source, off),
+            None => (0, 0),
+        };
         CompileError {
             message: e.message,
             filename: options.filename.map(String::from),
             line,
             col,
+            end_line,
+            end_col,
         }
     };
 
@@ -708,20 +720,25 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
         options.rewrite_imports,
         options.std_import,
     );
-    let code = flat.code;
-
     if options.verify
-        && let Err(message) = verify::verify_output(&code)
+        && let Err(failure) = verify::verify_output(&flat.code)
     {
-        return Err(CompileError {
-            message,
-            filename: options.filename.map(String::from),
-            line: 0,
-            col: 0,
-        });
+        // The self-check reads the *generated* module, but the user only
+        // has the `.rl` file open. A position in a file no one wrote is
+        // not a position, so it is carried back through the mappings to
+        // the source — and where the failure fell in a construct's glue,
+        // that construct is named. (Without this the error arrives with no
+        // position at all and an editor pins it to line 1.)
+        return Err(to_compile_error(verify::at_source(
+            source,
+            &flat.mappings,
+            &flat.anchors,
+            &flat.code,
+            &failure,
+        )));
     }
     Ok(MappedEmit {
-        code,
+        code: flat.code,
         mappings: flat.mappings,
         scrutinee_temps: flat.scrutinee_temps,
         payload_temps: flat.payload_temps,

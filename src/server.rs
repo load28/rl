@@ -13,14 +13,15 @@
 //!
 //! ```text
 //! → { "id": 1, "method": "check", "params": { "text", "filename"?, "verify"? } }
-//! ← { "id": 1, "result": { "diagnostics": [{ "line", "col", "message" }] } }
+//! ← { "id": 1, "result": { "diagnostics":
+//!        [{ "line", "col", "endLine", "endCol", "message" }] } }
 //!
 //! → { "id": 2, "method": "emitMap", "params": { "text" } }
 //! ← { "id": 2, "result": { "code", "mappings": [{ "src", "out", "len" }] } }
 //!
 //! → { "id": 3, "method": "typedCheck", "params": { "path", "text" } }
 //! ← { "id": 3, "result": { "blocked", "diagnostics":
-//!        [{ "path", "line", "col", "message" }] } }
+//!        [{ "path", "line", "col", "endLine", "endCol", "message" }] } }
 //!
 //! → { "id": 4, "method": "semanticTokens", "params": { "text" } }
 //! ← { "id": 4, "result": { "tokens": [{ "range", "kind" }] } }
@@ -343,7 +344,16 @@ fn check(params: &serde_json::Value) -> Result<serde_json::Value, String> {
     };
     let diagnostics = match rlc::compile(text, &options) {
         Ok(_) => Vec::new(),
-        Err(e) => vec![json!({ "line": e.line, "col": e.col, "message": e.message })],
+        // `endLine`/`endCol` close the range the diagnostic covers — the
+        // construct as written. Zero means "position only": the consumer
+        // decides the width.
+        Err(e) => vec![json!({
+            "line": e.line,
+            "col": e.col,
+            "endLine": e.end_line,
+            "endCol": e.end_col,
+            "message": e.message,
+        })],
     };
     Ok(json!({ "diagnostics": diagnostics }))
 }
@@ -507,6 +517,8 @@ fn typed_check(
                 "path": blocked.path,
                 "line": blocked.error.line,
                 "col": blocked.error.col,
+                "endLine": blocked.error.end_line,
+                "endCol": blocked.error.end_col,
                 "message": blocked.error.message,
             }],
         }),
@@ -531,10 +543,13 @@ fn typed_check(
                         .iter()
                         .map(|d| {
                             let (line, col) = d.position.unwrap_or((0, 0));
+                            let (end_line, end_col) = d.end.unwrap_or((0, 0));
                             json!({
                                 "path": d.path,
                                 "line": line,
                                 "col": col,
+                                "endLine": end_line,
+                                "endCol": end_col,
                                 "message": d.message,
                             })
                         })

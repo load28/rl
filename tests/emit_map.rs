@@ -365,9 +365,10 @@ fn every_construct_anchors_the_glue_it_writes() {
         .iter()
         .find(|a| a.kind == rlc::AnchorKind::Try)
         .expect("the try statement is anchored");
-    // The anchor points at the construct's keyword — where a diagnostic
-    // about its glue belongs.
-    assert!(src[anchor.src..].starts_with("const a = try"), "{anchor:?}");
+    // The anchor spans the construct as the user wrote it — the
+    // propagation, not the declaration around it — which is what a
+    // diagnostic about its glue is drawn over.
+    assert_eq!(&src[anchor.src..anchor.src_end], "try readNum()");
     // ...and covers the glue the construct wrote.
     assert!(m.code[anchor.out..anchor.end].contains("$rl_t0.kind !== \"Ok\""));
 }

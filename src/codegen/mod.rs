@@ -101,6 +101,13 @@ pub(super) struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
+    /// `end`, moved back past the whitespace before it — the end of the
+    /// construct's own text when the range up to the next keyword is what
+    /// bounds it.
+    fn trimmed_end(&self, start: usize, end: usize) -> usize {
+        start + self.src[start..end].trim_end().len()
+    }
+
     /// The source slice of a byte range, with its offset — the unit of
     /// verbatim copying.
     pub(super) fn src_slice(&self, start: usize, end: usize) -> (&'a str, usize) {
@@ -118,32 +125,52 @@ impl<'a> Emitter<'a> {
                 Segment::Enum(decl) => out.push_lit(enums::emit_enum(decl)),
                 // Every construct's emission is anchored: the glue inside
                 // has no source of its own, but it has an origin, and a
-                // diagnostic that lands there belongs at that keyword
-                // (`crate::EmitAnchor`).
+                // diagnostic that lands there belongs on that construct's
+                // own text (`crate::EmitAnchor`).
                 Segment::Match(expr) => out.anchored(
                     AnchorKind::Match,
                     expr.keyword_off,
+                    // `match (scrutinee)` — the arms are the user's own
+                    // code and carry mappings of their own.
+                    expr.scrutinee_span.end + 1,
                     matches::emit_match(self, expr),
                 ),
                 Segment::TupleMatch(expr) => out.anchored(
                     AnchorKind::Match,
                     expr.keyword_off,
+                    expr.scrutinees
+                        .last()
+                        .map_or(expr.keyword_off, |(span, _)| span.end + 1),
                     matches::emit_tuple_match(self, expr),
                 ),
-                Segment::Try(stmt) => {
-                    out.anchored(AnchorKind::Try, stmt.keyword_off, self.emit_try(stmt))
-                }
+                Segment::Try(stmt) => out.anchored(
+                    AnchorKind::Try,
+                    stmt.span.start,
+                    stmt.span.end,
+                    self.emit_try(stmt),
+                ),
                 Segment::LetElse(stmt) => out.anchored(
                     AnchorKind::LetElse,
                     stmt.keyword_off,
+                    // The refutable binding and what it destructures; the
+                    // `else` block is ordinary code.
+                    stmt.head_span.end,
                     self.emit_let_else(stmt),
                 ),
-                Segment::IfLet(stmt) => {
-                    out.anchored(AnchorKind::IfLet, stmt.keyword_off, self.emit_if_let(stmt))
-                }
-                Segment::Pipe(pipe) => {
-                    out.anchored(AnchorKind::Pipe, pipe.head_span.start, self.emit_pipe(pipe))
-                }
+                Segment::IfLet(stmt) => out.anchored(
+                    AnchorKind::IfLet,
+                    stmt.keyword_off,
+                    stmt.head_span.end,
+                    self.emit_if_let(stmt),
+                ),
+                Segment::Pipe(pipe) => out.anchored(
+                    AnchorKind::Pipe,
+                    pipe.head_span.start,
+                    pipe.steps
+                        .last()
+                        .map_or(pipe.head_span.end, |step| step.span.end),
+                    self.emit_pipe(pipe),
+                ),
                 Segment::ResultBlock(block) => out.append(self.emit_result_block(block)),
                 // `val` is compile-time only — the keyword leaves no trace
                 Segment::ValModifier(_) => {}
@@ -292,7 +319,12 @@ impl<'a> Emitter<'a> {
                         self.src_slice(bind.binding_span.start, bind.binding_span.end);
                     one.push_src(binding, at);
                     one.push_lit(format!(" = {tmp}.value;"));
-                    code.anchored(AnchorKind::ResultBind, bind.binding_span.start, one);
+                    code.anchored(
+                        AnchorKind::ResultBind,
+                        bind.binding_span.start,
+                        self.trimmed_end(bind.binding_span.start, bind.expr_span.end),
+                        one,
+                    );
                 }
             }
         }

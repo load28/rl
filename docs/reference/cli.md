@@ -422,13 +422,15 @@ import 수집은 소진성 검사와 같은 1-홉입니다. 컴파일 모드와 
 
 ```
 → { "id": 1, "method": "check",      "params": { "text", "filename"?, "verify"? } }
-← { "id": 1, "result": { "diagnostics": [{ "line", "col", "message" }] } }
+← { "id": 1, "result":
+      { "diagnostics": [{ "line", "col", "endLine", "endCol", "message" }] } }
 
 → { "id": 2, "method": "emitMap",    "params": { "text" } }
 ← { "id": 2, "result": { "code", "mappings": [{ "src", "out", "len" }] } }
 
 → { "id": 3, "method": "typedCheck", "params": { "path", "text" } }
-← { "id": 3, "result": { "blocked", "diagnostics": [{ "path", "line", "col", "message" }] } }
+← { "id": 3, "result": { "blocked", "diagnostics":
+      [{ "path", "line", "col", "endLine", "endCol", "message" }] } }
 
 ← { "id": N, "error": "문장" }        // 요청 실패 — 세션은 살아 있음
 ```
@@ -440,6 +442,10 @@ import 수집은 소진성 검사와 같은 1-홉입니다. 컴파일 모드와 
   종료 코드 2에 해당합니다.
 - 진단의 문안·위치는 one-shot과 동일합니다. `typedCheck`의 `path`는
   절대 경로로 돌아오고, 위치가 없는 진단은 `line`/`col`이 0입니다.
+- `endLine`/`endCol`은 진단이 덮는 범위의 끝(마지막 글자 다음)입니다 —
+  구문의 넓이를 아는 진단만 채워지고, 모르면 0입니다(그 경우 소비자가
+  넓이를 정합니다). CLI 출력에는 나오지 않습니다
+  ([`errors.md`](./errors.md#진단의-범위)).
 - 요청 하나의 실패는 그 요청의 `error`로 답하고 세션은 유지됩니다.
   stdin이 닫히면 종료 코드 0으로 끝납니다.
 - 다른 입력·모드와 조합되지 않습니다. VSCode 확장이 이 모드를 쓰며,
