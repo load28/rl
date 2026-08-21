@@ -123,22 +123,38 @@ assignable to type 'Result<string, { kind: "NotANumber"; text: string; }>'.)
 4. `tests/native.rs` — `a_restated_diagnostic_calls_a_case_by_its_declared_name`:
    좁혀진 케이스를 `Result.Err`로 감싸 전파하는 실제 프로젝트를 tsgo로 검사해
    `Err<Wire.OutOfRange>` / `Result<number, ParseError>`와 원문이 함께 나오는지
-   확인.
-5. 문서: `docs/reference/errors.md`에 규범(붙이는 조건·모양·예시) 추가,
+   확인(배치 typed 경로 = API 서버).
+5. `editors/vscode/server/src/test/emitmap.test.ts` —
+   "a restated diagnostic names the case it is about": 같은 시나리오를
+   **에디터 경로**(`rlc --server`의 `tsDiagnostics` = language service)로
+   확인. 범위가 `try inner(w)`인 것까지 함께 잠근다.
+6. 문서: `docs/reference/errors.md`에 규범(붙이는 조건·모양·예시) 추가,
    `docs/ai/rl.md` 한 줄 갱신, `docs/design/rust-parity-analysis.md` §10.4에
    TASK-118 주석.
 
-검증 명령:
+검증 명령(CI의 `native` 잡과 같은 구성 — 핀 박힌 typescript-go를 직접 빌드해
+두 경로를 모두 돌렸다):
 
 ```sh
+git clone https://github.com/microsoft/typescript-go.git ../typescript-go
+git -C ../typescript-go checkout c6b013f5706d58582f566df778cc0df2683b58f5
+(cd ../typescript-go && go build -o built/local/tsgo ./cmd/tsgo \
+  && npm ci && npx tsc -b _packages/native-preview)
+
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-RLC_TSGO_API=$PWD/node_modules/typescript/dist/api/sync/api.js cargo test
+RLC_TSGO_ROOT=$PWD/../typescript-go RLC_REQUIRE_TSGO=1 cargo test
+
+cd editors/vscode && npm ci && npx tsc -b
+PATH="$PWD/../../target/debug:$PATH" RLC_TSGO_ROOT=/home/user/typescript-go \
+  node --test "server/out/test/*.test.js"
 ```
 
-(로컬에서 typed 경로를 실제로 돌리려고 `npm install --no-save
---no-package-lock typescript@7`로 tsgo를 설치했다 — CI의 `native` 잡과 같은
-경로. `node_modules/`는 `.gitignore` 대상이라 커밋되지 않는다.)
+API 서버(배치)만으로는 에디터 경로를 확인할 수 없었다: npm의 `typescript@7`은
+API 클라이언트는 주지만 이 환경에서 language server 실행 파일
+(`@typescript/typescript-<platform>/lib/tsc`)이 설치되지 않아
+`rlc --server`의 `tsDiagnostics`가 "no tsgo language server found"로 답했다.
+typescript-go를 직접 빌드하니 두 경로가 모두 열렸다.
 
 ## 이슈 및 해결
 
@@ -157,7 +173,18 @@ RLC_TSGO_API=$PWD/node_modules/typescript/dist/api/sync/api.js cargo test
    (`tests/native.rs`), 목적에 적힌 원래 증상과 같은 문안이 재현되는 것을
    확인했다.
 
-3. **선언 표를 만드는 비용이 번역과 무관한 파일에도 붙었다.**
+3. **에디터 경로를 검증할 language server가 없었다.**
+   증상: `rlc --server`의 `tsDiagnostics`가
+   `no tsgo language server found — install TypeScript 7 ...`. 원인: npm의
+   `typescript@7`이 API 클라이언트(`dist/api/sync/api.js`)는 깔아 주지만
+   플랫폼 실행 파일 패키지(`@typescript/typescript-linux-x64`)가 이 환경에
+   설치되지 않았고, LSP 표면은 그 실행 파일을 쓴다(`typescript/service.rs`).
+   해결: CI가 핀으로 박아 둔 커밋(`c6b013f5`)으로 typescript-go를 클론해
+   `go build ./cmd/tsgo` + `npx tsc -b _packages/native-preview`로 두 반쪽을
+   한 빌드에서 만들고 `RLC_TSGO_ROOT`로 물렸다. 그 뒤 에디터 경로도 실측했고
+   (아래 결과), 확장 테스트 83개가 skip 0으로 통과한다.
+
+4. **선언 표를 만드는 비용이 번역과 무관한 파일에도 붙었다.**
    증상(설계 단계에서 발견): `report`가 진단마다 표를 요구하면, 글루와 아무
    상관 없는 평범한 타입 에러가 있는 파일도 파싱하게 된다. 해결:
    `glue_anchor(...).is_some()`으로 먼저 거른 뒤에만 표를 만든다. 남은 부채는
@@ -167,12 +194,17 @@ RLC_TSGO_API=$PWD/node_modules/typescript/dist/api/sync/api.js cargo test
 
 - [x] `cargo fmt --check`
 - [x] `cargo clippy --all-targets -- -D warnings`
-- [x] `cargo test` — 전체 통과(단위 77 + 통합 73 + native 31 포함, tsgo 있는
-      상태라 typed 테스트 skip 없음)
+- [x] `cargo test` — 전체 통과. `RLC_TSGO_ROOT`(직접 빌드한 typescript-go) +
+      `RLC_REQUIRE_TSGO=1`이라 typed 테스트가 하나도 skip되지 않았다
+      (단위 77 + 통합 73 + native 31 + 나머지).
+- [x] VS Code 확장 테스트 — `node --test server/out/test/*.test.js`,
+      **83 pass / 0 skip**(추가한 에디터 경로 테스트 포함).
 
 ## 결과
 
-글루 위 진단의 옮긴 말이 rl 이름으로 다시 쓴 문장을 함께 싣는다:
+글루 위 진단의 옮긴 말이 rl 이름으로 다시 쓴 문장을 함께 싣는다.
+
+배치 typed 경로(`rlc --check-types`, API 서버):
 
 ```
 rlc: src/a.rl:12:13: the `Err` this `try` propagates does not fit the enclosing
@@ -183,8 +215,26 @@ assignable to type 'Result<number, ParseError>'.) (ts2322: Type 'Err<{ kind:
 { kind: "NotANumber"; text: string; }>'.)
 ```
 
+에디터 경로(`rlc --server`의 `tsDiagnostics`, language service). 이쪽은 tsc가
+설명 사슬(elaboration)까지 붙이는데, 규칙이 문장 구조와 무관하므로 사슬의 각
+줄도 그대로 이름이 붙는다 — (다)를 고른 이유가 여기서 드러난다:
+
+```
+the `Err` this `try` propagates does not fit ...
+(in rl's names: Type 'Err<Wire.OutOfRange>' is not assignable to type
+ 'Result<number, ParseError>'.
+   Type 'Err<Wire.OutOfRange>' is not assignable to type 'Err<ParseError>'.
+     Property 'text' is missing in type 'Wire.OutOfRange' but required in
+     type 'ParseError'.)
+(ts2322: ... 원문 그대로 ...)
+```
+
+범위는 `try inner(w)`(TASK-116) 그대로다.
+
 변경 파일: `src/engine/semantics.rs`, `src/engine/projection.rs`,
-`src/engine/language.rs`, `tests/native.rs`, `docs/reference/errors.md`,
-`docs/ai/rl.md`, `docs/design/rust-parity-analysis.md`,
+`src/engine/language.rs`, `tests/native.rs`,
+`editors/vscode/server/src/test/emitmap.test.ts`,
+`docs/reference/errors.md`, `docs/ai/rl.md`,
+`docs/design/rust-parity-analysis.md`,
 `docs/tasks/TASK-118-named-error-types-in-messages.md`,
 `docs/tasks/INDEX.md`.
