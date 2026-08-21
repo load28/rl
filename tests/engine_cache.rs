@@ -116,3 +116,44 @@ fn an_unchanged_projection_is_shared_across_snapshots() {
     ));
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_blocked_file_does_not_stop_other_files_from_being_checked() {
+    let dir = tmpdir("partial-snapshot");
+    let blocked = dir.join("a-blocked.rl");
+    let valid = dir.join("b-valid.rl");
+    fs::write(&blocked, "const broken = 1 |> ;\n").unwrap();
+    fs::write(
+        &valid,
+        "enum E { A(value: number), B }\n\
+         const value = match (E.A(1)) { A(value) => value };\n",
+    )
+    .unwrap();
+
+    let engine = Engine::new(None);
+    let mut project = engine
+        .open_project(
+            &[dir.to_string_lossy().to_string()],
+            &ProjectOptions::default(),
+        )
+        .unwrap();
+    let files = project.initial_files();
+    let blocked = blocked.canonicalize().unwrap();
+    let valid = valid.canonicalize().unwrap();
+    let snapshot = project.update(&files).expect("partial snapshot");
+    let checked = project
+        .check(
+            &snapshot,
+            &CheckRequest {
+                emit_declarations: false,
+                rl_only: true,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(snapshot.files().len(), 1);
+    assert_eq!(checked.diagnostics.len(), 2, "{:#?}", checked.diagnostics);
+    assert!(checked.diagnostics.iter().any(|d| d.path == blocked));
+    assert!(checked.diagnostics.iter().any(|d| d.path == valid));
+    fs::remove_dir_all(&dir).ok();
+}

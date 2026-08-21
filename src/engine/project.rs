@@ -31,11 +31,9 @@ use crate::typescript::native::NativeBackend;
 const RL_EXTENSIONS: &[&str] = &["rl"];
 const TS_EXTENSIONS: &[&str] = &["ts", "mts", "cts"];
 
-/// A snapshot could not be taken: an rl-level error left a file impossible
-/// to lower, so there is nothing to ask the checker about. Distinct from "a
-/// pass ran and reported", because a caller holding a previous result (an
-/// editor showing the last good sidecar) keeps it here and replaces it
-/// there.
+/// A snapshot could not be taken because a source could not be read.
+/// Lowering failures are recoverable snapshot data; an I/O failure has no
+/// source text to preserve and remains a pass-level failure.
 #[derive(Debug)]
 pub struct Blocked {
     /// The file that failed to lower.
@@ -173,10 +171,13 @@ impl Project {
     /// Takes a snapshot of `files` as they are now: overlay text where a
     /// document is open, disk text otherwise. A file whose text is unchanged
     /// since the last snapshot keeps its projection; the rest are
-    /// re-projected. The first file that fails an rl-level check blocks the
-    /// snapshot — rl diagnostics come first and are never delegated.
+    /// re-projected. A file that cannot lower remains in the snapshot as a
+    /// blocked source with its rl diagnostics; other files still project.
+    /// An I/O failure still blocks the snapshot because no source state is
+    /// available to preserve.
     pub fn update(&mut self, files: &[PathBuf]) -> Result<Snapshot, Box<Blocked>> {
         let mut projected = Vec::with_capacity(files.len());
+        let mut blocked_files = Vec::new();
         let mut cache = HashMap::with_capacity(files.len());
         for file in files {
             let text = match self.overlays.get(file) {
@@ -196,16 +197,19 @@ impl Project {
                 })?,
             };
             let doc = match self.cache.get(file) {
-                Some(cached) if cached.source == text => cached.clone(),
-                _ => Arc::new(ProjectedDocument::project(file, text).map_err(|error| {
-                    Box::new(Blocked {
-                        path: file.clone(),
-                        error,
-                    })
-                })?),
+                Some(cached) if cached.source == text => Some(cached.clone()),
+                _ => match ProjectedDocument::project_for_snapshot(file, text) {
+                    Ok(doc) => Some(Arc::new(doc)),
+                    Err(blocked) => {
+                        blocked_files.push(Arc::new(blocked));
+                        None
+                    }
+                },
             };
-            cache.insert(file.clone(), doc.clone());
-            projected.push(doc);
+            if let Some(doc) = doc {
+                cache.insert(file.clone(), doc.clone());
+                projected.push(doc);
+            }
         }
         // Entries for files that left the project go with the old map; a
         // blocked update above leaves the previous cache intact instead, so
@@ -215,6 +219,7 @@ impl Project {
         Ok(Snapshot {
             id: self.next_snapshot,
             files: projected,
+            blocked: blocked_files,
         })
     }
 
@@ -233,7 +238,7 @@ impl Project {
         let files = snapshot.files();
         let mut out = HashMap::with_capacity(files.len());
         for file in files {
-            let externs = semantics::externs_of(files, file);
+            let externs = semantics::externs_of(snapshot, file);
             let value = self.cached_semantics(&file.source_path, &file.source, externs);
             out.insert(file.source_path.clone(), value);
         }

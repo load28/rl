@@ -11,9 +11,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::snapshot::BlockedFile;
+#[cfg(test)]
+use crate::CompileError;
 use crate::typescript::backend::{LiteralQuery, Module, Query, SymbolQuery, TagQuery};
 use crate::typescript::mapper;
-use crate::{CompileError, LiteralMatch, MappedEmit, Options, TagMatch, ValProbes};
+use crate::{LiteralMatch, MappedEmit, Options, TagMatch, ValProbes};
 
 /// One `.rl` file as every consumer of the engine sees it: the source the
 /// user wrote, and the TypeScript the compiler is given — plus everything
@@ -78,10 +81,27 @@ impl ProjectedDocument {
     /// along in [`ProjectedDocument::rl_diagnostics`]; only an error that
     /// leaves the file impossible to lower
     /// ([`crate::DiagnosticCode::blocks_projection`]) fails the projection.
+    #[cfg(test)]
     pub(crate) fn project(
         source_path: &Path,
         source: String,
     ) -> Result<ProjectedDocument, CompileError> {
+        Self::project_for_snapshot(source_path, source).map_err(|blocked| {
+            blocked
+                .diagnostics
+                .first()
+                .expect("a blocked projection has a diagnostic")
+                .to_compile_error(
+                    &blocked.source,
+                    Some(blocked.source_path.to_string_lossy().as_ref()),
+                )
+        })
+    }
+
+    pub(crate) fn project_for_snapshot(
+        source_path: &Path,
+        source: String,
+    ) -> Result<ProjectedDocument, BlockedFile> {
         let options = Options {
             filename: Some(source_path.to_str().unwrap_or("<input>")),
             // Exhaustiveness and `val`'s pairing are the checker's answers
@@ -97,15 +117,11 @@ impl ProjectedDocument {
         };
         let report = crate::compile_report(&source, &options);
         let Some(emit) = report.emit else {
-            // Impossible to lower. The blocking diagnostic is the file's
-            // answer; the first one in source order names it.
-            let blocked = report
-                .diagnostics
-                .iter()
-                .find(|d| d.code.blocks_projection())
-                .or_else(|| report.diagnostics.first())
-                .expect("an emission is only withheld for a diagnostic");
-            return Err(blocked.to_compile_error(&source, options.filename));
+            return Err(BlockedFile::new(
+                source_path.to_path_buf(),
+                source,
+                report.diagnostics,
+            ));
         };
         Ok(ProjectedDocument {
             module_path: module_path_of(source_path),

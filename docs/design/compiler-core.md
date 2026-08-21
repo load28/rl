@@ -287,7 +287,7 @@ INDEX 상태에 따라 조정될 수 있다 — 확정 번호는 INDEX가 진실
 - 모든 pattern syntax가 동일한 `PatternSite` 분석 경로를 사용한다.
 - exhaustiveness·unreachable·hover·completion이 같은 분석 결과를 소비한다.
 - TypeScript 타입 정보는 batch query와 rl-owned `TypedFacts`로만 들어온다.
-- 하나의 rl 오류가 같은 파일의 나머지 진단을 가리지 않는다.
+- 하나의 rl 오류가 같은 파일과 프로젝트의 나머지 진단을 가리지 않는다.
 - CLI·server·editor가 동일한 diagnostic code와 renderer를 사용한다.
 - codegen은 이름 해석·exhaustiveness를 다시 계산하지 않는다.
 - regex 기반 editor shadow semantics가 제거된다.

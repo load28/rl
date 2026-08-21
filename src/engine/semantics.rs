@@ -455,6 +455,18 @@ pub(crate) fn report(
     let files = snapshot.files();
     let mut out = Vec::new();
 
+    for file in snapshot.blocked() {
+        for diagnostic in &file.diagnostics {
+            out.push(Diagnostic {
+                path: file.source_path.clone(),
+                position: diagnostic.start.map(|at| crate::line_col(&file.source, at)),
+                end: diagnostic.end.map(|at| crate::line_col(&file.source, at)),
+                message: diagnostic.message.clone(),
+                code: Some(diagnostic.code.as_str().to_string()),
+            });
+        }
+    }
+
     // The rl layer first: the diagnostics each file's projection found on
     // its own (duplicate arms, unknown cases, misplaced constructs). They
     // are rl's answers about rl's constructs, so they are reported on the
@@ -881,12 +893,10 @@ pub(crate) fn match_declarations(
 /// cached per-file symbols where the import target is in the snapshot —
 /// a target that did not change is never re-parsed — and from disk
 /// otherwise.
-pub(crate) fn externs_of(
-    files: &[Arc<ProjectedDocument>],
-    file: &ProjectedDocument,
-) -> Vec<crate::EnumSymbol> {
+pub(crate) fn externs_of(snapshot: &Snapshot, file: &ProjectedDocument) -> Vec<crate::EnumSymbol> {
     super::language::externs_from(&file.source_path, file.rl_imports(), &|target| {
-        files
+        snapshot
+            .files()
             .iter()
             .find(|f| f.source_path == target)
             .map(|f| {
@@ -895,6 +905,19 @@ pub(crate) fn externs_of(
                     .filter(|d| d.exported)
                     .cloned()
                     .collect()
+            })
+            .or_else(|| {
+                snapshot
+                    .blocked()
+                    .iter()
+                    .find(|f| f.source_path == target)
+                    .map(|f| {
+                        f.enum_symbols()
+                            .iter()
+                            .filter(|d| d.exported)
+                            .cloned()
+                            .collect()
+                    })
             })
             .or_else(|| {
                 let text = std::fs::read_to_string(target).ok()?;

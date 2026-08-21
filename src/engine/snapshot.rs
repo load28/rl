@@ -11,12 +11,44 @@ use std::sync::Arc;
 
 use super::projection::ProjectedDocument;
 
+/// One source that belongs to the snapshot but could not be lowered.
+/// Its source and rl diagnostics remain available even though it cannot
+/// join the TypeScript program.
+#[derive(Debug)]
+pub(crate) struct BlockedFile {
+    pub(crate) source_path: std::path::PathBuf,
+    pub(crate) source: String,
+    pub(crate) diagnostics: Vec<crate::Diagnostic>,
+    enum_symbols: std::sync::OnceLock<Vec<crate::EnumSymbol>>,
+}
+
+impl BlockedFile {
+    pub(crate) fn new(
+        source_path: std::path::PathBuf,
+        source: String,
+        diagnostics: Vec<crate::Diagnostic>,
+    ) -> Self {
+        Self {
+            source_path,
+            source,
+            diagnostics,
+            enum_symbols: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn enum_symbols(&self) -> &[crate::EnumSymbol] {
+        self.enum_symbols
+            .get_or_init(|| crate::enum_symbols(&self.source))
+    }
+}
+
 /// The project at one moment. Cheap to hold: files are shared with the
 /// project's cache, so an unchanged file costs one reference.
 #[derive(Debug)]
 pub struct Snapshot {
     pub(crate) id: u64,
     pub(crate) files: Vec<Arc<ProjectedDocument>>,
+    pub(crate) blocked: Vec<Arc<BlockedFile>>,
 }
 
 impl Snapshot {
@@ -29,5 +61,9 @@ impl Snapshot {
     /// The project's `.rl` files, projected, in project order.
     pub fn files(&self) -> &[Arc<ProjectedDocument>] {
         &self.files
+    }
+
+    pub(crate) fn blocked(&self) -> &[Arc<BlockedFile>] {
+        &self.blocked
     }
 }
