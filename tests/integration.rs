@@ -571,6 +571,43 @@ console.log(tell(Shape.Dot));
 }
 
 #[test]
+fn runtime_try_inside_an_if_let_body_propagates_from_the_function() {
+    require_toolchain!();
+    // The if-let body is inline in the enclosing function, so the `try`
+    // propagates from `f` — not from any construct in between.
+    let lines = run_with_std(
+        r#"
+import { Option, Result } from "./rl.js";
+
+function parseNum(raw: string): Result<number, string> {
+  const n = Number(raw);
+  return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
+}
+
+function f(o: Option<string>): Result<number, string> {
+  if let Some(value) = o {
+    const n = try parseNum(value);
+    return Result.Ok(n * 10);
+  }
+  return Result.Ok(-1);
+}
+
+console.log(JSON.stringify(f(Option.Some("7"))));
+console.log(JSON.stringify(f(Option.Some("x"))));
+console.log(JSON.stringify(f(Option.None)));
+"#,
+    );
+    assert_eq!(
+        lines,
+        vec![
+            r#"{"kind":"Ok","value":70}"#,
+            r#"{"kind":"Err","error":"not a number: x"}"#,
+            r#"{"kind":"Ok","value":-1}"#,
+        ]
+    );
+}
+
+#[test]
 fn runtime_try_inside_a_closure_propagates_from_the_closure() {
     require_toolchain!();
     // Rust's `?` inside a closure: the `try` inside the arrow written in a

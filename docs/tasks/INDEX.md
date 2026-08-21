@@ -142,7 +142,8 @@
 | TASK-132 | result 바인딩의 early-return 범위 확정 (Phase 5 3/n) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-132](./TASK-132-result-binding-scope.md) |
 | TASK-133 | let-else·`if let`의 or-패턴 (GAP-6 마지막 항목) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-133](./TASK-133-or-patterns-in-let-else-if-let.md) |
 | TASK-134 | `if let` 배치도 flow 사실로 (TASK-131 잔여) | 완료 | 2026-08-21 | 2026-08-21 | [TASK-134](./TASK-134-if-let-placement-on-flow.md) |
+| TASK-135 | 인라인 문맥의 배치 상속 (Place) + verify 원인-결과 억제 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-135](./TASK-135-inline-context-inheritance.md) |
 
 ## 다음 태스크 번호
 
-**TASK-135**
+**TASK-136**

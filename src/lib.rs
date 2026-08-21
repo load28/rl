@@ -836,13 +836,21 @@ pub fn compile_report(source: &str, options: &Options) -> CompileReport {
         && let Some(flat) = &emit
         && let Err(failure) = verify::verify_output(&flat.code)
     {
-        errors.push(verify::at_source(
-            source,
-            &flat.mappings,
-            &flat.anchors,
-            &flat.code,
-            &failure,
-        ));
+        // A failed self-check *with rl errors already reported* is the
+        // effect, not a second cause — the emitted text reflects the
+        // invalid construct those errors name (e.g. a module-level `try`'s
+        // `return`), and the backstop's "or an rlc bug" wording would
+        // mislead. Report the causes and withhold the emit; the check
+        // reappears on its own once they are fixed.
+        if errors.is_empty() {
+            errors.push(verify::at_source(
+                source,
+                &flat.mappings,
+                &flat.anchors,
+                &flat.code,
+                &failure,
+            ));
+        }
         emit = None;
     }
     CompileReport {

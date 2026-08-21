@@ -889,6 +889,62 @@ fn if_let_nested_patterns_cannot_combine_with_or() {
 }
 
 #[test]
+fn inline_bodies_inherit_the_enclosing_functions_place() {
+    // An `if let` body and a let-else `else` block are inline — their
+    // statements run where the statement stands — so a `try` (or a
+    // let-else) inside them exits the function the chain bottoms out in,
+    // exactly as it would outside the construct.
+    let out = ok(
+        "enum E { A(x: number), B }\nfunction f(e: E): Result<number, string> {\n  if let A(x) = e {\n    const n = try g(x);\n    return Result.Ok(n);\n  }\n  return Result.Ok(0);\n}\n",
+    );
+    assert!(
+        out.contains("if ($rl_t1.kind !== \"Ok\") return $rl_t1;"),
+        "{out}"
+    );
+
+    let out = ok(
+        "enum E { A(x: number), B }\nfunction f(e: E): number {\n  const Some(v) = find(e) else {\n    const B() = e else { throw new Error(\"a\"); };\n    return 0;\n  };\n  return v;\n}\n",
+    );
+    assert!(out.contains("if ($rl_t1.kind !== \"B\")"), "{out}");
+}
+
+#[test]
+fn an_inline_chain_bottoming_out_in_an_iife_still_rejects_try() {
+    // The same body inside a match arm: the chain bottoms out in the
+    // arm's IIFE, so the emitted `return` would corrupt the match value.
+    let e = err(
+        "enum E { A(x: number), B }\nconst r = match (e) {\n  A(x) => { if let A(y) = f(x) { const n = try g(y); return n; } return 0; },\n  B => 0,\n};\n",
+    );
+    assert!(
+        e.message.contains("`try` cannot be used here"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_module_level_inline_try_reports_the_cause_not_the_backstop() {
+    // At the module's top level the chain bottoms out in the module: the
+    // rl diagnostic is the cause, and the output self-check's failure on
+    // the emitted `return` is its effect — reported once, not twice.
+    let src = "enum E { A(x: number), B }\nif let A(x) = e {\n  try g(x);\n}\n";
+    let report = rlc::compile_report(src, &Options::default());
+    assert_eq!(report.diagnostics.len(), 1, "{:#?}", report.diagnostics);
+    assert_eq!(
+        report.diagnostics[0].code,
+        rlc::DiagnosticCode::TryPlacement
+    );
+    assert!(
+        report.diagnostics[0]
+            .message
+            .contains("`try` must be inside a function"),
+        "{}",
+        report.diagnostics[0].message
+    );
+    assert!(report.emit.is_none(), "the invalid emit is withheld");
+}
+
+#[test]
 fn let_else_shares_try_temp_counter() {
     let out = ok(
         "function f(): X {\n  const n = try g();\n  const Some(v) = h(n) else { return fallback(); };\n  return wrap(v);\n}\n",

@@ -83,7 +83,7 @@ pub(crate) fn check_all(
         errors: Vec::new(),
         coverage_suppressed: Vec::new(),
     };
-    checker.visit_program(program, Ctx::Top);
+    checker.visit_program(program, Ctx::Top, Place::Module);
     // One analysis, two reports. Resolution comes first — a pattern whose
     // names do not resolve has no exhaustiveness question worth asking, and
     // answering both at once would bury the cause under its effect. With
@@ -213,13 +213,7 @@ fn leaf_bindings<'a>(alt: &'a TagPattern, out: &mut Vec<&'a str>) {
     }
 }
 
-/// Where a sub-program sits, for placement rules. `try`/let-else need the
-/// [`Ctx::Top`] statement stream (their emitted `return` must exit the
-/// enclosing function, and every nested context either is an expression or
-/// sits inside a match's IIFE). `if let` compiles to a self-contained block
-/// with no `return` of its own, so any statement context ([`Ctx::Top`] or
-/// [`Ctx::Stmt`] — a block arm body, a let-else `else` block, an `if let`
-/// body) is fine; only expression positions ([`Ctx::Expr`]) are out.
+/// Where a sub-program sits, syntactically.
 #[derive(Clone, Copy, PartialEq)]
 enum Ctx {
     Top,
@@ -227,12 +221,40 @@ enum Ctx {
     Expr,
 }
 
+/// Where a region's statements ultimately *run* — the placement fact the
+/// flow-based rules combine with each statement's own
+/// [`crate::flow::in_function_body`] answer. An `if let` body and a
+/// let-else `else` block are **inline**: their statements run where the
+/// statement itself stands, so they inherit its place (upgraded to
+/// [`Place::Function`] when the statement sits inside a function written
+/// in its region). A match arm body, a `result` block's statements, and
+/// every expression region reset to [`Place::Iife`] — a `return` emitted
+/// there exits the construct's own IIFE, never the user's function.
+#[derive(Clone, Copy, PartialEq)]
+enum Place {
+    /// The module's top level (or an inline chain that bottoms out there).
+    Module,
+    /// Inside a user-written function (directly or through inline chains).
+    Function,
+    /// Inside an rl construct's own IIFE or an expression region.
+    Iife,
+}
+
+impl Place {
+    /// The place of an inline sub-region (an `if let` body, a let-else
+    /// `else` block) of a statement whose own region fact is
+    /// `in_function`.
+    fn inline(self, in_function: bool) -> Place {
+        if in_function { Place::Function } else { self }
+    }
+}
+
 impl Checker {
     fn error(&mut self, error: RlError) {
         self.errors.push(error);
     }
 
-    fn visit_program(&mut self, program: &Program, ctx: Ctx) {
+    fn visit_program(&mut self, program: &Program, ctx: Ctx, place: Place) {
         // A stray `|>` or `if let` cannot be passed through: neither is
         // valid TypeScript, so the output self-check would fail without a
         // position. Report them as rl errors here instead (error-layering
@@ -304,9 +326,9 @@ impl Checker {
                 Segment::Enum(decl) => self.check_enum(decl),
                 Segment::Match(expr) => self.check_match(expr),
                 Segment::TupleMatch(expr) => self.check_tuple_match(expr),
-                Segment::Try(stmt) => self.check_try(stmt, ctx),
-                Segment::LetElse(stmt) => self.check_let_else(stmt, ctx),
-                Segment::IfLet(stmt) => self.check_if_let(stmt, ctx),
+                Segment::Try(stmt) => self.check_try(stmt, place),
+                Segment::LetElse(stmt) => self.check_let_else(stmt, place),
+                Segment::IfLet(stmt) => self.check_if_let(stmt, ctx, place),
                 Segment::ResultBlock(block) => self.check_result_block(block),
                 Segment::Pipe(pipe) => {
                     // A `flow` composition has no value to chain a method
@@ -331,16 +353,16 @@ impl Checker {
                     // Head and steps are expressions — `try` inside them is
                     // rejected for the same reason as inside a match.
                     if let Some(head) = &pipe.head {
-                        self.visit_program(head, Ctx::Expr);
+                        self.visit_program(head, Ctx::Expr, Place::Iife);
                     }
                     for step in &pipe.steps {
-                        self.visit_program(&step.body, Ctx::Expr);
+                        self.visit_program(&step.body, Ctx::Expr, Place::Iife);
                     }
                 }
                 Segment::Template(template) => {
                     for chunk in &template.chunks {
                         if let TemplateChunk::Interp(interp) = chunk {
-                            self.visit_program(interp, Ctx::Expr);
+                            self.visit_program(interp, Ctx::Expr, Place::Iife);
                         }
                     }
                 }
@@ -349,16 +371,16 @@ impl Checker {
     }
 
     /// `try` placement is a **flow** fact, not a nesting rule: the lowering
-    /// emits a `return`, so the statement must sit inside a function the
-    /// user wrote in the same region — then the `return` exits that
-    /// function, wherever the region is (a match arm, a scrutinee, a
-    /// pipeline step: a `try` inside an arrow written there is fine,
-    /// exactly like `?` inside a closure in Rust). Without one, the
-    /// `return` would exit the construct's own IIFE (`ctx != Top`) or fall
-    /// at the module's top level, where there is nothing to return from.
-    fn check_try(&mut self, stmt: &TryStmt, ctx: Ctx) {
-        if !stmt.in_function {
-            let message = if ctx == Ctx::Top {
+    /// emits a `return`, so the statement must run inside a user-written
+    /// function — one written in its own region (a `try` inside an arrow
+    /// in a match arm, a scrutinee, a pipeline step is fine, exactly like
+    /// `?` inside a closure in Rust), or one an inline chain (an `if let`
+    /// body, a let-else `else` block) bottoms out in. Without one, the
+    /// `return` would exit the construct's own IIFE, or fall at the
+    /// module's top level, where there is nothing to return from.
+    fn check_try(&mut self, stmt: &TryStmt, place: Place) {
+        if !stmt.in_function && place != Place::Function {
+            let message = if place == Place::Module {
                 "`try` must be inside a function — it compiles to a `return` that \
                  propagates the `Err`, and at the top level of a module there is no \
                  function to return from"
@@ -373,16 +395,16 @@ impl Checker {
                     .code(DiagnosticCode::TryPlacement),
             );
         }
-        self.visit_program(&stmt.expr, Ctx::Expr);
+        self.visit_program(&stmt.expr, Ctx::Expr, Place::Iife);
     }
 
     /// let-else placement is the same flow fact as `try`'s, except the
     /// module's top level is fine: the lowering emits no `return` of its
-    /// own (a `throw`-diverging `else` is valid anywhere), so only the
-    /// statement regions of rl constructs — where the `else`'s exits would
-    /// leave the construct's IIFE — need a function written in the region.
-    fn check_let_else(&mut self, stmt: &LetElseStmt, ctx: Ctx) {
-        if ctx != Ctx::Top && !stmt.in_function {
+    /// own (a `throw`-diverging `else` is valid anywhere), so only
+    /// [`Place::Iife`] regions — where the `else`'s exits would leave the
+    /// construct's IIFE — need a function written in the region.
+    fn check_let_else(&mut self, stmt: &LetElseStmt, place: Place) {
+        if place == Place::Iife && !stmt.in_function {
             self.error(
                 RlError::span(
                     stmt.head_span.start,
@@ -411,8 +433,10 @@ impl Checker {
         }
         self.check_leaf_bindings(&stmt.alternatives[0]);
         self.check_alternatives(&stmt.alternatives, "let-else");
-        self.visit_program(&stmt.expr, Ctx::Expr);
-        self.visit_program(&stmt.else_body, Ctx::Stmt);
+        self.visit_program(&stmt.expr, Ctx::Expr, Place::Iife);
+        // The `else` block is inline: its statements run where the
+        // statement stands.
+        self.visit_program(&stmt.else_body, Ctx::Stmt, place.inline(stmt.in_function));
     }
 
     /// `if let` emits a self-contained block statement, so it needs a
@@ -420,7 +444,7 @@ impl Checker {
     /// when the user wrote a function there (the same flow fact that
     /// places `try`, judged from the other side: no IIFE to escape, just
     /// a statement stream to stand in).
-    fn check_if_let(&mut self, stmt: &IfLetStmt, ctx: Ctx) {
+    fn check_if_let(&mut self, stmt: &IfLetStmt, ctx: Ctx, place: Place) {
         if ctx == Ctx::Expr && !stmt.in_function {
             self.error(
                 RlError::span(
@@ -437,11 +461,15 @@ impl Checker {
         }
         self.check_leaf_bindings(&stmt.alternatives[0]);
         self.check_alternatives(&stmt.alternatives, "if let");
-        self.visit_program(&stmt.expr, Ctx::Expr);
-        self.visit_program(&stmt.body, Ctx::Stmt);
+        self.visit_program(&stmt.expr, Ctx::Expr, Place::Iife);
+        // The then/else bodies are inline: their statements run where the
+        // statement stands, so a `try` inside them exits the function the
+        // chain bottoms out in.
+        let inline = place.inline(stmt.in_function);
+        self.visit_program(&stmt.body, Ctx::Stmt, inline);
         match &stmt.else_part {
-            Some(IfLetElse::Block(block)) => self.visit_program(block, Ctx::Stmt),
-            Some(IfLetElse::IfLet(inner)) => self.check_if_let(inner, Ctx::Stmt),
+            Some(IfLetElse::Block(block)) => self.visit_program(block, Ctx::Stmt, inline),
+            Some(IfLetElse::IfLet(inner)) => self.check_if_let(inner, Ctx::Stmt, inline),
             None => {}
         }
     }
@@ -486,17 +514,17 @@ impl Checker {
     }
 
     /// A `result` block is an expression, so it is allowed anywhere; its
-    /// body is the IIFE's statement stream ([`Ctx::Stmt`] — a `try` or
+    /// body is the IIFE's statement stream ([`Place::Iife`] — a `try` or
     /// let-else there would return from the *block*, not the enclosing
     /// function), and the bindings and the trailing value are expressions.
     fn check_result_block(&mut self, block: &ResultBlock) {
         for item in &block.items {
             match item {
-                ResultItem::Stmts(stmts) => self.visit_program(stmts, Ctx::Stmt),
-                ResultItem::Bind(bind) => self.visit_program(&bind.expr, Ctx::Expr),
+                ResultItem::Stmts(stmts) => self.visit_program(stmts, Ctx::Stmt, Place::Iife),
+                ResultItem::Bind(bind) => self.visit_program(&bind.expr, Ctx::Expr, Place::Iife),
             }
         }
-        self.visit_program(&block.value, Ctx::Expr);
+        self.visit_program(&block.value, Ctx::Expr, Place::Iife);
     }
 
     fn check_enum(&mut self, decl: &EnumDecl) {
@@ -711,13 +739,17 @@ impl Checker {
         // program and answers for every match at once (`report_coverage`).
 
         // children, in source order: scrutinee first, then guards and bodies
-        self.visit_program(&expr.scrutinee, Ctx::Expr);
+        self.visit_program(&expr.scrutinee, Ctx::Expr, Place::Iife);
         for arm in &expr.arms {
             if let Some(guard) = &arm.guard {
-                self.visit_program(&guard.expr, Ctx::Expr);
+                self.visit_program(&guard.expr, Ctx::Expr, Place::Iife);
             }
             // A block arm body is a statement context (inside the IIFE)
-            self.visit_program(&arm.body, if arm.block { Ctx::Stmt } else { Ctx::Expr });
+            self.visit_program(
+                &arm.body,
+                if arm.block { Ctx::Stmt } else { Ctx::Expr },
+                Place::Iife,
+            );
         }
     }
 
@@ -811,13 +843,17 @@ impl Checker {
 
         // children, in source order
         for (_, scrutinee) in &expr.scrutinees {
-            self.visit_program(scrutinee, Ctx::Expr);
+            self.visit_program(scrutinee, Ctx::Expr, Place::Iife);
         }
         for arm in &expr.arms {
             if let Some(guard) = &arm.guard {
-                self.visit_program(&guard.expr, Ctx::Expr);
+                self.visit_program(&guard.expr, Ctx::Expr, Place::Iife);
             }
-            self.visit_program(&arm.body, if arm.block { Ctx::Stmt } else { Ctx::Expr });
+            self.visit_program(
+                &arm.body,
+                if arm.block { Ctx::Stmt } else { Ctx::Expr },
+                Place::Iife,
+            );
         }
     }
 }
