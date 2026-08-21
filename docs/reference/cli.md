@@ -56,7 +56,7 @@ GitHub Release 업로드까지 수행합니다.
 | `--sidecar <dir>` | 선언을 받아 사이드카만 씁니다 ([아래](#에디터-사이드카---sidecar-저수준)) |
 | `--symbols` | rl enum 선언과 `.rl` import를 JSON으로 ([아래](#심볼-출력---symbols)) |
 | `--emit-map` | 방출 TypeScript와 원본↔출력 바이트 매핑을 JSON으로 ([아래](#방출-매핑---emit-map)) |
-| `--server` | 엔진을 살려 두고 stdin/stdout의 JSON 라인으로 `check`/`emitMap`/`typedCheck` 요청에 답합니다 ([아래](#엔진-서버---server)) |
+| `--server` | 엔진을 살려 두고 stdin/stdout의 JSON 라인으로 `check`/`emitMap`/`typedCheck`와 에디터 semantic 요청에 답합니다 ([아래](#엔진-서버---server)) |
 
 옵션과 입력은 순서 무관하게 섞을 수 있습니다. `-`로 시작하는 알 수 없는 인자는
 에러이고, `--`(옵션 종료)와 짧은 옵션 병합(`-po`)은 지원하지 않습니다.
@@ -208,14 +208,20 @@ rlc: src/main.rl:2:1: cannot call mutating method `set` through val binding `map
 ```
 
 - 손으로 쓴 `.ts`의 에러는 원래 위치 그대로 나옵니다.
-- 글루(switch IIFE, `$rl_ap` 헬퍼 등)에 걸린 진단은 원본 대응이 없으므로 그
-  구문의 위치로 보고하고 `(in code rlc generated for this construct)`를 덧붙입니다.
-  애초에 방출물 때문에 tsc 에러가 나면 그건 rlc의 버그입니다
-  ([`errors.md`](./errors.md) 에러 계층).
+- 글루(switch IIFE, `$rl_ap` 헬퍼 등)에 걸린 진단은 그 구문의 위치로
+  보고합니다. rlc가 무슨 뜻인지 아는 경우에는 **자기 말로 옮겨** 보고하고
+  (원문은 괄호 안에 함께), 모르는 코드는 그대로 전달하며
+  `(in code rlc generated for this construct)`를 덧붙입니다
+  ([`errors.md`](./errors.md#생성된-코드에서-난-타입-에러)).
 - **소진성 메시지가 `--check`와 다릅니다.** `--check`는 자기 선언 표에서
   답하므로 enum 이름을 댈 수 있고(`match on enum Shape is not exhaustive`),
   이 모드는 *타입*에서 답하므로 이름 없이 `match is not exhaustive`라고
-  합니다. 대신 좁혀진 타입을 쓰므로 더 정확합니다. 리터럴 유니언은 어느
+  합니다. 대신 좁혀진 타입을 쓰므로 더 정확합니다. 계산 자체는 두 경로가
+  **같은 알고리즘**이고(체커는 구성원 목록을 답하는 오라클), 알파벳을 알아내지
+  못한 자리의 witness는 이 모드에서 보고하지 않습니다. 튜플 match는 위치마다
+  한 번씩 물어 곱집합을 판정합니다 — 조합은 `missing (North, Slow)`처럼
+  따옴표 없이 보고합니다
+  ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)). 리터럴 유니언은 어느
   선언 표에도 없으므로 이 모드만 검사합니다
   ([`language.md` §3.9](./language.md#39-리터럴-유니언-소진성---types)).
 - **`val` 경로의 built-in 변경 메서드도 여기서만 검사합니다.** 타입 체커에게 그
@@ -461,6 +467,63 @@ signatureHelp { "path", "position" } → null | { "signatures", ... }
 tsDiagnostics { "path" }
   → { "diagnostics": [{ "range", "message", "code", "warning" }] }
 ```
+
+**rl 이름 전용 표면**은 프로젝트도 툴체인도 필요 없습니다 — enum 이름·케이스
+태그·페이로드 필드는 방출 TypeScript에 존재하지 않아 체커에게 물을 수 없고,
+rl이 직접 답합니다. `semanticTokens`처럼 텍스트만으로 답하되, 파일의 상대
+`.rl` import를 해석하려고 `path`를 함께 받습니다.
+
+```
+rlSymbol { "path", "text", "position" }
+  → null | { "kind": "enum" | "case" | "field", "range", "name", "enumName",
+             "signature", "detail", "definition": null | { "path", "range" } }
+
+rlCompletions { "path", "text", "position" }
+  → { "items": [{ "label", "kind": "case" | "field", "detail", "covered" }] }
+
+rlHints { "path", "text" }
+  → { "hints": [{ "kind": "unreachableArm", "range", "message" }] }
+```
+
+- 답하는 자리는 **체커에게 물을 수 없는 자리뿐**입니다: enum 선언 안(이름·
+  케이스 태그·필드 이름)과 패턴 안(태그·필드 이름 — `match`·let-else·`if let`·
+  중첩 패턴 모두). `Shape.Circle(1)` 같은 사용처나 타입 주석은 평범한
+  TypeScript로 낮춰지므로 `null`을 답하고 `hover`/`definition`에 맡깁니다.
+- `definition`은 내장 enum(`Option`/`Result`)에서는 `null`입니다 — 선언이
+  컴파일러 자신의 것이라 열 파일이 없습니다.
+- import된 enum의 선언은 **디스크에서** 읽습니다(저장되지 않은 편집은 보이지
+  않습니다).
+
+`rlCompletions`는 **패턴 자리**에서만 답합니다. 자리는 토큰 스트림으로
+판정하므로 구문이 아직 완성되지 않아도(`match (s) { Circle(r) => r, Po`) 답이
+나옵니다 — 완성이 필요한 순간이 바로 그때이기 때문입니다.
+
+| 자리 | 답 |
+|------|-----|
+| match 암의 패턴 시작(`{`·`,`·`\|` 뒤) | 그 match가 대상으로 하는 enum의 케이스들. 이미 쓴 케이스는 `covered: true`로 표시만 하고 빼지 않습니다 |
+| `if let ` 뒤 | 보이는 모든 enum의 케이스(어느 enum인지 말해 주는 것이 아직 없으므로). 편집기가 접두사로 거릅니다 |
+| 패턴 괄호 안(`Tag(` 또는 `,` 뒤) | 그 케이스의 페이로드 필드 이름들 — `match`·let-else·`if let` 어디서나 |
+| `Tag(field: ` 뒤 | 그 필드의 **선언된 타입**이 가리키는 enum의 케이스들 |
+
+- let-else의 **태그** 자리(`const Ci`)는 답하지 않습니다 — 평범한 선언과
+  구분되지 않습니다. 괄호를 연 뒤의 필드 자리는 답합니다.
+- 튜플 패턴의 원소 자리(`(No`)는 아직 답하지 않습니다.
+- 일반 TypeScript 완성은 여기 섞이지 않습니다 — `completion`의 답과 합치는
+  것은 소비자의 몫입니다.
+
+`rlHints`는 **에러가 아닌 것**을 답합니다. rl의 진단은 에러뿐이고 CLI는
+힌트를 인쇄하지 않습니다 — 이 표면에만 나옵니다.
+
+| 종류 | 뜻 |
+|------|-----|
+| `unreachableArm` | 앞선 암이 이미 잡는 값만 매치하는 암 (죽은 코드). `range`는 패턴부터 본문 끝까지 |
+
+- Rust에서 도달 불가 패턴은 **린트**입니다. rl에는 경고 계층이 없으므로 이것을
+  에러로 만들면 지금 컴파일되는 프로그램을 거절하게 됩니다 — 그래서 컴파일
+  답이 아니라 에디터의 힌트입니다. VS Code 확장은 `Hint` 심각도 + `Unnecessary`
+  태그로 표시합니다(흐리게).
+- `rlSymbol`·`rlCompletions`처럼 파싱만으로 답하므로 TypeScript 툴체인이
+  없어도 나옵니다. sema의 좁은 **중복 암** 에러는 그대로 에러입니다.
 
 - `completion`의 `member`(요청)는 커서가 멤버 접근 자리인지 — 그 자리에서
   일반 답이 불가능하면 엔진이 **프로브**(`$rl_probe` 삽입 임시 projection)

@@ -62,6 +62,10 @@ pub struct TagMatch {
     /// Byte offset of the `match` keyword — where a missing-case diagnostic
     /// is reported (see [`crate::line_col`]).
     pub offset: usize,
+    /// How many scrutinees the match has: `1` for a single match, one per
+    /// position for a tuple match. A tuple match asks one question per
+    /// position, in the order its temporaries were emitted.
+    pub arity: usize,
     /// Byte offset of the scrutinee's first non-whitespace byte.
     pub scrutinee: usize,
     /// Byte offset just past the scrutinee's last non-whitespace byte.
@@ -69,6 +73,148 @@ pub struct TagMatch {
     /// The case tags the match's unguarded arms cover. A guarded arm may
     /// fall through, so it covers nothing.
     pub covered: Vec<String>,
+}
+
+/// One nested pattern, as a question about the *payload* it tests.
+///
+/// `Ok(value: Some(v))` narrows twice: first that the value is `Ok`, then
+/// that its payload is `Some`. The second step is over a type rlc may not
+/// know — the field's declared type can be a type parameter or a
+/// hand-written union — so the type checker is asked at the receiver the
+/// emitted condition tests ([`crate::PayloadTemp`]), and the answer names
+/// that column's alphabet for the exhaustiveness algorithm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayloadProbe {
+    /// Byte offset of the nested pattern's tag — the identity the emitted
+    /// receiver carries.
+    pub offset: usize,
+    /// The constructor whose payload is being tested.
+    pub tag: String,
+    /// The field of that constructor.
+    pub field: String,
+}
+
+/// Collects every nested pattern of a source file, in source order — the
+/// payload positions a checker can be asked about.
+///
+/// ```
+/// let probes = rlc::payload_probes(
+///     "const v = match (r) { Ok(value: Some(value: n)) => n, Err(e) => 0 };\n",
+/// );
+/// assert_eq!(probes.len(), 1);
+/// assert_eq!((probes[0].tag.as_str(), probes[0].field.as_str()), ("Ok", "value"));
+/// ```
+pub fn payload_probes(source: &str) -> Vec<PayloadProbe> {
+    let program = crate::parser::parse(source);
+    let mut out = Vec::new();
+    payload_walk(&program, &mut out);
+    out.sort_by_key(|p| p.offset);
+    out
+}
+
+/// Every place a tag pattern may be written, in source order. Only match
+/// arms (single and tuple) and `if let` can carry a nested pattern —
+/// let-else bindings are alias-only — but the walk visits every construct
+/// so a nested match inside an arm body is reached too.
+fn payload_walk(program: &Program, out: &mut Vec<PayloadProbe>) {
+    for segment in &program.segments {
+        match segment {
+            Segment::Match(expr) => {
+                for arm in &expr.arms {
+                    if let Pattern::Tags(alts) = &arm.pattern {
+                        for alt in alts {
+                            payload_of(alt, out);
+                        }
+                    }
+                    if let Some(guard) = &arm.guard {
+                        payload_walk(&guard.expr, out);
+                    }
+                    payload_walk(&arm.body, out);
+                }
+                payload_walk(&expr.scrutinee, out);
+            }
+            Segment::TupleMatch(expr) => {
+                for arm in &expr.arms {
+                    if let TuplePattern::Elems(elems) = &arm.pattern {
+                        for elem in elems {
+                            if let Pattern::Tags(alts) = elem {
+                                for alt in alts {
+                                    payload_of(alt, out);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(guard) = &arm.guard {
+                        payload_walk(&guard.expr, out);
+                    }
+                    payload_walk(&arm.body, out);
+                }
+                for (_, scrutinee) in &expr.scrutinees {
+                    payload_walk(scrutinee, out);
+                }
+            }
+            Segment::IfLet(stmt) => payload_if_let(stmt, out),
+            Segment::Try(stmt) => payload_walk(&stmt.expr, out),
+            Segment::LetElse(stmt) => {
+                payload_walk(&stmt.expr, out);
+                payload_walk(&stmt.else_body, out);
+            }
+            Segment::Pipe(pipe) => {
+                if let Some(head) = &pipe.head {
+                    payload_walk(head, out);
+                }
+                for step in &pipe.steps {
+                    payload_walk(&step.body, out);
+                }
+            }
+            Segment::ResultBlock(block) => {
+                for item in &block.items {
+                    match item {
+                        ResultItem::Stmts(stmts) => payload_walk(stmts, out),
+                        ResultItem::Bind(bind) => payload_walk(&bind.expr, out),
+                    }
+                }
+                payload_walk(&block.value, out);
+            }
+            Segment::Template(template) => {
+                for chunk in &template.chunks {
+                    if let TemplateChunk::Interp(interp) = chunk {
+                        payload_walk(interp, out);
+                    }
+                }
+            }
+            Segment::Verbatim(_)
+            | Segment::RlImport(_)
+            | Segment::Enum(_)
+            | Segment::ValModifier(_) => {}
+        }
+    }
+}
+
+fn payload_if_let(stmt: &IfLetStmt, out: &mut Vec<PayloadProbe>) {
+    payload_of(&stmt.pattern, out);
+    payload_walk(&stmt.expr, out);
+    payload_walk(&stmt.body, out);
+    match &stmt.else_part {
+        Some(IfLetElse::Block(block)) => payload_walk(block, out),
+        Some(IfLetElse::IfLet(inner)) => payload_if_let(inner, out),
+        None => {}
+    }
+}
+
+/// One alternative's nested patterns, recursively.
+fn payload_of(alt: &TagPattern, out: &mut Vec<PayloadProbe>) {
+    for binding in alt.bindings.as_deref().unwrap_or_default() {
+        let Some(inner) = &binding.nested else {
+            continue;
+        };
+        out.push(PayloadProbe {
+            offset: inner.tag_off,
+            tag: alt.tag.clone(),
+            field: binding.name.clone(),
+        });
+        payload_of(inner, out);
+    }
 }
 
 /// Collects every wildcard-free tag `match` of a source file, nested ones
@@ -150,6 +296,7 @@ fn walk(program: &Program, src: &str, out: &mut Probes) {
                 }
             }
             Segment::TupleMatch(expr) => {
+                collect_tuple(expr, out);
                 for (_, scrutinee) in &expr.scrutinees {
                     walk(scrutinee, src, out);
                 }
@@ -255,12 +402,52 @@ fn collect(expr: &MatchExpr, src: &str, out: &mut Probes) {
         }),
         Kind::Tag => out.tags.push(TagMatch {
             offset: expr.keyword_off,
+            arity: 1,
             scrutinee,
             scrutinee_end,
             covered: tags,
         }),
         Kind::None => {}
     }
+}
+
+/// A tuple match as a typed question — one per position, asked at the
+/// temporaries the emitted code binds the scrutinees to.
+///
+/// `covered` stays empty: what the arms cover is a question about
+/// *combinations*, which the exhaustiveness algorithm answers from the
+/// arms themselves. All the checker is asked for is each position's
+/// alphabet.
+fn collect_tuple(expr: &TupleMatchExpr, out: &mut Probes) {
+    if expr
+        .arms
+        .iter()
+        .any(|a| matches!(a.pattern, TuplePattern::Wildcard))
+    {
+        return;
+    }
+    // A tuple match with no tag pattern anywhere has nothing to enumerate.
+    let tagged = expr.arms.iter().any(|arm| match &arm.pattern {
+        TuplePattern::Elems(elems) => elems.iter().any(|e| matches!(e, Pattern::Tags(_))),
+        TuplePattern::Wildcard => false,
+    });
+    if !tagged {
+        return;
+    }
+    let (first, last) = (
+        expr.scrutinees.first().map(|(span, _)| span.start),
+        expr.scrutinees.last().map(|(span, _)| span.end),
+    );
+    let (Some(scrutinee), Some(scrutinee_end)) = (first, last) else {
+        return;
+    };
+    out.tags.push(TagMatch {
+        offset: expr.keyword_off,
+        arity: expr.scrutinees.len(),
+        scrutinee,
+        scrutinee_end,
+        covered: Vec::new(),
+    });
 }
 
 /// The scrutinee span with surrounding whitespace trimmed, or `None` when it

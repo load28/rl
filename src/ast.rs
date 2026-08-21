@@ -39,6 +39,9 @@ pub(crate) struct Program {
     /// instead of `=` is never valid TypeScript, so the text cannot be
     /// passed through either.
     pub stray_results: Vec<usize>,
+    /// Byte offsets of `result` bindings written without a declaration
+    /// keyword (`b <- f();`), reported by the semantic phase.
+    pub result_missing_kw: Vec<usize>,
 }
 
 /// One top-level piece of a [`Program`], in source order.
@@ -220,6 +223,9 @@ pub(crate) struct LetElseStmt {
     pub kw: String,
     /// The pattern's case tag.
     pub tag: String,
+    /// Byte offset of the tag, for error reporting — the same role
+    /// [`TagPattern::tag_off`] plays for a match arm's pattern.
+    pub tag_off: usize,
     /// The pattern's bindings. Possibly empty — the parens are mandatory
     /// (`const Tag() = ... else ...;` checks the case without binding).
     pub bindings: Vec<Binding>,
@@ -318,6 +324,9 @@ pub(crate) struct EnumCase {
 #[derive(Debug)]
 pub(crate) struct Field {
     pub name: String,
+    /// Byte offset of the field name, for error reporting and for the
+    /// symbol API (an editor navigates to the declaration by it).
+    pub name_off: usize,
     pub optional: bool,
     /// The verbatim type annotation text.
     pub ty: String,

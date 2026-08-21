@@ -703,3 +703,45 @@ fn overlay_keeps_the_buffer_in_its_project() {
     // … and `Query#set`, which only shares the name, is not.
     assert!(!err.contains("`query`"), "{err}");
 }
+
+/// `rlc --server` answers `rlSymbol` without a project or a toolchain: the
+/// names it resolves exist only in `.rl` source, so nothing else can.
+#[test]
+fn the_server_resolves_rl_names_without_a_toolchain() {
+    use std::io::Write;
+    let dir = tmpdir();
+    let file = dir.join("shape.rl");
+    let source = "enum Shape { Circle(radius: number), Point }\n\
+                  const a = match (s) { Circle(radius) => radius, Point => 0 };\n";
+    fs::write(&file, source).unwrap();
+
+    let request = serde_json::json!({
+        "id": 1,
+        "method": "rlSymbol",
+        "params": {
+            "path": file.to_string_lossy(),
+            "text": source,
+            // line 1, on the `Circle` of the match arm
+            "position": { "line": 1, "character": 22 },
+        },
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rlc"))
+        .arg("--server")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("server starts");
+    writeln!(child.stdin.as_mut().unwrap(), "{request}").unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("server answers");
+    let answer: serde_json::Value =
+        serde_json::from_slice(String::from_utf8_lossy(&out.stdout).trim().as_bytes())
+            .expect("one JSON line");
+    assert_eq!(answer["result"]["kind"], "case");
+    assert_eq!(
+        answer["result"]["signature"],
+        "Shape.Circle(radius: number)"
+    );
+    // ...and points at the declaration on line 0.
+    assert_eq!(answer["result"]["definition"]["range"]["start"]["line"], 0);
+}

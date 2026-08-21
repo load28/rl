@@ -19,6 +19,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { findTsgo } from "./toolchain";
+
 const SERVER = path.join(__dirname, "..", "server.js");
 const COMPILER = "rlc";
 
@@ -32,6 +34,10 @@ function compilerAvailable(): boolean {
 }
 
 const skip = compilerAvailable() ? false : "rlc not on PATH";
+/** Answers that need the TypeScript language service. A skip must mean a
+ * tool is missing, never that a feature quietly answered nothing — so the
+ * cases below that ask TypeScript guard on tsgo as well as on rlc. */
+const skipTyped = skip || (findTsgo() ? false : "tsgo not installed");
 /** Each case spawns a server and compiles through it; generous, and only
  * reached when something has hung. */
 const timeout = 60_000;
@@ -155,7 +161,7 @@ const STD_SOURCE = [
 
 test(
   "`Result.` completes the constructors and the combinators",
-  { skip, timeout },
+  { skip: skipTyped, timeout },
   async () => {
     const { completion, stop } = await open(STD_SOURCE);
     try {
@@ -189,7 +195,7 @@ const PIPE_SOURCE = ["const n: number = 1;", "const s = n", "  |> .", ""].join(
 
 test(
   "a pipeline method step completes the piped value's members",
-  { skip, timeout },
+  { skip: skipTyped, timeout },
   async () => {
     const { completion, stop } = await open(PIPE_SOURCE);
     try {
@@ -214,7 +220,7 @@ test(
 
 test(
   "a member access in a step never falls back to the global scope",
-  { skip, timeout },
+  { skip: skipTyped, timeout },
   async () => {
     // Recovering from `|>`, TypeScript can lose the dot and answer with
     // every name in scope — the compiler's own `$rl_ap` helper included.
@@ -240,7 +246,7 @@ test(
 
 test(
   "a pipeline of std combinators keeps completing at each step",
-  { skip, timeout },
+  { skip: skipTyped, timeout },
   async () => {
     const source = [
       'import { Result } from "@rl/std";',
@@ -342,3 +348,104 @@ test(
     }
   },
 );
+
+/* ---------------------------------------------------------------------- *
+ * rl's own names (TASK-107): hover, definition and completion for the
+ * three name spaces that exist only in `.rl` source. The engine answers
+ * these from the compiler's declaration table, so — unlike everything
+ * above — they need no TypeScript toolchain at all.
+ * ---------------------------------------------------------------------- */
+
+const SHAPE_SOURCE = [
+  "enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }",
+  "declare const s: Shape;",
+  "const area = match (s) {",
+  "  Circle(radius) => radius,",
+  "  Rect(w, h) => w * h,",
+  "  Point => 0,",
+  "};",
+  "if let Circle(radius: r) = s { use(r); }",
+  "",
+].join("\n");
+
+/** The position just past `marker`'s first occurrence, as LSP counts. */
+function positionOf(source: string, marker: string) {
+  const offset = source.indexOf(marker) + marker.length;
+  const before = source.slice(0, offset);
+  return {
+    line: before.split("\n").length - 1,
+    character: before.length - (before.lastIndexOf("\n") + 1),
+  };
+}
+
+test("a case tag hovers as its declaration — in a match and in an if let", { skip, timeout }, async () => {
+  const { client, uri, stop } = await open(SHAPE_SOURCE);
+  try {
+    for (const marker of ["  Circ", "if let Circ"]) {
+      const answer = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        position: positionOf(SHAPE_SOURCE, marker),
+      });
+      const value = String(answer.result?.contents?.value ?? "");
+      assert.ok(
+        value.includes("Shape.Circle(radius: number)"),
+        `hover at ${marker} was: ${value}`,
+      );
+    }
+  } finally {
+    stop();
+  }
+});
+
+test("a payload field hovers as its declaration", { skip, timeout }, async () => {
+  const { client, uri, stop } = await open(SHAPE_SOURCE);
+  try {
+    const answer = await client.request("textDocument/hover", {
+      textDocument: { uri },
+      position: positionOf(SHAPE_SOURCE, "  Circle(rad"),
+    });
+    const value = String(answer.result?.contents?.value ?? "");
+    assert.ok(value.includes("radius: number"), `hover was: ${value}`);
+  } finally {
+    stop();
+  }
+});
+
+test("a pattern tag goes to its declaration", { skip, timeout }, async () => {
+  const { client, uri, stop } = await open(SHAPE_SOURCE);
+  try {
+    const answer = await client.request("textDocument/definition", {
+      textDocument: { uri },
+      position: positionOf(SHAPE_SOURCE, "  Circ"),
+    });
+    const location = Array.isArray(answer.result)
+      ? answer.result[0]
+      : answer.result;
+    assert.equal(location?.range?.start?.line, 0, "the declaration is line 0");
+    assert.equal(location?.uri, uri);
+  } finally {
+    stop();
+  }
+});
+
+test("pattern positions complete cases and fields", { skip, timeout }, async () => {
+  const { completion, stop } = await open(SHAPE_SOURCE);
+  try {
+    // An arm position: every case, with the wildcard.
+    const arm = await completion("  Rect(w, h) => w * h,\n  ");
+    for (const label of ["Circle", "Rect", "Point", "_"]) {
+      assert.ok(arm.labels.includes(label), `missing ${label} in: ${arm.labels}`);
+    }
+    // A payload position: that case's fields, and nothing else.
+    const payload = await completion("  Rect(");
+    assert.deepEqual(payload.labels, ["w", "h"]);
+    // An `if let` — a position this server could not complete at all before.
+    const conditional = await completion("if let ");
+    assert.ok(
+      conditional.labels.includes("Circle"),
+      `missing Circle in: ${conditional.labels}`,
+    );
+  } finally {
+    stop();
+  }
+});

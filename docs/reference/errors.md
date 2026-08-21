@@ -29,6 +29,44 @@ enum E { A(x: number]) }
 // rlc: file.rl:1:15: enum E: invalid type for field `x`: Expected ',', got ']'
 ```
 
+## 패턴의 이름 해석
+
+패턴 안의 케이스 태그와 필드 이름은 선언에 대조됩니다 — `match`(튜플·중첩
+포함), let-else, `if let` 모두 같은 규칙입니다.
+
+| 메시지 | 원인과 해결 |
+|--------|-------------|
+| ``<enum> has no case `<태그>` — did you mean `<제안>`?`` | 패턴의 태그가 그 enum의 케이스가 아니고, 어떤 케이스의 오타로 보입니다. 위치는 태그 |
+| ``<enum>: case `<태그>` has no field `<필드>` — did you mean `<제안>`?`` | 바인딩한 필드 이름이 그 케이스의 페이로드에 없고, 어떤 필드의 오타로 보입니다. 위치는 필드 이름 |
+
+```rl
+enum Shape { Circle(radius: number), Empty }
+const a = match (s) { Circel(radius) => radius, Empty => 0 };
+// rlc: file.rl:2:23: enum Shape has no case `Circel` — did you mean `Circle`?
+
+const b = match (s) { Circle(radiuz) => radiuz, Empty => 0 };
+// rlc: file.rl:5:29: enum Shape: case `Circle` has no field `radiuz` — did you mean `radius`?
+```
+
+**해석에 실패한 이름이 그 자체로 에러는 아닙니다.** 태그 패턴은 `kind` 문자열
+필드를 가진 **모든** 태그드 유니언에 쓸 수 있고([`language.md` §3.2](./language.md#32-의미)),
+손으로 쓴 유니언의 태그는 어떤 선언 표에도 없습니다. 그래서 rlc는 **고칠 이름을
+댈 수 있을 때만** 보고합니다 — 대소문자만 다르거나 편집 거리가 가까운 이름
+(글자 자리바꿈은 한 번의 편집으로 셉니다). 오타가 아닌 틀린 이름은 타입을 알아야
+판정할 수 있으므로 보고하지 않습니다.
+
+어느 enum에 대조할지는 사이트가 정합니다.
+
+- **`match`**: 암들의 태그를 가장 많이 포함하는 유일한 enum. 후보가 없거나
+  동점이면 검사하지 않습니다.
+- **let-else·`if let`**: 태그가 하나뿐이라 근거가 얇으므로 **편집 한 번** 거리의
+  케이스를 가진 enum이 유일할 때만 보고합니다. 태그가 정확히 해석되면 그
+  케이스의 필드는 match와 똑같이 검사합니다.
+- **중첩 패턴**: 바깥 필드의 **선언된 타입**이 가리키는 enum에 대조합니다.
+
+태그가 해석되지 않아 보고된 match는 **소진성을 함께 보고하지 않습니다** —
+원인(오타)을 고치면 그 답이 달라지기 때문입니다.
+
 ## match
 
 | 메시지 | 원인과 해결 |
@@ -90,10 +128,19 @@ rlc: shapes.rl:12:25: match on enum Shape is not exhaustive: missing "Rect"
 | import한 exported enum | `match on enum <이름> (imported from "<지정자>") is not exhaustive: ...` |
 | 내장 `Option`/`Result` | `match on built-in enum <이름> is not exhaustive: ...` |
 
-**가드 암과 중첩 패턴 암은 케이스를 커버하지 못합니다** — 그 태그를 덮으려면
-무가드·무중첩 암이 따로 필요합니다. 손으로 쓴 유니언이나 해석되지 않는
-import의 enum은 이 검사를 받지 않고 런타임 가드만 남습니다
-([`language.md` §3.6](./language.md#36-소진성-검사)).
+**가드 암은 케이스를 커버하지 못합니다** — 조건이 거짓일 수 있으므로 그 태그를
+덮으려면 무가드 암이 따로 필요합니다. **중첩 패턴은 안쪽까지 검사되고**, 빠진
+것은 태그가 아니라 **패턴으로** 지목됩니다 — 그대로 암으로 **붙여 넣을 수 있는**
+형태입니다(중첩 자리의 유닛 케이스에 괄호가 붙는 이유입니다 — 패턴 안에서
+`필드: 이름`은 매치가 아니라 별칭이므로):
+
+```
+rlc: r.rl:3:11: match on built-in enum Result is not exhaustive: missing "Ok(value: None())"
+     (add the missing arms or a final `_` arm)
+```
+
+손으로 쓴 유니언이나 해석되지 않는 import의 enum은 이 검사를 받지 않고 런타임
+가드만 남습니다 ([`language.md` §3.6](./language.md#36-소진성-검사)).
 
 튜플 match는 곱집합으로 검사하고 빠진 **조합**을 보고합니다 (5개 이상이면
 앞의 셋과 총 개수만):
@@ -154,6 +201,8 @@ head/step 내부의 `try` 문은 위의 try 위치 제약 에러로 보고됩니
 |--------|-------------|
 | `` `result` block could not be parsed here (every binding is `const <binding> <- <expression>;`, and the block must end with an expression) `` | Result 바인딩(`const x <- 식;`)이 있는 `result` 블록이 완전하게 파싱되지 않았습니다. 선언 키워드 뒤의 `<-`는 유효한 TS에 없어 통과시킬 수 없으므로 위치와 함께 에러입니다. 흔한 원인: 바인딩의 `;` 누락, 마지막 값 식 없음(또는 값 식에 `;`를 붙임), `<-` 뒤 식 없음, 바인딩 이름 없음. 위치는 `result` ([`language.md` §8.4](./language.md#84-구조-규칙)) |
 
+| `` `result` binding is missing its declaration keyword (write `const <binding> <- <expression>;`, or `let`/`var`) `` | `b <- f();`처럼 선언 키워드 없이 바인딩을 썼습니다. 이 자리에 `const`(또는 `let`/`var`)를 붙입니다. `b < -f()` **비교**를 쓰려던 것이라면 `<`와 `-` 사이에 공백을 둡니다 — rl이 바인딩으로 보는 것은 붙여 쓴 `<-`뿐입니다. 위치는 이름 ([`language.md` §8.4](./language.md#84-구조-규칙)) |
+
 블록 안의 `try` 문·let-else는 위의 위치 제약 에러로 보고됩니다 — 그 자리의
 `return`은 둘러싼 함수가 아니라 블록에서 나가기 때문입니다. `Err` 전파는
 `<-` 바인딩으로 씁니다.
@@ -164,6 +213,16 @@ const a = result {
 };
 // rlc: file.rl:1:11: `result` block could not be parsed here (every binding is
 //      `const <binding> <- <expression>;`, and the block must end with an expression)
+```
+
+```rl
+const a = result {
+  const x <- f();
+  y <- g();
+  x + y
+};
+// rlc: file.rl:3:3: `result` binding is missing its declaration keyword
+//      (write `const <binding> <- <expression>;`, or `let`/`var`)
 ```
 
 ```rl
@@ -229,9 +288,37 @@ const bad = evaluate() |> Result.mapP((n) => n.length);
 ```
 
 계층은 그대로입니다: 위의 rl 수준 에러는 **전부 rlc가**, 타입 에러는
-**전부 tsc가** 냅니다. 겹치지 않습니다. rlc가 방출한 코드(switch IIFE,
-`$rl_ap` 헬퍼, 구조 분해) 때문에 tsc 에러가 나면 그것은 rlc의 버그이며,
-그런 진단은 원본 대응이 없어 에디터에서는 표시되지 않습니다.
+**전부 tsc가** 냅니다. 겹치지 않습니다.
+
+### 생성된 코드에서 난 타입 에러
+
+사용자 코드가 잘못됐을 때 tsc가 **rlc가 쓴 글루**에서 에러를 낼 수 있습니다
+(`try`의 대상이 `Result`가 아닌 경우 등). 그런 진단은 사용자가 쓰지 않은
+줄과 이름(`$rl_t0`)을 가리키므로, rlc가 **자기 구문의 말로 옮겨** 자기
+위치에서 보고합니다.
+
+| 구문 | tsc 코드 | rlc가 하는 말 |
+|------|----------|---------------|
+| `try` | 2339·2551·2571 | `` `try` needs a `Result` — this expression is not one `` |
+| `try` | 2322·2345 | `` the `Err` this `try` propagates does not fit the enclosing function's return type — ... `` |
+| `result`의 `<-` | 2339·2551·2571 | `` `<-` needs a `Result` — this expression is not one `` |
+| let-else / `if let` | 2339·2571 | `` ... needs a value with a `kind` discriminant — this expression has none `` |
+| `match` | 2339·2571 | `` match on a tag pattern needs a value with a `kind` discriminant — this scrutinee has none (a plain TypeScript `enum` is not one) `` |
+| `match` / let-else / `if let` | 2678·2367 | `this pattern's case is not one the value can be` |
+
+```
+rlc: f.rl:2:13: `try` needs a `Result` — this expression is not one
+     (ts2339: Property 'kind' does not exist on type 'number'.)
+```
+
+- 원문이 괄호 안에 함께 실립니다 — 옮긴 말이 틀렸을 때 사용자가 직접 판단할
+  수 있어야 하기 때문입니다.
+- 표에 없는 코드는 **옮기지 않고** 그대로 전달합니다(`(in code rlc generated
+  for this construct)` 꼬리표가 붙습니다). 아닌 것을 아는 척하는 것보다
+  못생긴 메시지가 낫습니다.
+- 한 구문의 글루가 같은 뜻의 진단을 여러 개 그리면 하나로 합칩니다.
+- 매핑이 있는 자리(사용자가 쓴 텍스트)의 타입 에러는 **옮기지 않습니다** —
+  그건 사용자의 코드이고 tsc가 말할 몫입니다.
 
 ## CLI
 

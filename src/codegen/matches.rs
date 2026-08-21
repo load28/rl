@@ -178,8 +178,9 @@ pub(super) fn pattern_conds_binds<'a>(
     e: &Emitter<'a>,
     alt: &TagPattern,
     root: &str,
-) -> (String, Rope<'a>) {
-    let mut conds = vec![format!("{root}.kind === \"{}\"", alt.tag)];
+) -> (Rope<'a>, Rope<'a>) {
+    let mut conds: Vec<(String, Option<(usize, usize)>)> =
+        vec![(format!("{root}.kind === \"{}\"", alt.tag), None)];
     let mut binds = Rope::new();
     collect_conds_binds(
         e,
@@ -188,14 +189,36 @@ pub(super) fn pattern_conds_binds<'a>(
         &mut conds,
         &mut binds,
     );
-    (conds.join(" && "), binds)
+    // The conditions are glue, but each nested link *starts* with the
+    // receiver expression that link tests — the one place a checker can be
+    // asked what that payload admits. A zero-length mark before it records
+    // where ([`crate::PayloadTemp`]); the text is unchanged.
+    let mut cond = Rope::new();
+    for (index, (text, payload)) in conds.into_iter().enumerate() {
+        if index > 0 {
+            cond.push_lit(" && ");
+        }
+        match payload {
+            // The mark sits on the *field name* of the receiver
+            // (`$rl_m.inner`), not at its start: a position at `$rl_m`
+            // names the scrutinee's own type, and the question here is
+            // about the payload.
+            Some((at, src)) => {
+                cond.push_lit(text[..at].to_string());
+                cond.push_payload_mark(src);
+                cond.push_lit(text[at..].to_string());
+            }
+            None => cond.push_lit(text),
+        }
+    }
+    (cond, binds)
 }
 
 fn collect_conds_binds<'a>(
     e: &Emitter<'a>,
     bindings: &[Binding],
     root: &str,
-    conds: &mut Vec<String>,
+    conds: &mut Vec<(String, Option<(usize, usize)>)>,
     binds: &mut Rope<'a>,
 ) {
     let mut plain = bindings.iter().filter(|b| b.nested.is_none()).peekable();
@@ -207,7 +230,11 @@ fn collect_conds_binds<'a>(
     for b in bindings {
         if let Some(inner) = &b.nested {
             let path = format!("{root}.{}", b.name);
-            conds.push(format!("{path}.kind === \"{}\"", inner.tag));
+            conds.push((
+                format!("{path}.kind === \"{}\"", inner.tag),
+                // The field name starts just past `root.`.
+                Some((root.len() + 1, inner.tag_off)),
+            ));
             collect_conds_binds(
                 e,
                 inner.bindings.as_deref().unwrap_or_default(),
@@ -355,7 +382,7 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
                 inner.push_lit("\n");
             }
             TuplePattern::Elems(elems) => {
-                let mut conds: Vec<String> = Vec::new();
+                let mut conds: Vec<Rope> = Vec::new();
                 let mut bind = Rope::new();
                 for (i, elem) in elems.iter().enumerate() {
                     let var = format!("$rl_m{i}");
@@ -372,7 +399,9 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
                                 .map(|t| format!("{var}.kind === \"{}\"", t.tag))
                                 .collect::<Vec<_>>()
                                 .join(" || ");
-                            conds.push(format!("({cond})"));
+                            let mut alt_cond = Rope::new();
+                            alt_cond.push_lit(format!("({cond})"));
+                            conds.push(alt_cond);
                             bind.append(bind_rope_from(e, &alts[0].bindings, &var, false));
                         }
                     }
@@ -386,7 +415,14 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
                     inner.append(exit);
                     inner.push_lit("\n");
                 } else {
-                    inner.push_lit(format!("  if ({}) {{ ", conds.join(" && ")));
+                    inner.push_lit("  if (");
+                    for (index, cond) in conds.into_iter().enumerate() {
+                        if index > 0 {
+                            inner.push_lit(" && ");
+                        }
+                        inner.append(cond);
+                    }
+                    inner.push_lit(") { ");
                     inner.append(bind);
                     inner.append(exit);
                     inner.push_lit(" }\n");
@@ -410,7 +446,12 @@ pub(super) fn emit_tuple_match<'a>(e: &Emitter<'a>, expr: &TupleMatchExpr) -> Ro
 
     let mut header = Rope::new();
     for (i, (_, scrutinee)) in expr.scrutinees.iter().enumerate() {
-        header.push_lit(format!("\n  const $rl_m{i} = ("));
+        header.push_lit("\n  const ");
+        // One mark per position, in order: a tuple match's positions are
+        // told apart by where their temporaries landed, since they all
+        // stand for the same `match` keyword.
+        header.push_mark(expr.keyword_off);
+        header.push_lit(format!("$rl_m{i} = ("));
         header.append(e.emit_program(scrutinee).trim());
         header.push_lit(");");
     }
@@ -490,14 +531,18 @@ fn emit_if_chain<'a>(e: &Emitter<'a>, expr: &MatchExpr) -> Rope<'a> {
                     pattern_conds_binds(e, &alts[0], "$rl_m")
                 } else {
                     // or-pattern: shared bindings, never nested (sema)
-                    let cond = alts
-                        .iter()
-                        .map(|t| format!("$rl_m.kind === \"{}\"", t.tag))
-                        .collect::<Vec<_>>()
-                        .join(" || ");
+                    let mut cond = Rope::new();
+                    cond.push_lit(
+                        alts.iter()
+                            .map(|t| format!("$rl_m.kind === \"{}\"", t.tag))
+                            .collect::<Vec<_>>()
+                            .join(" || "),
+                    );
                     (cond, bind_rope(e, &alts[0].bindings, false))
                 };
-                out.push_lit(format!("  if ({}) {{ ", cond));
+                out.push_lit("  if (");
+                out.append(cond);
+                out.push_lit(") { ");
                 out.append(bind);
                 out.append(exit);
                 out.push_lit(" }\n");

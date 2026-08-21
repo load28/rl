@@ -107,8 +107,23 @@
 | TASK-097 | sema 소진성을 MatchAnalysis 위로 — coverage 단일 원천 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-097](./TASK-097-exhaustiveness-on-match-analysis.md) |
 | TASK-098 | 폴백 타입의 한계 실측 — nested·tuple·제네릭 인스턴스화 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-098](./TASK-098-fallback-type-instantiation-survey.md) |
 | TASK-099 | 기록 위생 — INDEX 상태 정합성과 미등록 후속 등록 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-099](./TASK-099-records-hygiene.md) |
-| TASK-100 | TS enum을 scrutinee로 쓴 `match`를 rl 진단으로 | 대기 | — | — | [TASK-100](./TASK-100-ts-enum-match-diagnostic.md) |
+| TASK-100 | TS enum을 scrutinee로 쓴 `match`를 rl 진단으로 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-100](./TASK-100-ts-enum-match-diagnostic.md) |
+| TASK-101 | rl 구문의 Rust 수준 분석 격차 검토와 개선 계획 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-101](./TASK-101-rust-parity-review.md) |
+| TASK-102 | 패턴 사이트 일반화와 이름 해석 진단 (P1+P2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-102](./TASK-102-pattern-sites-and-resolution.md) |
+| TASK-103 | 소진성을 usefulness 알고리즘으로 (P5) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-103](./TASK-103-usefulness-exhaustiveness.md) |
+| TASK-104 | 진단 앵커와 진단 번역 (P4 계층 1·3) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-104](./TASK-104-diagnostic-anchors-and-translation.md) |
+| TASK-105 | rl 이름의 semantic 표면을 엔진으로 (P3 1/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-105](./TASK-105-rl-name-surface.md) |
+| TASK-106 | 패턴 자리 자동완성 (P3 2/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-106](./TASK-106-pattern-completions.md) |
+| TASK-107 | 에디터가 엔진의 rl 표면을 쓴다 (P3 3/3) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-107](./TASK-107-editor-adopts-engine-surface.md) |
+| TASK-108 | typed 소진성도 usefulness 위로 (P4 계층 2, 1/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-108](./TASK-108-typed-coverage-on-usefulness.md) |
+| TASK-109 | 중첩 열의 알파벳을 체커에게 묻는다 (P4 계층 2, 2/2) | 완료 | 2026-08-20 | 2026-08-20 | [TASK-109](./TASK-109-payload-alphabet-query.md) |
+| TASK-110 | witness를 붙여 넣을 수 있는 패턴으로 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-110](./TASK-110-pasteable-witnesses.md) |
+| TASK-111 | 튜플 match의 typed 소진성 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-111](./TASK-111-typed-tuple-coverage.md) |
+| TASK-112 | 키워드를 빠뜨린 `result` 바인딩 진단 | 완료 | 2026-08-20 | 2026-08-20 | [TASK-112](./TASK-112-result-missing-keyword.md) |
+| TASK-113 | 도달 불가 arm을 에디터 힌트로 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-113](./TASK-113-unreachable-arm-hints.md) |
+| TASK-114 | GAP-6 기록 정정 — 중첩 내부 소진성 | 완료 | 2026-08-21 | 2026-08-21 | [TASK-114](./TASK-114-parity-gap6-correction.md) |
+| TASK-115 | CI 복구 — 새 clippy 린트와 테스트 개수 guard | 완료 | 2026-08-21 | 2026-08-21 | [TASK-115](./TASK-115-ci-green.md) |
 
 ## 다음 태스크 번호
 
-**TASK-101**
+**TASK-116**

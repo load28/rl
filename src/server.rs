@@ -25,6 +25,16 @@
 //! → { "id": 4, "method": "semanticTokens", "params": { "text" } }
 //! ← { "id": 4, "result": { "tokens": [{ "range", "kind" }] } }
 //!
+//! → { "id": 5, "method": "rlSymbol", "params": { "path", "text", "position" } }
+//! ← { "id": 5, "result": { "kind", "range", "name", "enumName",
+//!                          "signature", "detail", "definition" } | null }
+//!
+//! → { "id": 6, "method": "rlCompletions", "params": { "path", "text", "position" } }
+//! ← { "id": 6, "result": { "items": [{ "label", "kind", "detail", "covered" }] } }
+//!
+//! → { "id": 7, "method": "rlHints", "params": { "path", "text" } }
+//! ← { "id": 7, "result": { "hints": [{ "kind", "range", "message" }] } }
+//!
 //! ← { "id": N, "error": "sentence" }   // the request failed; the session lives
 //! ```
 //!
@@ -200,6 +210,9 @@ fn respond(sessions: &mut Sessions, line: &str) -> serde_json::Value {
             })
         }),
         "semanticTokens" => semantic_tokens(params),
+        "rlSymbol" => rl_symbol(params),
+        "rlCompletions" => rl_completions(params),
+        "rlHints" => rl_hints(params),
         "tsDiagnostics" => semantic(sessions, params, |project, path, _position| {
             let diagnostics: Vec<_> = project
                 .service_diagnostics(path)?
@@ -339,6 +352,97 @@ fn check(params: &serde_json::Value) -> Result<serde_json::Value, String> {
 /// ambiguous surface, in the buffer's coordinates. Like `check`, this is
 /// stateless and parse-only — it needs no project and no TypeScript
 /// toolchain, so the editor's colors stay exact in every environment.
+/// The rl name at a position — an enum, a case tag, a payload field.
+///
+/// Text-only like `semanticTokens`: the answer needs no project and no
+/// toolchain, because these names exist nowhere in the emitted TypeScript
+/// and are rl's to answer (`engine::names`). `path` is still required, to
+/// resolve the file's relative `.rl` imports.
+fn rl_symbol(params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?;
+    let position = Position {
+        line: params["position"]["line"].as_u64().unwrap_or(0) as u32,
+        character: params["position"]["character"].as_u64().unwrap_or(0) as u32,
+    };
+    let Some(symbol) = rlc::engine::rl_symbol_at(Path::new(path), text_param(params)?, position)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    Ok(json!({
+        "kind": match symbol.kind {
+            rlc::engine::RlSymbolKind::Enum => "enum",
+            rlc::engine::RlSymbolKind::Case => "case",
+            rlc::engine::RlSymbolKind::Field => "field",
+        },
+        "range": range_json(symbol.range),
+        "name": symbol.name,
+        "enumName": symbol.enum_name,
+        "signature": symbol.signature,
+        "detail": symbol.detail,
+        "definition": symbol.definition.map(|location| json!({
+            "path": location.path.to_string_lossy(),
+            "range": range_json(location.range),
+        })),
+    }))
+}
+
+/// What can be written at a pattern position — case tags, payload field
+/// names. Text-only, for the same reason [`rl_symbol`] is.
+fn rl_completions(params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?;
+    let position = Position {
+        line: params["position"]["line"].as_u64().unwrap_or(0) as u32,
+        character: params["position"]["character"].as_u64().unwrap_or(0) as u32,
+    };
+    let items: Vec<_> =
+        rlc::engine::rl_completions_at(Path::new(path), text_param(params)?, position)
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "label": item.label,
+                    "kind": match item.kind {
+                        rlc::engine::RlCompletionKind::Case => "case",
+                        rlc::engine::RlCompletionKind::Field => "field",
+                        rlc::engine::RlCompletionKind::Wildcard => "wildcard",
+                    },
+                    "detail": item.detail,
+                    "covered": item.covered,
+                })
+            })
+            .collect();
+    Ok(json!({ "items": items }))
+}
+
+/// What rl has to say about a buffer that is not an error — today, the
+/// arms an earlier arm already covers. Text-only like [`rl_symbol`], and
+/// separate from `check` on purpose: a hint never fails a build, so it
+/// never travels in the diagnostics of a compile answer.
+fn rl_hints(params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let path = params["path"]
+        .as_str()
+        .ok_or_else(|| "the request needs a \"path\"".to_string())?;
+    let hints: Vec<_> = rlc::engine::rl_hints(Path::new(path), text_param(params)?)
+        .into_iter()
+        .map(|hint| {
+            json!({
+                "kind": match hint.kind {
+                    rlc::engine::RlHintKind::UnreachableArm => "unreachableArm",
+                },
+                "range": range_json(hint.range),
+                "message": hint.message,
+            })
+        })
+        .collect();
+    Ok(json!({ "hints": hints }))
+}
+
 fn semantic_tokens(params: &serde_json::Value) -> Result<serde_json::Value, String> {
     use serde_json::json;
     let tokens: Vec<_> = rlc::engine::semantic_tokens(text_param(params)?)

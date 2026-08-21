@@ -91,6 +91,34 @@ export interface EngineDiagnostic {
   warning: boolean;
 }
 
+export interface EngineRlSymbol {
+  kind: "enum" | "case" | "field";
+  range: EngineRange;
+  name: string;
+  enumName: string;
+  /** The declaration in rl syntax — the hover's code block. */
+  signature: string;
+  /** One sentence about what it is and where it came from. */
+  detail: string;
+  definition: EngineLocation | null;
+}
+
+/** One thing rl has to say about a range that is not an error. */
+export interface EngineRlHint {
+  /** What kind of hint it is — switch on this, not on the message. */
+  kind: "unreachableArm";
+  range: EngineRange;
+  message: string;
+}
+
+export interface EngineRlCompletion {
+  label: string;
+  kind: "case" | "field" | "wildcard";
+  detail: string;
+  /** True when an arm of this match already covers the case. */
+  covered: boolean;
+}
+
 export interface EngineSemanticToken {
   range: EngineRange;
   /** An LSP standard token-type string ("keyword", "enumMember", ...). */
@@ -401,6 +429,62 @@ export async function semanticTokens(
     onError,
   );
   return result?.tokens ?? null;
+}
+
+/** An rl name — an enum, a case tag, a payload field — at a position.
+ *
+ * These three name spaces exist only in `.rl` source (an enum declaration
+ * lowers to synthesized text, a tag to a string literal, a field to a
+ * destructuring key), so the TypeScript service cannot be asked about them
+ * and the engine answers from the compiler's own declaration table. Like
+ * `semanticTokens` it is text-based and parse-only, so it answers with no
+ * toolchain and in a buffer mid-edit; `null` means "not an rl name here",
+ * and the caller falls through to the service. */
+export function rlSymbol(
+  compiler: string,
+  path: string,
+  text: string,
+  position: EnginePosition,
+  onError?: (message: string) => void,
+): Promise<EngineRlSymbol | null> {
+  return semantic(compiler, "rlSymbol", { path, text, position }, onError);
+}
+
+/** What can be written at a pattern position: case tags, payload field
+ * names. Empty when the position is not one rl owns — the service's own
+ * completions are merged in by the caller. */
+export async function rlCompletions(
+  compiler: string,
+  path: string,
+  text: string,
+  position: EnginePosition,
+  onError?: (message: string) => void,
+): Promise<EngineRlCompletion[]> {
+  const result = await semantic<{ items: EngineRlCompletion[] }>(
+    compiler,
+    "rlCompletions",
+    { path, text, position },
+    onError,
+  );
+  return result?.items ?? [];
+}
+
+/** What rl has to say about a buffer that is not an error — today, the
+ * arms an earlier arm already covers. Parse-only, so it answers without a
+ * TypeScript toolchain; empty when there is nothing to say. */
+export async function rlHints(
+  compiler: string,
+  path: string,
+  text: string,
+  onError?: (message: string) => void,
+): Promise<EngineRlHint[]> {
+  const result = await semantic<{ hints: EngineRlHint[] }>(
+    compiler,
+    "rlHints",
+    { path, text },
+    onError,
+  );
+  return result?.hints ?? [];
 }
 
 export async function tsDiagnostics(

@@ -6,6 +6,11 @@
 //! when one is not there, exactly as the `tsc`/`node` tests do; the guard
 //! mirrors the compiler's own resolution rules so a skip means "no
 //! toolchain", never "the check quietly did nothing".
+//!
+//! Where a toolchain is *supposed* to be there — CI installs one — set
+//! `RLC_REQUIRE_TSGO=1` and a missing one fails the suite instead of
+//! skipping it. That is the whole of the CI guard: a skipped suite is
+//! green in every other way, so something has to make it red.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,6 +30,23 @@ enum Toolchain {
 }
 
 fn toolchain() -> Option<Toolchain> {
+    match resolve() {
+        Some(found) => Some(found),
+        // A caller that asked for no skipping gets an error, not a pass.
+        None if required() => panic!(
+            "RLC_REQUIRE_TSGO is set but no TypeScript 7 toolchain was found \
+             (RLC_TSGO_API, RLC_TSGO_ROOT, or a built ../typescript-go)"
+        ),
+        None => None,
+    }
+}
+
+/// True when the caller has declared that a toolchain must be present.
+fn required() -> bool {
+    std::env::var_os("RLC_REQUIRE_TSGO").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+fn resolve() -> Option<Toolchain> {
     // rlc's own order: a directly named client wins over any checkout, so
     // the guard has to agree or a test will run against a compiler the
     // guard did not vet.
@@ -35,8 +57,15 @@ fn toolchain() -> Option<Toolchain> {
         Some(root) if !root.is_empty() => PathBuf::from(root),
         _ => PathBuf::from("../typescript-go"),
     };
-    (root.join(BIN_IN_TREE).exists() && root.join(API_IN_TREE).exists())
-        .then_some(Toolchain::Tree(root))
+    if !(root.join(BIN_IN_TREE).exists() && root.join(API_IN_TREE).exists()) {
+        return None;
+    }
+    // Absolute, always: every case runs rlc with its working directory in
+    // a temporary project, where the sibling-checkout default would point
+    // somewhere else entirely. A relative root that resolves here and not
+    // there fails the case rather than skipping it, which is the one thing
+    // this guard exists to prevent.
+    Some(Toolchain::Tree(root.canonicalize().unwrap_or(root)))
 }
 
 /// Any resolvable compiler — enough to check.
@@ -362,12 +391,13 @@ fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
 }
 
 #[test]
-fn a_diagnostic_on_generated_code_still_names_the_construct_it_came_from() {
+fn a_diagnostic_on_generated_code_is_restated_in_rls_words() {
     let root = require_tsgo!();
     // A plain TypeScript enum is not an rl enum, so matching on one lowers
     // to a `.kind` switch over a value that has no `kind`. The error is
-    // real; what matters here is that it is reported in the `.rl` file, at
-    // the construct rlc generated the code for, and labelled as generated.
+    // real and it is the user's, but the text TypeScript points at is code
+    // rlc wrote — so rlc says what the construct meant, at the construct
+    // (TASK-104), with TypeScript's own sentence alongside for checking.
     let dir = project(&[(
         "src/ts_enum.rl",
         "export enum Plain { A, B }\n\
@@ -377,12 +407,16 @@ fn a_diagnostic_on_generated_code_still_names_the_construct_it_came_from() {
     )]);
     let out = check(&dir, &root);
     assert!(
-        out.contains("src/ts_enum.rl:3:") && out.contains("ts(2339)"),
-        "reported in the .rl file: {out}"
+        out.contains("src/ts_enum.rl:3:10:"),
+        "reported at the `match` keyword in the .rl file: {out}"
     );
     assert!(
-        out.contains("(in code rlc generated for this construct)"),
-        "and labelled as generated rather than as the user's own line: {out}"
+        out.contains("match on a tag pattern needs a value with a `kind` discriminant"),
+        "in rl's words: {out}"
+    );
+    assert!(
+        out.contains("ts2339: Property 'kind' does not exist on type 'Plain'."),
+        "with the original alongside: {out}"
     );
 }
 
@@ -760,5 +794,157 @@ fn a_type_error_is_reported_at_its_position_in_the_rl_source() {
     assert!(
         out.starts_with("src/bad.rl:2:9: ts(2322):") || out.contains("bad.rl:2:9: ts(2322):"),
         "the diagnostic belongs at the declaration in the .rl file: {out}"
+    );
+}
+
+#[test]
+fn typed_exhaustiveness_sees_a_hole_inside_a_payload() {
+    let root = require_tsgo!();
+    // The checker names the scrutinee's constituents; rl runs its own
+    // exhaustiveness algorithm over that alphabet, so a nested pattern's
+    // hole is seen on this path too (TASK-108). Before, the typed path
+    // asked only "which top-level tags are missing?" and answered nothing
+    // here, while `--check` reported the hole.
+    let dir = project(&[(
+        "src/nest.rl",
+        "enum Inner { Yes(n: number), No }\n\
+         enum Outer { Wrap(inner: Inner), Bare }\n\
+         declare const o: Outer;\n\
+         export const a = match (o) { Wrap(inner: Yes(n)) => n, Bare => -1 };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("match is not exhaustive: missing \"Wrap(inner: No())\""),
+        "the typed path sees the payload hole: {out}"
+    );
+}
+
+#[test]
+fn typed_exhaustiveness_still_answers_from_the_narrowed_type() {
+    let root = require_tsgo!();
+    // The point of asking the checker at all: a case an earlier test
+    // removed is not demanded back. `--check`, which knows only the
+    // declaration, does report it.
+    let dir = project(&[(
+        "src/narrow.rl",
+        "enum Shape { Circle(radius: number), Point }\n\
+         export function f(x: Shape): number {\n\
+         \x20 if (x.kind === \"Point\") return 0;\n\
+         \x20 return match (x) { Circle(radius) => radius };\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        !out.contains("not exhaustive"),
+        "Point is already excluded here: {out}"
+    );
+}
+
+#[test]
+fn a_hand_written_payload_union_is_named_by_the_checker() {
+    let root = require_tsgo!();
+    // The payload's declared type is a hand-written union, so no rl
+    // declaration describes it — the one thing the declaration table can
+    // never answer. The emitted condition tests that payload at exactly
+    // its type, and asking there names the column's alphabet (TASK-109).
+    let dir = project(&[(
+        "src/opaque.rl",
+        "type Inner = { kind: \"Yes\"; n: number } | { kind: \"No\" };\n\
+         enum Outer { Wrap(inner: Inner), Bare }\n\
+         declare const o: Outer;\n\
+         export const a = match (o) { Wrap(inner: Yes(n)) => n, Bare => -1 };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("match is not exhaustive: missing \"Wrap(inner: No())\""),
+        "the checker names the payload's constituents: {out}"
+    );
+}
+
+#[test]
+fn a_hand_written_payload_union_fully_covered_is_exhaustive() {
+    let root = require_tsgo!();
+    // The other half of the same answer: covering the payload's cases
+    // makes the match exhaustive, and nothing is reported. Before the
+    // payload question existed this stayed quiet too — but only because rl
+    // refused to guess, which is a different thing from knowing.
+    let dir = project(&[(
+        "src/opaque_full.rl",
+        "type Inner = { kind: \"Yes\"; n: number } | { kind: \"No\" };\n\
+         enum Outer { Wrap(inner: Inner), Bare }\n\
+         declare const o: Outer;\n\
+         export const a = match (o) {\n\
+         \x20 Wrap(inner: Yes(n)) => n,\n\
+         \x20 Wrap(inner: No()) => 0,\n\
+         \x20 Bare => -1,\n\
+         };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(!out.contains("not exhaustive"), "covered: {out}");
+}
+
+#[test]
+fn typed_exhaustiveness_resolves_a_payload_declared_in_another_module() {
+    let root = require_tsgo!();
+    // The nested column is resolved from declarations, so the imported
+    // ones have to be collected on this path too — the same 1-hop
+    // collection the default path does.
+    let dir = project(&[
+        ("src/token.rl", "export enum Tok { Num(n: number), Eof }\n"),
+        (
+            "src/line.rl",
+            "import { Tok } from \"./token.rl\";\n\
+             enum Line { Head(t: Tok), Blank }\n\
+             declare const l: Line;\n\
+             export const a = match (l) { Head(t: Num(n)) => n, Blank => 0 };\n",
+        ),
+    ]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("match is not exhaustive: missing \"Head(t: Eof())\""),
+        "the imported payload enum is resolved: {out}"
+    );
+}
+
+#[test]
+fn typed_exhaustiveness_covers_tuple_matches_too() {
+    let root = require_tsgo!();
+    // A tuple match asks one question per position. Before, it asked none:
+    // the typed path skipped tuple matches entirely, so the product was
+    // checked only by the default path's declaration table (TASK-111).
+    let dir = project(&[(
+        "src/tuple.rl",
+        "enum Dir { North(dx: number), South }\n\
+         enum Speed { Fast(v: number), Slow }\n\
+         declare const d: Dir;\n\
+         declare const s: Speed;\n\
+         export const n = match (d, s) { (North(dx), Fast(v)) => dx + v, (South, _) => 0 };\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        out.contains("match is not exhaustive: missing (North, Slow)"),
+        "the missing combination is named: {out}"
+    );
+}
+
+#[test]
+fn a_tuple_position_the_checker_narrowed_is_not_demanded_back() {
+    let root = require_tsgo!();
+    // The reason to ask at all: `South` is impossible at the match, so the
+    // combinations that need it are not missing. The default path, which
+    // knows only the declaration, does report them.
+    let dir = project(&[(
+        "src/narrowed_tuple.rl",
+        "enum Dir { North(dx: number), South }\n\
+         enum Speed { Fast(v: number), Slow }\n\
+         export function f(d: Dir, s: Speed): number {\n\
+         \x20 if (d.kind === \"South\") return 0;\n\
+         \x20 return match (d, s) { (North(dx), Fast(v)) => dx + v, (North(dx), Slow) => dx };\n\
+         }\n",
+    )]);
+    let out = check(&dir, &root);
+    assert!(
+        !out.contains("not exhaustive"),
+        "South is impossible: {out}"
     );
 }

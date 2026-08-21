@@ -6,7 +6,201 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`result` 바인딩에서 `const`를 빠뜨리면 rl 위치로 보고한다** (TASK-112).
+  `y <- g();`는 그동안 조용히 `y < -g();` 비교로 통과하거나(다른 바인딩이 있는
+  블록), 생성물 좌표를 가리키는 verify 에러가 됐다.
+
+  ```
+  rlc: file.rl:3:3: `result` binding is missing its declaration keyword
+       (write `const <binding> <- <expression>;`, or `let`/`var`)
+  ```
+
+  - 보고하는 곳은 **그 텍스트가 TypeScript일 수 없다는 것이 확정된 곳**뿐이다:
+    이미 rl로 판별된 블록 안, 또는 `result {`가 식이 시작하는 자리에 같은 줄로
+    올 때. `function f(): result { a <- b; }`처럼 유효한 TS는 그대로 통과한다.
+  - 진짜 비교를 쓰려면 `<`와 `-` 사이에 공백을 둔다.
+
+- **소진성 메시지의 witness가 그대로 붙여 넣을 수 있는 패턴이 됐다** (TASK-110).
+  중첩 자리의 유닛 케이스가 괄호 없이 렌더돼(`Wrap(inner: No)`) 그대로 암으로
+  옮기면 **매치가 아니라 별칭**이 되던 것을 고쳤다(`Wrap(inner: No())`).
+
+  - VS Code의 "빠진 암 추가" quick fix가 이 문자열을 그대로 삽입하므로,
+    컴파일은 되지만 `Wrap` 전체를 잡아먹는 arm이 들어가고 있었다.
+  - 메시지가 "패턴"이라고 말하는 이상 붙여 넣어 동작해야 한다는 것을 계약
+    테스트로 고정했다(`a_witness_can_be_pasted_back_as_an_arm`).
+
+### Added
+
+- **도달 불가 arm이 에디터 힌트로 나온다** (TASK-113). usefulness 알고리즘이
+  이미 계산하던 죽은 암(`Coverage::unreachable`)이 엔진의 새 표면
+  `rlHints`로 나오고, VS Code 확장이 `Hint` + `Unnecessary` 태그로 흐리게
+  표시한다.
+
+  ```rl
+  const area = match (shape) {
+    Circle(radius) => radius,
+    Rect(width) => width,
+    Circle(radius: r) => r,   // ← 흐리게: 앞선 암이 이미 잡는다
+  };
+  ```
+
+  - **에러가 아니다.** Rust에서 도달 불가 패턴은 린트이고 rl에는 경고 계층이
+    없다 — 에러로 만들면 지금 컴파일되는 프로그램을 거절하게 된다. CLI는
+    힌트를 인쇄하지 않는다. sema의 좁은 중복 암 에러는 그대로다.
+  - `rlSymbol`·`rlCompletions`처럼 **파싱만으로** 답하므로 TypeScript 툴체인이
+    없어도, 저장하지 않은 버퍼에서도 나온다.
+
+- **튜플 match의 소진성도 타입 기준으로 판정된다** (TASK-111). `--check-types`가
+  튜플 match의 **위치마다** 체커에게 그 자리의 구성원을 묻고, 단일 match와 같은
+  usefulness 알고리즘으로 곱집합을 판정한다.
+
+  ```rl
+  enum Dir { North(deg: number), South(deg: number) }
+  enum Speed { Slow(v: number), Fast(v: number) }
+  const label = match (d, s) {
+    (North, Slow) => "ns",
+    (North, Fast) => "nf",
+    (South, Fast) => "sf",
+  };
+  // rlc --check-types → missing (North, Slow) 형태의 조합으로 보고
+  ```
+
+  - 좁혀진 타입은 되묻지 않는다: 앞에서 `if (d.kind === "South") return 0;`으로
+    한 위치를 좁혀 두면 그 조합은 더는 요구되지 않는다.
+  - 어떤 암도 태그를 쓰지 않은 위치는 `_`로 남는다 — 사용자가 하지도 않은
+    구분으로 조합이 폭발하지 않는다.
+  - 조합 witness는 따옴표 없이 `(North, Slow)`로 렌더돼 그대로 암으로 붙여 넣을
+    수 있다(TASK-110의 계약과 같다).
+
+- **중첩 열의 알파벳도 체커가 답한다** (TASK-109). 페이로드의 타입이 rl 선언과
+  무관해도(손으로 쓴 유니언 등) 안쪽 소진성이 검사된다.
+
+  ```rl
+  type Inner = { kind: "Yes"; n: number } | { kind: "No" };
+  enum Outer { Wrap(inner: Inner), Bare }
+  const a = match (o) { Wrap(inner: Yes(n)) => n, Bare => -1 };
+  // rlc --check-types → missing "Wrap(inner: No())"
+  ```
+
+  - 중첩 패턴이 방출하는 조건(`$rl_m.inner.kind === "Yes"`)의 **필드 이름**
+    자리를 물어 그 열의 구성원을 얻는다. 방출된 바이트는 그대로다(길이 0 마크).
+  - 이것이 rl이 원리상 알 수 없는 유일한 것이었다 — 필드의 선언 타입은
+    텍스트일 뿐이고, 그 타입의 구성원은 TypeScript만 안다.
+
+- **typed 경로의 소진성이 중첩 패턴 안쪽까지 본다** (TASK-108). 체커가
+  스크루티니 타입의 **구성원 목록**을 답하고, 소진성 계산은 기본 경로와 **같은
+  usefulness 알고리즘**이 한다 — 한 알고리즘, 더 나은 오라클.
+
+  ```
+  before  rlc --check       → missing "Wrap(inner: No())"
+          rlc --check-types → (침묵)
+  after   둘 다 같은 답
+  ```
+
+  - 좁혀진 타입 기준이라는 점은 그대로다(앞선 가드가 제거한 케이스는 요구하지
+    않는다).
+  - 알파벳을 알아내지 못한 자리의 witness는 typed 경로에서 **보고하지 않는다** —
+    거기서는 체커에게 묻는 것이 정직한 답이고, 그 질문은 아직 하지 않는다.
+
+- **에디터가 엔진의 rl 표면을 쓴다** (TASK-107). VS Code 서버의 hover·definition·
+  rename·완성이 `rlSymbol`/`rlCompletions`를 호출하고, `analysis.ts`의 해석
+  재구현(`symbolAt`·`armContextAt`·`inferEnum`·`armTags`·`matchBodyAt`·
+  `enumSignature`)이 삭제됐다.
+
+  - `if let`·let-else·중첩 패턴에서 hover·정의 이동·완성이 **처음으로** 동작한다.
+  - 케이스와 이름이 같은 지역 변수가 enum 케이스로 hover되던 오탐이 사라졌다.
+  - 규칙이 하나가 됐다 — 이전의 정규식 구현은 컴파일러와 다른 후보 선택 규칙을
+    갖고 있었다.
+
+- **패턴 자리 자동완성** (TASK-106). 케이스 태그와 페이로드 필드 이름은 방출
+  TypeScript에 존재하지 않아 체커가 완성할 수 없다. 이제 rl이 답한다 —
+  `rlc --server`의 `rlCompletions`, 라이브러리의 `engine::rl_completions_at`.
+
+  - match 암(이미 쓴 케이스는 `covered`로 표시), **`if let` 뒤**, 패턴 괄호 안의
+    **필드 이름**(match·let-else·`if let` 모두), `Tag(field: ` 뒤의 **중첩 태그**.
+  - 자리 판정은 **토큰 스트림**으로 한다 — 완성이 필요한 순간은 구문이 아직
+    파싱되지 않는 순간이므로, 파서에 기대면 정작 그때 침묵한다.
+
+- **rl 이름의 semantic 표면이 엔진에 생겼다** (TASK-105). enum 이름·케이스
+  태그·페이로드 필드는 방출 TypeScript에 존재하지 않아(선언은 매핑 없는 합성
+  텍스트, 태그는 문자열 리터럴, 필드는 구조 분해 키) 체커에게 물을 수 없다.
+  이제 rl이 직접 답한다 — `rlc --server`의 `rlSymbol`, 라이브러리의
+  `engine::rl_symbol_at`.
+
+  - hover 서명과 정의 위치를 `match`뿐 아니라 **let-else·`if let`·중첩 패턴**
+    에서도 답한다(에디터의 기존 구현은 match 본문만 알았다).
+  - **체커에게 물을 수 있는 자리에는 답하지 않는다.** `Shape.Circle(1)` 같은
+    사용처나 타입 주석은 평범한 TypeScript이므로 서비스가 답한다 — 케이스와
+    이름이 같은 지역 변수가 enum 케이스로 hover되던 오탐이 사라진다.
+  - 툴체인도 프로젝트도 필요 없다(`semanticTokens`와 같은 가용성).
+  - 공개 API: `FieldSymbol::offset`, `PatternAnalyses::resolved`,
+    `PatternAnalyses::declarations`.
+
+- **생성된 코드에서 난 타입 에러를 rl의 말로 옮긴다** (TASK-104). 사용자 코드가
+  잘못돼 tsc가 rlc의 글루에서 에러를 내면, 이제 그 구문의 위치에서 rl의 문안으로
+  보고한다.
+
+  ```
+  before: errty.ts(7,57): error TS2322: Type 'Err<string>' is not assignable to ...
+  after:  rlc: f.rl:2:13: the `Err` this `try` propagates does not fit the enclosing
+               function's return type — ... (ts2322: Type 'Err<string>' is ...)
+  ```
+
+  - 새 emit 산출물 `EmitAnchor` — 각 구문이 쓴 글루의 출력 범위와 그 구문의
+    소스 위치. `EmitMapping`과 **분리된 단방향** 자료다: 진단만 소비하고
+    navigation·rename은 절대 글루로 들어가지 않는다.
+  - 옮기는 대상은 `(구문, TS 코드)` **화이트리스트**다. 표에 없으면 옮기지 않고
+    그대로 전달한다. 원문은 항상 괄호 안에 함께 실린다.
+  - `match`를 TS `enum` 위에 쓴 경우도 이 경로로 rl 진단이 된다
+    ([TASK-100](docs/tasks/TASK-100-ts-enum-match-diagnostic.md)).
+
+- **소진성이 중첩 패턴 안쪽까지 검사된다** (TASK-103). 계산이 태그 집합의
+  곱집합에서 rustc가 쓰는 **usefulness 알고리즘**(Maranget)으로 바뀌었다.
+
+  ```rl
+  const a = match (r) {
+    Ok(value: Some(value: v)) => v,
+    Ok(value: None()) => 0,
+    Err(error) => -1,
+  };
+  ```
+
+  - 이전에는 중첩 패턴 arm이 "아무것도 커버하지 못한다"고 취급되어 위 코드처럼
+    **실제로 소진된 match가 거절**됐다(`missing "Ok"`). 이제 통과한다.
+  - 빠진 것은 태그가 아니라 **패턴**으로 지목된다 — 그대로 arm으로 붙여넣을 수
+    있다: `missing "Ok(value: None())"`, `missing "Wrap(inner: No())"`.
+  - 안쪽 위치의 enum은 필드의 선언된 타입으로, 그것이 enum을 지목하지 않으면
+    (제네릭 페이로드 `T`) 그 자리에 쓰인 패턴들로 정한다 — match의 스크루티니를
+    arm 태그로 정하는 것과 같은 규칙이다.
+  - 도달 불가 arm도 같은 재귀가 답하지만 **보고하지 않는다**: rl에는 경고 계층이
+    없어 에러로 만들면 지금 컴파일되는 프로그램이 깨진다. 기존 중복 arm 검사는
+    그대로다.
+
+- **패턴의 이름 해석** (TASK-102). 패턴의 케이스 태그와 필드 이름을 선언에
+  대조하고, 오타로 보이면 rlc가 위치와 함께 보고한다 — `match`(튜플·중첩 포함),
+  let-else, `if let`이 같은 규칙을 쓴다.
+
+  ```
+  rlc: shape.rl:2:23: enum Shape has no case `Circel` — did you mean `Circle`?
+  rlc: shape.rl:5:29: enum Shape: case `Circle` has no field `radiuz` — did you mean `radius`?
+  ```
+
+  - 이전에는 이런 오타가 rlc를 그냥 통과해 **생성된 코드 위에서** tsc 에러
+    (`TS2678`/`TS2367`/`TS2339`)로 나타났고, 태그 오타의 경우 후보 표에서 enum이
+    사라져 **그 match의 소진성 검사가 조용히 꺼졌다.**
+  - 보고 조건은 "해석 실패"가 아니라 **"고칠 이름을 댈 수 있음"** 이다. 태그
+    패턴은 손으로 쓴 `kind` 유니언에도 쓸 수 있으므로(`language.md` §3.2),
+    선언 표에 없는 태그가 곧 오류는 아니다. 오타가 아닌 틀린 이름은 타입이
+    필요하므로 검사하지 않는다 ([§3.10](docs/reference/language.md)).
+
 ### Changed
+
+- **공개 API: `match_analyses` → `pattern_analyses`, `MatchAnalyses` →
+  `PatternAnalyses`** (TASK-102). 분석이 match 밖의 패턴 사이트(let-else,
+  `if let`)도 담게 되어 이름을 내용에 맞췄다. 새 필드는 `sites`(사이트별
+  subject와 바인딩 타입)와 `unresolved`(이름 해석 답)다.
 
 - **`andThen`이 에러 타입을 유니언으로 누적한다** (TASK-066). 이어 붙이는
   함수가 자기 방식으로 실패할 수 있다는 사실이 타입에 반영된다:

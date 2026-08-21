@@ -15,7 +15,18 @@
 
 use std::borrow::Cow;
 
-use crate::{EmitMapping, ScrutineeTemp};
+use crate::{AnchorKind, EmitAnchor, EmitMapping, PayloadTemp, ScrutineeTemp};
+
+/// What a [`Piece::Mark`] marks — the two things codegen writes that a
+/// type checker can be *asked about*, each paired with the source
+/// construct it stands for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarkKind {
+    /// A `match`'s scrutinee temporary ([`crate::ScrutineeTemp`]).
+    Scrutinee,
+    /// The receiver a nested pattern tests ([`crate::PayloadTemp`]).
+    Payload,
+}
 
 enum Piece<'a> {
     /// Compiler-written glue (IIFE scaffolding, destructurings, labels).
@@ -25,7 +36,12 @@ enum Piece<'a> {
     /// A zero-length note about the *next* byte the rope emits: the name
     /// codegen is about to write stands for the construct at source offset
     /// `src`. Carries no text, so it changes nothing about the output.
-    Mark { src: usize },
+    Mark { src: usize, kind: MarkKind },
+    /// A zero-length note that everything up to the matching [`Piece::Close`]
+    /// is glue one construct wrote ([`EmitAnchor`]). Nests.
+    Open { src: usize, kind: AnchorKind },
+    /// Closes the innermost open anchor.
+    Close,
 }
 
 impl<'a> Piece<'a> {
@@ -33,7 +49,7 @@ impl<'a> Piece<'a> {
         match self {
             Piece::Lit(t) => t,
             Piece::Src { text, .. } => text,
-            Piece::Mark { .. } => "",
+            Piece::Mark { .. } | Piece::Open { .. } | Piece::Close => "",
         }
     }
 
@@ -46,7 +62,7 @@ impl<'a> Piece<'a> {
                 *text = &text[cut..];
                 *src += cut;
             }
-            Piece::Mark { .. } => {}
+            Piece::Mark { .. } | Piece::Open { .. } | Piece::Close => {}
         }
     }
 
@@ -56,7 +72,7 @@ impl<'a> Piece<'a> {
             Piece::Lit(Cow::Borrowed(t)) => *t = &t[..keep],
             Piece::Lit(Cow::Owned(t)) => t.truncate(keep),
             Piece::Src { text, .. } => *text = &text[..keep],
-            Piece::Mark { .. } => {}
+            Piece::Mark { .. } | Piece::Open { .. } | Piece::Close => {}
         }
     }
 }
@@ -84,7 +100,28 @@ impl<'a> Rope<'a> {
     /// Notes that the next thing pushed is the name codegen writes for the
     /// construct at source offset `src`. See [`crate::ScrutineeTemp`].
     pub(crate) fn push_mark(&mut self, src: usize) {
-        self.pieces.push(Piece::Mark { src });
+        self.pieces.push(Piece::Mark {
+            src,
+            kind: MarkKind::Scrutinee,
+        });
+    }
+
+    /// Notes that the next thing pushed is the receiver expression of the
+    /// nested pattern whose tag starts at `src` — the one place a checker
+    /// can be asked what that payload's type admits.
+    pub(crate) fn push_payload_mark(&mut self, src: usize) {
+        self.pieces.push(Piece::Mark {
+            src,
+            kind: MarkKind::Payload,
+        });
+    }
+
+    /// Appends `inner` as one construct's glue: everything it emits belongs
+    /// to the construct at source offset `src` ([`crate::EmitAnchor`]).
+    pub(crate) fn anchored(&mut self, kind: AnchorKind, src: usize, inner: Rope<'a>) {
+        self.pieces.push(Piece::Open { src, kind });
+        self.append(inner);
+        self.pieces.push(Piece::Close);
     }
 
     pub(crate) fn push_src(&mut self, text: &'a str, src: usize) {
@@ -139,7 +176,7 @@ impl<'a> Rope<'a> {
         // front
         let mut front = 0;
         while let Some(first) = self.pieces.get_mut(front) {
-            if matches!(first, Piece::Mark { .. }) {
+            if first.text().is_empty() && !matches!(first, Piece::Lit(_) | Piece::Src { .. }) {
                 front += 1;
                 continue;
             }
@@ -161,7 +198,7 @@ impl<'a> Rope<'a> {
         let mut back = self.pieces.len();
         while back > 0 {
             let last = &mut self.pieces[back - 1];
-            if matches!(last, Piece::Mark { .. }) {
+            if last.text().is_empty() && !matches!(last, Piece::Lit(_) | Piece::Src { .. }) {
                 back -= 1;
                 continue;
             }
@@ -184,13 +221,39 @@ impl<'a> Rope<'a> {
     /// Flattens into the output string, the source↔output mappings, and the
     /// marks codegen left. Adjacent pieces that continue each other in both
     /// coordinate spaces merge into one mapping.
-    pub(crate) fn flatten(self) -> (String, Vec<EmitMapping>, Vec<ScrutineeTemp>) {
+    pub(crate) fn flatten(self) -> Flat {
         let mut out = String::with_capacity(self.len);
         let mut mappings: Vec<EmitMapping> = Vec::new();
         let mut marks: Vec<ScrutineeTemp> = Vec::new();
+        let mut payloads: Vec<PayloadTemp> = Vec::new();
+        let mut anchors: Vec<EmitAnchor> = Vec::new();
+        let mut open: Vec<(usize, usize, AnchorKind)> = Vec::new();
         for piece in &self.pieces {
             match piece {
-                Piece::Mark { src } => marks.push(ScrutineeTemp {
+                Piece::Open { src, kind } => open.push((out.len(), *src, *kind)),
+                Piece::Close => {
+                    if let Some((start, src, kind)) = open.pop() {
+                        // Innermost first: a closing anchor is pushed
+                        // before every anchor still open around it.
+                        anchors.push(EmitAnchor {
+                            out: start,
+                            end: out.len(),
+                            src,
+                            kind,
+                        });
+                    }
+                }
+                Piece::Mark {
+                    src,
+                    kind: MarkKind::Scrutinee,
+                } => marks.push(ScrutineeTemp {
+                    src: *src,
+                    out: out.len(),
+                }),
+                Piece::Mark {
+                    src,
+                    kind: MarkKind::Payload,
+                } => payloads.push(PayloadTemp {
                     src: *src,
                     out: out.len(),
                 }),
@@ -214,6 +277,23 @@ impl<'a> Rope<'a> {
             }
         }
         marks.sort_by_key(|mark| mark.out);
-        (out, mappings, marks)
+        payloads.sort_by_key(|mark| mark.out);
+        Flat {
+            code: out,
+            mappings,
+            scrutinee_temps: marks,
+            payload_temps: payloads,
+            anchors,
+        }
     }
+}
+
+/// A flattened rope: the text, and everything language tooling reads off
+/// the emission.
+pub(crate) struct Flat {
+    pub code: String,
+    pub mappings: Vec<EmitMapping>,
+    pub scrutinee_temps: Vec<ScrutineeTemp>,
+    pub payload_temps: Vec<PayloadTemp>,
+    pub anchors: Vec<EmitAnchor>,
 }

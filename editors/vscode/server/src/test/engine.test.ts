@@ -254,3 +254,42 @@ test("a closed document is the disk's again", { skip }, async () => {
     (await engine.tsDiagnostics(COMPILER, rl)).some((d) => d.code === 2322),
   );
 });
+
+/* Hints need no TypeScript at all — they are the parse-only surface, like
+ * semantic tokens — so they answer wherever rlc itself is available. */
+const skipRlOnly = compilerAvailable() ? false : "rlc not on PATH";
+
+const DEAD_ARM = [
+  "enum Shape {",
+  "  Circle(radius: number),",
+  "  Rect(width: number, height: number),",
+  "}",
+  "",
+  "declare const shape: Shape;",
+  "",
+  "const area = match (shape) {",
+  "  Circle(radius) => radius,",
+  "  Rect(width) => width,",
+  "  Circle(radius: r) => r,",
+  "};",
+  "",
+].join("\n");
+
+test("an unreachable arm comes back as a hint, not a diagnostic", { skip: skipRlOnly }, async () => {
+  const { dir } = workspace();
+  const file = path.join(dir, "src/dead.rl");
+  fs.writeFileSync(file, DEAD_ARM);
+  const hints = await engine.rlHints(COMPILER, file, DEAD_ARM);
+  assert.equal(hints.length, 1, JSON.stringify(hints));
+  assert.equal(hints[0].kind, "unreachableArm");
+  assert.equal(sliceOf(DEAD_ARM, hints[0].range), "Circle(radius: r) => r");
+});
+
+test("a live match has no hints", { skip: skipRlOnly }, async () => {
+  const { dir, rl } = workspace();
+  assert.deepEqual(await engine.rlHints(COMPILER, rl, RENDER), []);
+  const live = path.join(dir, "src/live.rl");
+  const text = DEAD_ARM.replace("  Circle(radius: r) => r,\n", "");
+  fs.writeFileSync(live, text);
+  assert.deepEqual(await engine.rlHints(COMPILER, live, text), []);
+});

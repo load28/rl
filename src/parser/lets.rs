@@ -30,7 +30,7 @@ pub(super) fn parse_let_else<'t>(
     kw_span: crate::ast::Span,
 ) -> Option<(Cursor<'t>, usize, LetElseStmt)> {
     // pattern: `Tag(bindings...)`
-    let (tag, _) = cur.eat_ident()?;
+    let (tag, tag_span) = cur.eat_ident()?;
     if super::is_reserved(tag) {
         return None; // `const enum E { ... }` and friends
     }
@@ -84,6 +84,7 @@ pub(super) fn parse_let_else<'t>(
             keyword_off: kw_span.start,
             kw: cur.parser.src[kw_span.start..kw_span.end].to_string(),
             tag: tag.to_string(),
+            tag_off: tag_span.start,
             bindings,
             expr: cur
                 .parser

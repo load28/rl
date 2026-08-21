@@ -205,6 +205,9 @@ pub(crate) struct ServiceDoc {
     source: String,
     code: String,
     mappings: Vec<EmitMapping>,
+    /// The glue each construct wrote — what a diagnostic landing outside
+    /// every mapping is *about* (`crate::EmitAnchor`).
+    anchors: Vec<crate::EmitAnchor>,
 }
 
 /// A compiled completion probe: the buffer with `$rl_probe` spliced in at
@@ -232,7 +235,7 @@ impl Project {
     /// inside an or-pattern (`A(x) | B(x)`): the emitted destructuring
     /// speaks for every alternative at once, so those spans map to nothing
     /// (mapping them to one alternative would let a rename rewrite that one
-    /// alone). For those, [`crate::match_analyses`] knows the span and the
+    /// alone). For those, [`crate::pattern_analyses`] knows the span and the
     /// alternative it belongs to, and the answer is still the checker's
     /// wherever possible: the alternative is *isolated* — the same
     /// serve-a-stand-in move as the completion probe — so the service sees
@@ -801,14 +804,38 @@ impl Project {
             // render as an invisible squiggle; give it the character it
             // points at.
             let e = if e > s { e } else { s + 1 };
-            let mut message = item["message"].as_str().unwrap_or_default().to_string();
+            let raw = item["message"].as_str().unwrap_or_default().to_string();
+            let code = item["code"].as_u64().unwrap_or(0) as u32;
+            // On glue, rlc says what the construct meant, at the
+            // construct's own keyword — the same table the CLI reports
+            // through, so the two surfaces cannot drift.
+            if !exact
+                && let Some(anchor) = glue_anchor(&doc, start)
+                && let Some(said) = crate::engine::semantics::translate(anchor.kind, code, &raw)
+            {
+                let at = mapper::to_utf16(&doc.source, anchor.src);
+                let range = source_range(&doc.source, at, at + 1);
+                let entry = ServiceDiagnostic {
+                    range,
+                    message: said,
+                    code,
+                    warning: severity == 2,
+                };
+                // One construct's glue can draw several TypeScript errors
+                // that all mean the same rl thing.
+                if !out.contains(&entry) {
+                    out.push(entry);
+                }
+                continue;
+            }
+            let mut message = raw;
             if !exact {
                 message.push_str(" (in code rlc generated for this construct)");
             }
             out.push(ServiceDiagnostic {
                 range: source_range(&doc.source, s, e),
                 message,
-                code: item["code"].as_u64().unwrap_or(0) as u32,
+                code,
                 warning: severity == 2,
             });
         }
@@ -892,11 +919,17 @@ fn serve_one(
     let doc = match session.docs.get(path) {
         Some(doc) if doc.source == text => doc.clone(),
         _ => {
-            let MappedEmit { code, mappings, .. } = crate::emit_mapped(&text);
+            let MappedEmit {
+                code,
+                mappings,
+                anchors,
+                ..
+            } = crate::emit_mapped(&text);
             let doc = Arc::new(ServiceDoc {
                 source: text,
                 code,
                 mappings,
+                anchors,
             });
             session.docs.insert(path.to_path_buf(), doc.clone());
             doc
@@ -957,7 +990,7 @@ fn ts_completions(
 
 /// The source byte a position names — the analysis speaks bytes, the
 /// protocol UTF-16.
-fn source_byte(source: &str, position: Position) -> usize {
+pub(super) fn source_byte(source: &str, position: Position) -> usize {
     mapper::from_utf16(source, u16_offset(source, position))
 }
 
@@ -967,11 +1000,49 @@ fn source_byte(source: &str, position: Position) -> usize {
 /// from the overlays first, as everywhere in the engine. Carried as
 /// [`crate::EnumSymbol`]s because the analysis wants field types, not just
 /// tags.
+/// The analysis of one file as a stand-alone question: imported
+/// declarations come from disk, since no project session is involved.
+/// This is what the parse-only surfaces ([`super::names`]) ask.
+pub(super) fn analyses_for(path: &Path, source: &str) -> crate::PatternAnalyses {
+    analyses_of(&HashMap::new(), path, source)
+}
+
+/// A byte span of `text` as a [`Range`] — the byte↔UTF-16 conversion every
+/// answer crosses on its way out.
+pub(super) fn span_range(text: &str, start: usize, end: usize) -> Range {
+    source_range(
+        text,
+        mapper::to_utf16(text, start),
+        mapper::to_utf16(text, end),
+    )
+}
+
 fn analyses_of(
     overlays: &HashMap<PathBuf, String>,
     path: &Path,
     source: &str,
-) -> crate::MatchAnalyses {
+) -> crate::PatternAnalyses {
+    let externs = externs_of(path, source, &|target| {
+        overlays
+            .get(target)
+            .cloned()
+            .or_else(|| std::fs::read_to_string(target).ok())
+    });
+    crate::pattern_analyses(source, &externs)
+}
+
+/// The enum declarations a file's direct relative `.rl` imports bring into
+/// scope, under the names the imports give them — the same 1-hop
+/// collection the CLI does for sema.
+///
+/// `read` decides what "the imported file's text" means: an editor prefers
+/// the open buffer, a batch pass the file on disk. The rule the *names*
+/// follow is the same either way, which is why it lives here once.
+pub(super) fn externs_of(
+    path: &Path,
+    source: &str,
+    read: &dyn Fn(&Path) -> Option<String>,
+) -> Vec<crate::EnumSymbol> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut externs: Vec<crate::EnumSymbol> = Vec::new();
     for import in crate::rl_imports(source) {
@@ -982,12 +1053,8 @@ fn analyses_of(
             Ok(target) => target,
             Err(_) => continue, // unresolvable — tsc's TS2307, not ours
         };
-        let text = match overlays.get(&target) {
-            Some(text) => text.clone(),
-            None => match std::fs::read_to_string(&target) {
-                Ok(text) => text,
-                Err(_) => continue,
-            },
+        let Some(text) = read(&target) else {
+            continue;
         };
         let decls: Vec<crate::EnumSymbol> = crate::enum_symbols(&text)
             .into_iter()
@@ -1012,7 +1079,7 @@ fn analyses_of(
             crate::RlImportNames::None => unreachable!("skipped above"),
         }
     }
-    crate::match_analyses(source, &externs)
+    externs
 }
 
 /// The isolated-alternative stand-in: the source with `binding`'s whole
@@ -1131,11 +1198,17 @@ fn serve_doc_only(
     match session.docs.get(path) {
         Some(doc) if doc.source == text => Some(doc.clone()),
         _ => {
-            let MappedEmit { code, mappings, .. } = crate::emit_mapped(&text);
+            let MappedEmit {
+                code,
+                mappings,
+                anchors,
+                ..
+            } = crate::emit_mapped(&text);
             let doc = Arc::new(ServiceDoc {
                 source: text,
                 code,
                 mappings,
+                anchors,
             });
             session.docs.insert(path.to_path_buf(), doc.clone());
             Some(doc)
@@ -1173,6 +1246,15 @@ fn from_service_span(doc: &ServiceDoc, start: usize, end: usize) -> Option<(usiz
 /// Unlike navigation and rename, diagnostics on generated glue are still
 /// useful: the CLI reports them at the construct that produced the glue, so
 /// the language service follows the same policy.
+/// The construct whose glue a served-text UTF-16 offset falls in.
+fn glue_anchor(doc: &ServiceDoc, utf16_start: usize) -> Option<crate::EmitAnchor> {
+    let out = mapper::from_utf16(&doc.code, utf16_start);
+    doc.anchors
+        .iter()
+        .find(|a| a.out <= out && out < a.end)
+        .copied()
+}
+
 fn diagnostic_source_span(
     doc: &ServiceDoc,
     start: usize,
@@ -1444,7 +1526,7 @@ mod tests {
     fn isolating_an_alternative_maps_its_binding_into_narrowed_output() {
         let src =
             "enum E { A(x: string), B(x: number) }\nconst v = match (e) { A(x) | B(x) => x };\n";
-        let analyses = crate::match_analyses(src, &[]);
+        let analyses = crate::pattern_analyses(src, &[]);
         let b_x = src.find("B(x)").unwrap() + 2;
         let binding = analyses.binding_at(b_x).unwrap().clone();
         let (code, offset) = isolate_alternative(src, &binding, b_x).unwrap();
@@ -1469,7 +1551,7 @@ mod tests {
     fn declared_hover_names_the_constructor_and_its_type() {
         let src =
             "enum E { A(x: string), B(x: number) }\nconst v = match (e) { A(x) | B(x) => x };\n";
-        let analyses = crate::match_analyses(src, &[]);
+        let analyses = crate::pattern_analyses(src, &[]);
         let binding = analyses.binding_at(src.find("B(x)").unwrap() + 2).unwrap();
         let range = source_range(src, 0, 1);
         let info = declared_binding_hover(binding, range).unwrap();
@@ -1482,7 +1564,7 @@ mod tests {
 
         // An unresolved subject answers nothing rather than guessing.
         let unknown = "const v = match (e) { What(x) | Ever(x) => x };\n";
-        let analyses = crate::match_analyses(unknown, &[]);
+        let analyses = crate::pattern_analyses(unknown, &[]);
         let binding = analyses
             .binding_at(unknown.find("What(x)").unwrap() + 5)
             .unwrap();

@@ -49,7 +49,7 @@
 //!   [`crate::analysis`]; what is here is the reporting.
 
 use crate::ExternEnum;
-use crate::analysis::{Coverage, CoveredEnum, Origin, has_nested};
+use crate::analysis::{Coverage, CoveredEnum, NameKind, Origin, has_nested};
 use crate::ast::*;
 use crate::error::RlError;
 use crate::verify;
@@ -69,10 +69,43 @@ pub(crate) fn check(
 ) -> Result<(), RlError> {
     let mut checker = Checker { verify };
     checker.visit_program(program, Ctx::Top)?;
+    // One analysis, two reports. Resolution comes first — a pattern whose
+    // names do not resolve has no exhaustiveness question worth asking,
+    // and answering both at once would bury the cause under its effect.
+    let analyses = crate::analysis::coverage_analyses(program, externs);
+    report_resolution(&analyses)?;
     if defer_to_checker {
         return Ok(());
     }
-    report_coverage(program, externs)
+    report_coverage(&analyses)
+}
+
+/// Turns [`crate::analysis`]'s resolution answer into positioned rl
+/// errors, in source order.
+///
+/// Every entry the analysis produced is an error: the *decision* whether
+/// an unresolved name is reportable belongs to the analysis (which is what
+/// keeps one rule in one place), and it only produces entries it can name
+/// a replacement for. This function is the wording.
+fn report_resolution(analyses: &crate::analysis::PatternAnalyses) -> Result<(), RlError> {
+    let Some(unresolved) = analyses.unresolved.first() else {
+        return Ok(());
+    };
+    let described = describe(&CoveredEnum {
+        name: unresolved.enum_name.clone(),
+        origin: unresolved.origin.clone(),
+    });
+    let message = match (&unresolved.kind, &unresolved.tag) {
+        (NameKind::Field, Some(tag)) => format!(
+            "{described}: case `{tag}` has no field `{}` — did you mean `{}`?",
+            unresolved.name, unresolved.suggestion
+        ),
+        _ => format!(
+            "{described} has no case `{}` — did you mean `{}`?",
+            unresolved.name, unresolved.suggestion
+        ),
+    };
+    Err(RlError::at(unresolved.start, message))
 }
 
 struct Checker {
@@ -187,6 +220,14 @@ impl Checker {
                 "`result` block could not be parsed here (every binding is \
                  `const <binding> <- <expression>;`, and the block must end with an \
                  expression)"
+                    .to_string(),
+            ));
+        }
+        if let Some(&off) = program.result_missing_kw.first() {
+            return Err(RlError::at(
+                off,
+                "`result` binding is missing its declaration keyword \
+                 (write `const <binding> <- <expression>;`, or `let`/`var`)"
                     .to_string(),
             ));
         }
@@ -574,8 +615,7 @@ impl Checker {
 /// message a file produces does not depend on how the two kinds interleave.
 /// A tuple match always has at least two scrutinees (the parser requires
 /// the comma), so one position means a single match.
-fn report_coverage(program: &Program, externs: &[ExternEnum]) -> Result<(), RlError> {
-    let analyses = crate::analysis::coverage_analyses(program, externs);
+fn report_coverage(analyses: &crate::analysis::PatternAnalyses) -> Result<(), RlError> {
     let uncovered: Vec<(usize, &Coverage)> = analyses
         .matches
         .iter()
@@ -615,10 +655,7 @@ fn report_coverage(program: &Program, externs: &[ExternEnum]) -> Result<(), RlEr
         let combinations: Vec<String> = coverage
             .missing
             .iter()
-            .map(|row| {
-                let parts: Vec<&str> = row.iter().map(|t| t.as_deref().unwrap_or("_")).collect();
-                format!("({})", parts.join(", "))
-            })
+            .map(|row| format!("({})", row.pattern.join(", ")))
             .collect();
         let shown = if combinations.len() > 4 {
             format!(

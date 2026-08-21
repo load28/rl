@@ -5,6 +5,7 @@ rl = TypeScript + 7 constructs + 1 binding modifier; `rlc` compiles `.rl` → pl
 CONTRACTS:
 - Every valid TS file is a valid `.rl` file. rlc transforms only text parsing COMPLETELY as an rl construct; all else passes through byte-for-byte.
 - Output is plain TS (`kind`-tagged unions, switch/if chains), no runtime lib, no type tricks. rl-level errors: `rlc: file:line:col: msg`. Type errors in pass-through code: tsc's job.
+- Type errors that tsc raises *inside code rlc generated* (e.g. `try` on a non-Result, `match` on a plain TS enum) are restated by rlc in rl's words AT THE CONSTRUCT, with the original in parentheses: `` `try` needs a `Result` — this expression is not one (ts2339: ...) ``. Only a whitelist of (construct, TS code) pairs is restated; anything else passes through with `(in code rlc generated for this construct)`.
 - TRAP: a slightly-wrong rl construct (missing `;`, reserved-word tag, unparenthesized ternary) is NOT an rl error — it passes through, then tsc fails on raw `match`/`try` text in output. If output contains rl syntax verbatim → your syntax didn't fully parse. Exceptions: malformed `if let` and `|>` DO error with location (impossible in valid TS).
 - Identifiers inside rl constructs: ASCII `[A-Za-z_$][A-Za-z0-9_$]*` only. TS reserved words (new, default, if, in, of, static, class, ...) can't be tags/fields/bindings — construct silently passes through. `.tsx` unsupported.
 
@@ -36,9 +37,10 @@ const area = match (shape) {
 - `_` arm must be LAST.
 - Literal patterns: string/number/boolean literals match the scrutinee VALUE (`===`), e.g. `match (dir) { "north" => "N", _ => "?" }`. NEVER mix tag and literal patterns in one match (compile error); `_` works in both. See "literal match" below.
 - or-pattern: `A | B => body` (never `||`); all alternatives must bind same (field,name) set.
-- guard: `Some(v) if v > 0 => v`; guard false → falls to next arm; guarded arms may repeat a tag; re-matching a tag already covered by an unguarded arm = duplicate-arm error.
+- guard: `Some(v) if v > 0 => v`; guard false → falls to next arm; guarded arms may repeat a tag; re-matching a tag already covered by an unguarded arm = duplicate-arm error. A dead arm the duplicate rule misses (nested pattern or tuple combination already covered) is NOT an error — it compiles, and the editor dims it (engine `rlHints`).
 - nested: `Ok(value: Some(v)) => v`; inner UNIT case needs parens `field: None()` (`field: name` = alias); no combining with or-patterns; same binding name twice in a pattern = error (alias one); inner mismatch falls through.
-- Exhaustiveness: match without `_` is checked; missing case = compile error. Enum resolution: local decl > direct (1-hop) relative-`.rl`-import > built-in Option/Result. GUARDED and NESTED arms NEVER count as covering — add unguarded arm or `_`. With `_`: unchecked. Unknown union: compiles unchecked, runtime default throws on unexpected kind.
+- Name resolution: pattern tags and field names are checked against the declaration — but ONLY when rlc can name what you meant (case-insensitive or near-miss; a transposition counts as one edit), because tag patterns also match hand-written `kind` unions whose tags are in no table. `Circel(r)` → `enum Shape has no case \`Circel\` — did you mean \`Circle\`?`; `Circle(radiuz)` → `case \`Circle\` has no field \`radiuz\` — did you mean \`radius\`?`. Same rule in let-else / `if let` (single-tag sites need a ONE-edit match to report the tag; fields are checked once the tag resolves) and in nested patterns (resolved against the outer field's declared type). A wrong-but-not-typo name is NOT reported (needs types). A reported typo suppresses that match's exhaustiveness error.
+- Exhaustiveness: match without `_` is checked; missing case = compile error. Enum resolution: local decl > direct (1-hop) relative-`.rl`-import > built-in Option/Result. GUARDED arms NEVER count as covering (add an unguarded arm or `_`); NESTED patterns DO — the check descends into payloads, so `Ok(value: Some(v))` + `Ok(value: None())` + `Err(e)` is exhaustive, and a hole is reported as a PATTERN you can paste back (`missing "Ok(value: None)"`). Inner position's enum comes from the field's declared type, else from the patterns written there (so generic `T` payloads still work); if neither names an enum, only `_` covers that position. With `_`: unchecked. Unknown union: compiles unchecked, runtime default throws on unexpected kind.
 - await allowed in scrutinee/guards/bodies → async IIFE, awaited. Detection is token-level: await inside a nested callback also triggers async — avoid in non-async contexts.
 
 Literal match (`switch ($rl_m)` instead of `$rl_m.kind`):
@@ -56,6 +58,7 @@ Tuple match (product exhaustiveness — missing COMBINATIONS are errors):
 match (conn, mode) { (Online(latency), Auto) if latency < 50 => 10, (Online, _) => 5, (Offline, _) => 0 }
 ```
 Every arm = tuple pattern (or final bare `_` covering all); element count = scrutinee count; no `(A,B)|(C,D)` — use element-level or `(A, B|D)`; parenthesize scrutinees containing top-level `<`/`>` comparisons.
+- Exhaustiveness is the product of the positions. `rlc --check-types` asks the checker for each position's alphabet, so narrowed types count, and reports combinations unquoted: `match is not exhaustive: missing (North, Slow)`. A position no arm tags stays `_`.
 
 ## try (Rust `?`)
 
@@ -117,7 +120,7 @@ const data = result {
 ```
 - Flat replacement for nested `Result.andThen(r, user => ... )` callbacks; every earlier binding stays in scope.
 - `result` is contextual: block is claimed ONLY if it has ≥1 `<-` binding, else plain identifier + block statement (passthrough). Write `<-` with no space.
-- Binding = `const|let|var <name|destructuring|: type> <- expr;` — `;` MANDATORY on bindings, FORBIDDEN on the final value expr (else located compile error). A top-level `>` in the bound expr needs parens (generic-type-argument ambiguity).
+- Binding = `const|let|var <name|destructuring|: type> <- expr;` — `;` MANDATORY on bindings, FORBIDDEN on the final value expr (else located compile error). A top-level `>` in the bound expr needs parens (generic-type-argument ambiguity). Forgetting the keyword (`y <- g();`) is a located error (`` `result` binding is missing its declaration keyword ``) wherever the text cannot be TS — which is any claimed block; for an actual `y < -g()` comparison, put a space between `<` and `-`.
 - Result only (no Option/Promise do-notation, no `<-` outside a result block).
 - Block is an EXPRESSION (compiles to an IIFE of early returns): usable anywhere, incl. pipeline head. `await` inside → async IIFE, awaited.
 - Error types UNION automatically: bindings of `Result<_, E1>` + `Result<_, E2>` → block assignable to `Result<T, E1 | E2>`. rlc infers NO types; tsc narrows each step.

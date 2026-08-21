@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use super::projection::{self, Probes, ProjectedDocument};
 use super::snapshot::Snapshot;
+use crate::AnchorKind;
+use crate::analysis::PayloadAlphabet;
 use crate::typescript::backend::{Answers, Diagnostic as TsDiagnostic, Resolution};
 
 /// One reported problem, at a position in a file the user can open.
@@ -63,6 +65,62 @@ pub struct ModuleDeclaration {
     pub text: String,
 }
 
+/// One match's alphabets as the checker named them: where the `match`
+/// keyword is, and each scrutinee position's constituents in position
+/// order (a single match has one).
+type MatchAlphabets = (usize, Vec<Vec<String>>);
+
+/// Turns a TypeScript diagnostic that landed on rlc's own glue into an rl
+/// one — said in rl's words, about rl's construct.
+///
+/// This is the third layer of `docs/design/rust-parity-analysis.md` §10 and
+/// the point of [`crate::EmitAnchor`]. The error-layer contract asks that a
+/// user never meet a TypeScript error caused by code rlc wrote; until now
+/// that state was not reached — the diagnostic simply arrived wearing the
+/// generated code's face. Translating it reaches it.
+///
+/// The pair `(construct, error code)` is the whole key. It is deliberately
+/// a **whitelist**: a diagnostic this table does not recognize is passed
+/// through unchanged rather than guessed at, because silently restating an
+/// error as something it is not is worse than an ugly message. The original
+/// text rides along in every translation for the same reason.
+pub(crate) fn translate(kind: AnchorKind, code: u32, message: &str) -> Option<String> {
+    let said = match (kind, code) {
+        // `.kind` / `.value` reached for on something that is not a Result.
+        (AnchorKind::Try, 2339 | 2551 | 2571) => {
+            "`try` needs a `Result` — this expression is not one".to_string()
+        }
+        (AnchorKind::ResultBind, 2339 | 2551 | 2571) => {
+            "`<-` needs a `Result` — this expression is not one".to_string()
+        }
+        // The propagated `Err` reaching a return type that cannot hold it.
+        (AnchorKind::Try, 2322 | 2345) => "the `Err` this `try` propagates does not fit the \
+             enclosing function's return type — rl has no automatic conversion, so widen the \
+             return type or convert the error"
+            .to_string(),
+        (AnchorKind::LetElse, 2339 | 2571) => {
+            "let-else needs a value with a `kind` discriminant — this expression has none"
+                .to_string()
+        }
+        (AnchorKind::IfLet, 2339 | 2571) => {
+            "`if let` needs a value with a `kind` discriminant — this expression has none"
+                .to_string()
+        }
+        (AnchorKind::Match, 2339 | 2571) => {
+            "match on a tag pattern needs a value with a `kind` discriminant — this scrutinee \
+             has none (a plain TypeScript `enum` is not one)"
+                .to_string()
+        }
+        // A tag compared against a type that cannot hold it. rlc reports
+        // the ones that look like misspellings itself; this is the rest.
+        (AnchorKind::Match, 2678) | (AnchorKind::LetElse | AnchorKind::IfLet, 2367) => {
+            "this pattern's case is not one the value can be".to_string()
+        }
+        _ => return None,
+    };
+    Some(format!("{said} (ts{code}: {})", message.trim()))
+}
+
 /// Builds the pass's diagnostics from the checker's answers, in the exact
 /// order and wording the report has always had.
 pub(crate) fn report(
@@ -88,6 +146,22 @@ pub(crate) fn report(
             });
             continue;
         };
+        // Glue is not the user's code. When rlc can say what the construct
+        // meant, it says that — at the construct's own keyword.
+        if let Some((offset, said)) = projection::translate_on_glue(file, diagnostic) {
+            let (line, col) = crate::line_col(&file.source, offset);
+            let entry = Diagnostic {
+                path: file.source_path.clone(),
+                position: Some((line, col)),
+                message: said,
+            };
+            // One construct's glue can draw several TypeScript errors that
+            // all mean the same rl thing (`$rl_t.kind` and `$rl_t.value`).
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+            continue;
+        }
         match projection::diagnostic_source_offset(file, diagnostic.start) {
             Some((offset, exact)) => {
                 let (line, col) = crate::line_col(&file.source, offset);
@@ -98,10 +172,10 @@ pub(crate) fn report(
                         "ts({}): {}{}",
                         diagnostic.code,
                         diagnostic.message,
-                        // Glue is not the user's code: by the error-layer
-                        // contract rlc's output must not draw type errors, so
-                        // say where it came from rather than pinning it on the
-                        // line the position landed near.
+                        // By the error-layer contract rlc's output must not
+                        // draw type errors, so say where it came from rather
+                        // than pinning it on the line the position landed
+                        // near.
                         if exact {
                             ""
                         } else {
@@ -144,29 +218,112 @@ pub(crate) fn report(
         });
     }
 
-    // Tag exhaustiveness, from the same narrowed type.
-    for missing in &answers.tag_missing {
-        let Some(anchor) = probes.tags.get(missing.index) else {
+    // Tag exhaustiveness. The checker names the constituents the
+    // scrutinee's type still has — narrowing included — and rl runs its
+    // own algorithm over that alphabet, which is what sees a hole *inside*
+    // a payload as well as a missing case (TASK-108).
+    //
+    // A witness rl is not certain of is dropped here: the default path
+    // reports those because it has nothing better, but on this path the
+    // honest answer for an unidentifiable column is to ask the checker,
+    // and that question is not asked yet.
+    // Per file, per match: the alphabet of each scrutinee position, in
+    // position order (a single match has one).
+    let mut by_file: HashMap<PathBuf, Vec<MatchAlphabets>> = HashMap::new();
+    // The payload answers ride in the same list, after the match ones —
+    // they name the alphabet of a `(constructor, field)` column, which is
+    // the one thing rl cannot work out from declarations alone.
+    let mut payloads: HashMap<PathBuf, Vec<PayloadAlphabet>> = HashMap::new();
+    for members in &answers.tag_members {
+        if let Some(anchor) = probes.tags.get(members.index) {
+            let per_match = by_file.entry(anchor.source_path.clone()).or_default();
+            match per_match.iter_mut().find(|(at, _)| *at == anchor.offset) {
+                Some((_, positions)) => positions.push(members.tags.clone()),
+                None => per_match.push((anchor.offset, vec![members.tags.clone()])),
+            }
+            continue;
+        }
+        let Some(anchor) = probes
+            .payloads
+            .get(members.index.wrapping_sub(probes.tags.len()))
+        else {
             continue;
         };
-        let Some(file) = files.iter().find(|f| f.source_path == anchor.source_path) else {
+        payloads
+            .entry(anchor.source_path.clone())
+            .or_default()
+            .push((
+                (anchor.tag.clone(), anchor.field.clone()),
+                members.tags.clone(),
+            ));
+    }
+    for file in files {
+        let Some(asked) = by_file.get(&file.source_path) else {
             continue;
         };
-        let (line, col) = crate::line_col(&file.source, anchor.offset);
-        out.push(Diagnostic {
-            path: file.source_path.clone(),
-            position: Some((line, col)),
-            message: format!(
-                "match is not exhaustive: missing {} \
-                 (add the missing arms or a final `_` arm)",
-                missing
-                    .missing
-                    .iter()
-                    .map(|t| format!("{t:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
+        // The nested columns are resolved from declarations, so the
+        // imported ones have to be collected — otherwise a payload whose
+        // type is an imported enum reads as an unknown alphabet and its
+        // holes go unreported.
+        let externs = super::language::externs_of(&file.source_path, &file.source, &|target| {
+            files
+                .iter()
+                .find(|f| f.source_path == target)
+                .map(|f| f.source.clone())
+                .or_else(|| std::fs::read_to_string(target).ok())
         });
+        let asked_payloads = payloads
+            .get(&file.source_path)
+            .map_or(&[][..], Vec::as_slice);
+        for (offset, coverage) in
+            crate::analysis::checked_coverage(&file.source, &externs, asked, asked_payloads)
+        {
+            // A single match's witness is one pattern, quoted the way the
+            // default path quotes one; a tuple match's is a combination of
+            // positions, written as one `(a, b)` and left unquoted — the
+            // quotes would read as part of the pattern.
+            let uncovered: Vec<String> = coverage
+                .missing
+                .iter()
+                .filter(|m| m.certain)
+                .map(|m| {
+                    if m.pattern.len() > 1 {
+                        format!("({})", m.pattern.join(", "))
+                    } else {
+                        format!("{:?}", m.pattern.first().cloned().unwrap_or_default())
+                    }
+                })
+                .collect();
+            if uncovered.is_empty() {
+                continue;
+            }
+            // A product of positions gets long fast; the default path
+            // truncates it the same way, with the same wording.
+            let tuple = coverage.positions.len() > 1;
+            let shown = if uncovered.len() > 4 {
+                let unit = if tuple {
+                    "combinations in total"
+                } else {
+                    "in total"
+                };
+                format!(
+                    "{}, … ({} {unit})",
+                    uncovered[..3].join(", "),
+                    uncovered.len()
+                )
+            } else {
+                uncovered.join(", ")
+            };
+            let (line, col) = crate::line_col(&file.source, offset);
+            out.push(Diagnostic {
+                path: file.source_path.clone(),
+                position: Some((line, col)),
+                message: format!(
+                    "match is not exhaustive: missing {shown} \
+                     (add the missing arms or a final `_` arm)"
+                ),
+            });
+        }
     }
 
     // `val`: two resolutions decide, and rlc guesses neither of them.

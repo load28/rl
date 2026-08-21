@@ -5,18 +5,12 @@ import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  armContextAt,
-  armTags,
   BUILTIN_ENUMS,
   caseSignature,
-  enumSignature,
-  inferEnum,
   maskNonCode,
-  matchBodyAt,
   memberAccessAt,
   parseEnums,
   parseMatches,
-  symbolAt,
   visibleEnums,
 } from "../analysis";
 
@@ -122,66 +116,12 @@ test("parseMatches finds match and skips str.match", () => {
   assert.equal(src.slice(matches[0].start, matches[0].start + 5), "match");
 });
 
-test("nested matches: innermost body wins", () => {
-  const src = "const x = match (a) { A => match (b) { C => 1 }, B => 2 };";
-  const { matches } = analyzeAll(src);
-  assert.equal(matches.length, 2);
-  const innerBody = src.indexOf("C =>");
-  const m = matchBodyAt(matches, innerBody);
-  assert.ok(m);
-  assert.equal(src.slice(m!.start, m!.start + 9), "match (b)");
-});
 
-test("armContextAt: pattern position right after body open and comma", () => {
-  const src = "const x = match (v) { A => 1, ";
-  // No closing brace → structurally incomplete; append one for the parser.
-  const full = src + "};";
-  const { masked, matches } = analyzeAll(full);
-  const ctx = armContextAt(masked, matches, src.length);
-  assert.ok(ctx);
-  assert.ok(ctx!.patternPosition);
-});
 
-test("armContextAt: not a pattern position inside an arm body", () => {
-  const src = "const x = match (v) { A => foo(1), B => 2 };";
-  const { masked, matches } = analyzeAll(src);
-  const inBody = src.indexOf("foo") + 1;
-  const ctx = armContextAt(masked, matches, inBody);
-  assert.ok(ctx);
-  assert.ok(!ctx!.patternPosition);
-});
 
-test("armContextAt: binding position inside Tag(", () => {
-  const src = "const x = match (v) { Circle( ) => 1 };";
-  const { masked, matches } = analyzeAll(src);
-  const inside = src.indexOf("( )") + 1;
-  const ctx = armContextAt(masked, matches, inside);
-  assert.ok(ctx);
-  assert.equal(ctx!.bindingTag, "Circle");
-});
 
-test("armTags collects or-pattern alternatives and skips _", () => {
-  const src =
-    "const x = match (v) { A | B => 1, C(f) => 2, D if f > 0 => 3, _ => 0 };";
-  const { masked, matches } = analyzeAll(src);
-  assert.deepEqual(armTags(masked, matches[0]), ["A", "B", "C", "D"]);
-});
 
-test("inferEnum: from scrutinee member access", () => {
-  const src =
-    "enum Shape { Circle(r: number), Point }\nconst a = match (Shape.Circle(1)) { };";
-  const { masked, enums, matches } = analyzeAll(src);
-  const e = inferEnum(masked, matches[0], visibleEnums(enums));
-  assert.equal(e?.name, "Shape");
-});
 
-test("inferEnum: from existing arm tags", () => {
-  const src =
-    "enum Shape { Circle(r: number), Point }\nconst a = match (s) { Circle(r) => r, };";
-  const { masked, enums, matches } = analyzeAll(src);
-  const e = inferEnum(masked, matches[0], visibleEnums(enums));
-  assert.equal(e?.name, "Shape");
-});
 
 test("builtin Option/Result are visible and shadowed by local decls", () => {
   assert.deepEqual(
@@ -202,59 +142,8 @@ test("memberAccessAt resolves the base identifier", () => {
   assert.equal(memberAccessAt(masked, src.indexOf("Shape")), null);
 });
 
-test("symbolAt: enum name, declared case, and pattern tag", () => {
-  const src =
-    "enum Shape { Circle(radius: number), Point }\nconst a = match (s) { Circle(radius) => radius, Point => 0 };";
-  const { masked, enums, matches } = analyzeAll(src);
 
-  const onName = symbolAt(src, masked, src.indexOf("Shape") + 2, enums, matches);
-  assert.equal(onName?.kind, "enum");
 
-  const onDeclCase = symbolAt(
-    src,
-    masked,
-    src.indexOf("Circle") + 2,
-    enums,
-    matches,
-  );
-  assert.equal(onDeclCase?.kind, "case");
-
-  const onPatternTag = symbolAt(
-    src,
-    masked,
-    src.indexOf("Point =>") + 1,
-    enums,
-    matches,
-  );
-  assert.equal(onPatternTag?.kind, "case");
-  assert.equal(onPatternTag?.kind === "case" && onPatternTag.case.tag, "Point");
-});
-
-test("symbolAt: builtin case via member access", () => {
-  const src = "const v = Option.Some(1);";
-  const masked = maskNonCode(src);
-  const sym = symbolAt(src, masked, src.indexOf("Some") + 1, [], []);
-  assert.equal(sym?.kind, "case");
-  assert.ok(sym?.kind === "case" && sym.enum.builtin);
-});
-
-test("signatures render like source", () => {
-  const src = "export enum Shape { Circle(radius: number), Point }";
-  const { enums } = analyzeAll(src);
-  assert.equal(
-    enumSignature(enums[0]),
-    "export enum Shape {\n  Circle(radius: number),\n  Point,\n}",
-  );
-  assert.equal(
-    caseSignature(enums[0], enums[0].cases[0]),
-    "Shape.Circle(radius: number)",
-  );
-  assert.equal(caseSignature(enums[0], enums[0].cases[1]), "Shape.Point");
-  assert.equal(
-    caseSignature(BUILTIN_ENUMS[1], BUILTIN_ENUMS[1].cases[1]),
-    "Result.Err(error: E)",
-  );
-});
 
 test("template interpolation code is analyzed", () => {
   const src =
@@ -312,15 +201,3 @@ test("visibleEnums shadows local > imported > builtin", () => {
   assert.ok(visible.some((e) => e.name === "Result" && e.builtin));
 });
 
-test("symbolAt resolves pattern tags of an imported enum", () => {
-  const src = 'import { Token } from "./token.rl";\nconst r = match (t) { Num(v) => v, Eof => 0 };\n';
-  const masked = maskNonCode(src);
-  const matches = parseMatches(masked);
-  const imported = [importedEnum("Token", ["Num", "Eof"])];
-  const offset = src.indexOf("Eof");
-  const sym = symbolAt(src, masked, offset, [], matches, imported);
-  assert.ok(sym);
-  assert.equal(sym!.kind, "case");
-  assert.equal(sym!.enum.name, "Token");
-  assert.ok(sym!.enum.imported);
-});

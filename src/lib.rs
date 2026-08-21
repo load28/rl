@@ -67,11 +67,14 @@ mod val;
 mod verify;
 
 pub use analysis::{
-    AnalyzedArm, BodyBinding, Coverage, CoveredEnum, MatchAnalyses, MatchAnalysis,
-    MatchConstructor, MatchSubject, Origin, PatternBinding, PayloadField, match_analyses,
+    AnalyzedArm, BodyBinding, Coverage, CoveredEnum, MatchAnalysis, MatchConstructor, MatchSubject,
+    NameKind, Origin, PatternAnalyses, PatternBinding, PatternSite, PayloadField, SiteKind,
+    UnresolvedName, pattern_analyses,
 };
 pub use error::CompileError;
-pub use probe::{Literal, LiteralMatch, TagMatch, literal_matches, tag_matches};
+pub use probe::{
+    Literal, LiteralMatch, PayloadProbe, TagMatch, literal_matches, payload_probes, tag_matches,
+};
 pub use sidecar::{Sidecar, build_sidecar};
 pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
 pub use val::{Mutation, ValBinding, ValFn, ValParam, ValPass, ValProbes, is_builtin_mutator_name};
@@ -286,6 +289,8 @@ pub struct CaseSymbol {
 pub struct FieldSymbol {
     /// The field name.
     pub name: String,
+    /// Byte offset of the name in the source (see [`line_col`]).
+    pub offset: usize,
     /// Whether the field is optional (`name?: T`).
     pub optional: bool,
     /// The verbatim type annotation text.
@@ -326,6 +331,7 @@ pub fn enum_symbols(source: &str) -> Vec<EnumSymbol> {
                                 .iter()
                                 .map(|f| FieldSymbol {
                                     name: f.name.clone(),
+                                    offset: f.name_off,
                                     optional: f.optional,
                                     ty: f.ty.clone(),
                                 })
@@ -381,6 +387,72 @@ pub struct ScrutineeTemp {
     pub out: usize,
 }
 
+/// Which rl construct a stretch of compiler-written glue belongs to.
+///
+/// The kind is half of what turns a TypeScript diagnostic on that glue into
+/// an rl one — the other half is the error code (see
+/// `docs/design/rust-parity-analysis.md` §10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorKind {
+    /// A `match` expression's switch or if-chain.
+    Match,
+    /// A `try` statement's test, early return and binding.
+    Try,
+    /// A let-else statement's test and destructuring.
+    LetElse,
+    /// An `if let` statement's test and destructuring.
+    IfLet,
+    /// One `<-` binding of a `result` block.
+    ResultBind,
+    /// A pipeline's apply helper (`$rl_ap`) or composition helper
+    /// (`$rl_fl`).
+    Pipe,
+}
+
+/// A stretch of emitted output that rlc wrote itself, and the construct it
+/// wrote it for.
+///
+/// [`EmitMapping`] answers "which source bytes are these output bytes?" and
+/// exists only where the answer is *these exact bytes*. Glue has no such
+/// answer — it is text no one wrote — but it always has an **origin**, and
+/// that is what an anchor records. It is deliberately one-way and for
+/// diagnostics only: navigation and rename must never resolve into glue
+/// (an edit there would corrupt the program), while a diagnostic there is
+/// worth reporting at the construct that produced it.
+///
+/// Anchors nest, and are ordered so that an inner one comes before the
+/// outer one that contains it — a consumer takes the first match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmitAnchor {
+    /// Byte offset in the emitted output where the construct's glue starts.
+    pub out: usize,
+    /// Byte offset just past its end.
+    pub end: usize,
+    /// Byte offset in the source of the construct's keyword — where a
+    /// diagnostic about this glue belongs.
+    pub src: usize,
+    /// What kind of construct wrote it.
+    pub kind: AnchorKind,
+}
+
+/// Where a nested pattern's **receiver** landed in the emitted output.
+///
+/// `Ok(value: Some(v))` lowers to a condition chain whose second link
+/// reads `$rl_m.value.kind === "Some"`. That `$rl_m.value` is the only
+/// place a type checker can be asked what the *payload* admits — rlc knows
+/// the field's declared type text, but a text is not a type, and a type
+/// parameter or a hand-written union names no declaration rlc holds. The
+/// emitter records where it wrote the receiver, and the typed
+/// exhaustiveness pass asks there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayloadTemp {
+    /// Byte offset of the nested pattern's tag in the source — the
+    /// occurrence this receiver was written for.
+    pub src: usize,
+    /// Byte offset of the receiver expression in the emitted output.
+    pub out: usize,
+}
+
 /// The result of [`emit_mapped`]: the emitted TypeScript and the
 /// source↔output mappings of every verbatim-copied chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,6 +463,20 @@ pub struct MappedEmit {
     pub mappings: Vec<EmitMapping>,
     /// Where each `match` bound its scrutinee, ordered by output offset.
     pub scrutinee_temps: Vec<ScrutineeTemp>,
+    /// Where each nested pattern's receiver was written, ordered by output
+    /// offset.
+    pub payload_temps: Vec<PayloadTemp>,
+    /// The glue each construct wrote, innermost first — the origin of a
+    /// diagnostic that lands where no mapping reaches.
+    pub anchors: Vec<EmitAnchor>,
+}
+
+impl MappedEmit {
+    /// The construct that wrote the glue at output byte `out`, innermost
+    /// first. `None` when the byte is not in any construct's glue.
+    pub fn anchor_at(&self, out: usize) -> Option<&EmitAnchor> {
+        self.anchors.iter().find(|a| a.out <= out && out < a.end)
+    }
 }
 
 /// Emits `source` for language tooling: structural parse + code emission
@@ -413,12 +499,13 @@ pub struct MappedEmit {
 /// ```
 pub fn emit_mapped(source: &str) -> MappedEmit {
     let program = parser::parse(source);
-    let (code, mappings, scrutinee_temps) =
-        codegen::emit_with_map(&program, source, ImportRewrite::Off, None);
+    let flat = codegen::emit_with_map(&program, source, ImportRewrite::Off, None);
     MappedEmit {
-        code,
-        mappings,
-        scrutinee_temps,
+        code: flat.code,
+        mappings: flat.mappings,
+        scrutinee_temps: flat.scrutinee_temps,
+        payload_temps: flat.payload_temps,
+        anchors: flat.anchors,
     }
 }
 
@@ -615,12 +702,13 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
     if !options.defer_to_checker {
         val::check(source, &tokens).map_err(to_compile_error)?;
     }
-    let (code, mappings, scrutinee_temps) = codegen::emit_with_map(
+    let flat = codegen::emit_with_map(
         &program,
         source,
         options.rewrite_imports,
         options.std_import,
     );
+    let code = flat.code;
 
     if options.verify
         && let Err(message) = verify::verify_output(&code)
@@ -634,7 +722,9 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
     }
     Ok(MappedEmit {
         code,
-        mappings,
-        scrutinee_temps,
+        mappings: flat.mappings,
+        scrutinee_temps: flat.scrutinee_temps,
+        payload_temps: flat.payload_temps,
+        anchors: flat.anchors,
     })
 }
