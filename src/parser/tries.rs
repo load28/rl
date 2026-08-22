@@ -36,6 +36,10 @@ pub(super) fn parse_try_stmt<'t>(
         byte_end,
         TryStmt {
             keyword_off: kw_span.start,
+            owner_span: Span {
+                start: kw_span.start,
+                end: byte_end,
+            },
             span: Span {
                 start: kw_span.start,
                 end: expr_span.end,
@@ -103,6 +107,10 @@ pub(super) fn parse_try_decl<'t>(
         byte_end,
         TryStmt {
             keyword_off: kw_span.start,
+            owner_span: Span {
+                start: kw_span.start,
+                end: byte_end,
+            },
             // The propagation, not the declaration: a diagnostic about the
             // `Err` belongs on `try <expr>`, not on `const x = `.
             span: Span {

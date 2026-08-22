@@ -8,6 +8,7 @@
 mod lower;
 
 use crate::hir;
+use crate::hir::ids::Idx;
 use crate::hir::{ArmBodyKind, BindingMode, BindingText, BodyId, ExprId, FieldId, NodeId};
 use crate::resolve::{FieldRef, VariantRef};
 
@@ -19,6 +20,37 @@ pub(crate) struct CoreFile {
     pub bodies: Vec<Body>,
     pub exprs: Vec<Expr>,
     pub temporary_count: u32,
+}
+
+impl CoreFile {
+    /// Whether this file contains a Core primitive that needs a TypeScript
+    /// execution owner. Source-only import edits do not require host lowering.
+    pub(crate) fn requires_host_lowering(&self) -> bool {
+        self.body_requires_host(self.root)
+    }
+
+    fn body_requires_host(&self, body: BodyId) -> bool {
+        self.bodies[body.index()]
+            .statements
+            .iter()
+            .any(|statement| match statement {
+                Statement::Opaque(_) | Statement::Import(_) => false,
+                Statement::Adt(_) | Statement::Propagate(_) | Statement::Decision(_) => true,
+                Statement::Expr(expr) => self.expr_requires_host(*expr),
+            })
+    }
+
+    fn expr_requires_host(&self, expr: ExprId) -> bool {
+        match &self.exprs[expr.index()] {
+            Expr::Opaque(_) => false,
+            Expr::Sequence(body) => self.body_requires_host(*body),
+            Expr::Decision(_) | Expr::Apply(_) | Expr::ResultRegion(_) => true,
+            Expr::Template(template) => template.parts.iter().any(|part| match part {
+                TemplatePart::Raw(_) => false,
+                TemplatePart::Interpolation(expr) => self.expr_requires_host(*expr),
+            }),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -137,6 +169,7 @@ pub(crate) struct Import {
 
 #[derive(Debug)]
 pub(crate) struct Adt {
+    pub node: NodeId,
     pub name: String,
     pub exported: bool,
     pub generics: String,
@@ -201,6 +234,7 @@ pub(crate) enum UnexpectedKind {
 #[derive(Debug)]
 pub(crate) struct Propagate {
     pub node: NodeId,
+    pub owner: NodeId,
     pub value: ExprId,
     pub temporary: TempId,
     pub binding: Option<BindingText>,

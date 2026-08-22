@@ -161,7 +161,14 @@
 | TASK-151 | Core IR backend 의미 판단 제거 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-151](./TASK-151-core-ir-backend-boundary.md) |
 | TASK-152 | TanStack Start 기반 공식 홈페이지와 rl 하이라이팅 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-152](./TASK-152-tanstack-start-website.md) |
 | TASK-153 | 홈페이지 오버뷰 조합 예제 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-153](./TASK-153-overview-composed-example.md) |
+| TASK-154 | SWC 전체 프로그램 lowering 아키텍처 설계 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-154](./TASK-154-swc-program-lowering-architecture.md) |
+| TASK-155 | SWC ProgramSyntax shadow 계층 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-155](./TASK-155-swc-program-syntax-shadow.md) |
+| TASK-156 | SWC 평가 문맥 프로토콜 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-156](./TASK-156-swc-evaluation-context.md) |
+| TASK-157 | shadow Evaluation IR과 CFG validator | 완료 | 2026-08-22 | 2026-08-22 | [TASK-157](./TASK-157-shadow-evaluation-ir.md) |
+| TASK-158 | source-preserving target과 printer | 완료 | 2026-08-22 | 2026-08-22 | [TASK-158](./TASK-158-source-preserving-target.md) |
+| TASK-159 | 값 continuation과 direct-return lowering (Phase 4 1/n) | 완료 | 2026-08-22 | 2026-08-22 | [TASK-159](./TASK-159-value-continuation-direct-return.md) |
+| TASK-160 | SWC whole-owner 기반 RL→TS 최적 lowering | 진행 중 | 2026-08-22 | — | [TASK-160](./TASK-160-whole-owner-ast-lowering.md) |
 
 ## 다음 태스크 번호
 
-**TASK-154**
+**TASK-161**

@@ -155,6 +155,8 @@ pub enum AstOrigin {
     Guard,
     /// A `try` statement (the node's span is `try <expr>`).
     Try,
+    /// The complete statement that owns a `try`, including declarations.
+    TryOwner,
     /// A let-else statement's head.
     LetElse,
     /// An `if let` statement's head.
@@ -303,6 +305,8 @@ pub enum Stmt {
 pub struct TryStmt {
     /// Span = `try <expr>` (the propagation, not the whole declaration).
     pub node: NodeId,
+    /// Complete source statement used by whole-owner target lowering.
+    pub owner: NodeId,
     /// The declaration form's binding text (`const <binding> =`), when
     /// there is one — kept as a node whose span is the user's binding
     /// bytes.

@@ -80,6 +80,7 @@ impl Lowering<'_> {
                 hir::Item::Enum(item) => {
                     let mut emitted = HashSet::new();
                     Some(Statement::Adt(Adt {
+                        node: item.node,
                         name: item.name.clone(),
                         exported: item.exported,
                         generics: item.generics.clone(),
@@ -116,6 +117,7 @@ impl Lowering<'_> {
             },
             hir::Stmt::Try(stmt) => Some(Statement::Propagate(Propagate {
                 node: stmt.node,
+                owner: stmt.owner,
                 value: stmt.expr,
                 temporary: self.temp(stmt.node, false),
                 binding: stmt.binding,
@@ -208,6 +210,7 @@ impl Lowering<'_> {
                             expr,
                         } => ResultRegionItem::Propagate(Propagate {
                             node: *node,
+                            owner: *node,
                             value: *expr,
                             temporary: self.temp(*node, true),
                             binding: Some(*binding),
@@ -768,6 +771,7 @@ fn validate_place(place: &Place, semantic: &SemanticFile) {
 
 fn validate_propagate(propagate: &Propagate, file: &CoreFile, semantic: &SemanticFile) {
     validate_node(propagate.node, semantic);
+    validate_node(propagate.owner, semantic);
     validate_expr(propagate.value, file);
     validate_temp(propagate.temporary, file);
     if let Some(binding) = propagate.binding {

@@ -5,13 +5,15 @@
 //! module through a shared Core primitive.
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::rope::{Flat, Rope};
 use crate::analysis::SemanticFile;
 use crate::core_ir::*;
+use crate::evaluation_ir::{LoweringPlan, ValueTarget};
 use crate::hir::ids::Idx;
 use crate::hir::{self, ArmBodyKind, BindingMode, ExprId, NodeId};
+use crate::program_syntax::{HostContinuation, SourceSpan};
 use crate::scanner::{at, ident_end, is_ident_start, scan_type_end, skip_ws_comments};
 use crate::{AnchorKind, ImportRewrite};
 
@@ -22,32 +24,147 @@ pub(crate) fn emit_with_map<'a>(
     rewrite_imports: ImportRewrite,
     std_import: Option<&'a str>,
 ) -> Flat {
+    let lowering_plan = if core.requires_host_lowering() {
+        let syntax = crate::program_syntax::ProgramSyntax::build(semantic, core, source)
+            .unwrap_or_else(|error| {
+                panic!("internal compiler error: TypeScript owner construction failed: {error:?}")
+            });
+        let evaluation =
+            crate::evaluation_ir::EvaluationFile::build(&syntax, core).unwrap_or_else(|error| {
+                panic!("internal compiler error: Evaluation IR construction failed: {error:?}")
+            });
+        evaluation.lowering_plan().unwrap_or_else(|error| {
+            panic!("internal compiler error: owner lowering plan failed: {error:?}")
+        })
+    } else {
+        crate::evaluation_ir::LoweringPlan::default()
+    };
+    let target = TargetRewritePlan::build(&lowering_plan, core);
     let emitter = Emitter {
         semantic,
         core,
         source,
         rewrite_imports,
         std_import,
+        direct_return_exprs: target.direct_return_exprs,
+        direct_return_exclusions: target.direct_return_exclusions,
+        initializer_rewrites: target.initializers,
+        slot_exprs: target.slot_exprs,
         used_pipe: Cell::new(false),
         used_flow: Cell::new(false),
     };
-    let mut flat = emitter.emit_body(core.root).flatten();
+    let mut output = emitter.emit_body(core.root);
     if emitter.used_pipe.get() {
-        if !flat.code.ends_with('\n') {
-            flat.code.push('\n');
+        if !output.ends_with_newline() {
+            output.push_lit("\n");
         }
-        flat.code
-            .push_str("function $rl_ap<A, B>(v: A, f: (v: A) => B): B { return f(v); }\n");
+        output.push_lit("function $rl_ap<A, B>(v: A, f: (v: A) => B): B { return f(v); }\n");
     }
     if emitter.used_flow.get() {
-        if !flat.code.ends_with('\n') {
-            flat.code.push('\n');
+        if !output.ends_with_newline() {
+            output.push_lit("\n");
         }
-        flat.code.push_str(
+        output.push_lit(
             "function $rl_fl<A extends unknown[], B, C>(f: (...a: A) => B, g: (b: B) => C): (...a: A) => C { return (...a: A) => g(f(...a)); }\n",
         );
     }
-    flat
+    output.flatten(source.len())
+}
+
+struct TargetRewritePlan {
+    direct_return_exprs: HashSet<ExprId>,
+    direct_return_exclusions: Vec<SourceSpan>,
+    initializers: Vec<InitializerRewrite>,
+    slot_exprs: HashMap<ExprId, String>,
+}
+
+#[derive(Debug, Clone)]
+struct InitializerRewrite {
+    owner: SourceSpan,
+    expr: ExprId,
+    slot: String,
+}
+
+impl TargetRewritePlan {
+    fn build(lowering: &LoweringPlan, core: &CoreFile) -> Self {
+        let direct_return_exprs: HashSet<_> = lowering
+            .owners()
+            .flat_map(|rewrite| &rewrite.values)
+            .filter_map(|value| {
+                (value.target == ValueTarget::Return && value.schedule.steps().is_empty())
+                    .then_some(value.expr)
+                    .filter(|expr| can_structure_value_decision(core, *expr))
+            })
+            .collect();
+        let mut direct_return_exclusions: Vec<_> = lowering
+            .owners()
+            .flat_map(|rewrite| {
+                rewrite
+                    .values
+                    .iter()
+                    .map(move |value| (rewrite.owner, value))
+            })
+            .filter(|(_, value)| direct_return_exprs.contains(&value.expr))
+            .flat_map(|(owner, value)| {
+                [
+                    SourceSpan {
+                        start: owner.span.start,
+                        end: value.source.start,
+                    },
+                    SourceSpan {
+                        start: value.source.end,
+                        end: owner.span.end,
+                    },
+                ]
+            })
+            .filter(|span| span.start < span.end)
+            .collect();
+        direct_return_exclusions.sort_unstable_by_key(|span| span.start);
+
+        let initializers: Vec<_> = lowering
+            .owners()
+            .filter(|rewrite| rewrite.values.len() == 1)
+            .filter_map(|rewrite| {
+                let value = &rewrite.values[0];
+                let ValueTarget::Slot(slot) = value.target else {
+                    return None;
+                };
+                (value.context.continuation == HostContinuation::Initialize
+                    && value.schedule.steps().is_empty()
+                    && can_structure_value_decision(core, value.expr))
+                .then(|| InitializerRewrite {
+                    owner: rewrite.owner.span,
+                    expr: value.expr,
+                    slot: lowering.slot_name(slot).to_owned(),
+                })
+            })
+            .collect();
+        let slot_exprs = initializers
+            .iter()
+            .map(|rewrite| (rewrite.expr, rewrite.slot.clone()))
+            .collect();
+        Self {
+            direct_return_exprs,
+            direct_return_exclusions,
+            initializers,
+            slot_exprs,
+        }
+    }
+}
+
+fn can_structure_value_decision(core: &CoreFile, expr: ExprId) -> bool {
+    let Expr::Decision(decision) = &core.exprs[expr.index()] else {
+        return false;
+    };
+    decision.arms.iter().all(|arm| {
+        matches!(
+            arm.action,
+            ArmAction::Yield {
+                kind: ArmBodyKind::Expression,
+                ..
+            }
+        )
+    })
 }
 
 struct Emitter<'a> {
@@ -56,8 +173,19 @@ struct Emitter<'a> {
     source: &'a str,
     rewrite_imports: ImportRewrite,
     std_import: Option<&'a str>,
+    direct_return_exprs: HashSet<ExprId>,
+    direct_return_exclusions: Vec<SourceSpan>,
+    initializer_rewrites: Vec<InitializerRewrite>,
+    slot_exprs: HashMap<ExprId, String>,
     used_pipe: Cell<bool>,
     used_flow: Cell<bool>,
+}
+
+#[derive(Clone, Copy)]
+enum DecisionEmission<'name> {
+    Expression,
+    DirectReturn,
+    Assign { target: &'name str },
 }
 
 impl<'a> Emitter<'a> {
@@ -79,9 +207,42 @@ impl<'a> Emitter<'a> {
     }
 
     fn source_rope(&self, node: NodeId) -> Rope<'a> {
-        let (text, at) = self.source_node(node);
+        let span = self.span(node);
         let mut rope = Rope::new();
-        rope.push_src(text, at);
+        let mut insertions = self
+            .initializer_rewrites
+            .iter()
+            .filter(|rewrite| span.start <= rewrite.owner.start && rewrite.owner.start < span.end)
+            .peekable();
+        let mut cursor = span.start;
+        while cursor < span.end {
+            while let Some(rewrite) = insertions.next_if(|rewrite| rewrite.owner.start == cursor) {
+                rope.append(self.emit_initializer_rewrite(rewrite));
+            }
+            if let Some(exclusion) = self
+                .direct_return_exclusions
+                .iter()
+                .find(|exclusion| exclusion.start <= cursor && cursor < exclusion.end)
+            {
+                cursor = exclusion.end.min(span.end);
+                continue;
+            }
+            let next_insertion = insertions
+                .peek()
+                .map_or(span.end, |rewrite| rewrite.owner.start);
+            let next_exclusion = self
+                .direct_return_exclusions
+                .iter()
+                .filter(|exclusion| cursor < exclusion.start && exclusion.start < span.end)
+                .map(|exclusion| exclusion.start)
+                .min()
+                .unwrap_or(span.end);
+            let next = next_insertion.min(next_exclusion).min(span.end);
+            if cursor < next {
+                rope.push_src(&self.source[cursor..next], cursor);
+                cursor = next;
+            }
+        }
         rope
     }
 
@@ -110,13 +271,26 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_expr(&self, expr: ExprId) -> Rope<'a> {
+        if let Some(slot) = self.slot_exprs.get(&expr) {
+            let mut out = Rope::new();
+            out.push_lit(slot.clone());
+            return out;
+        }
         match &self.core.exprs[expr.index()] {
             Expr::Opaque(node) => self.source_rope(*node),
             Expr::Sequence(body) => self.emit_body(*body),
             Expr::Decision(decision) => {
                 let head = self.span(decision.head);
                 let extent = self.span(decision.extent);
-                let inner = self.emit_value_decision(decision);
+                let direct = self.direct_return_exprs.contains(&expr);
+                let inner = self.emit_value_decision(
+                    decision,
+                    if direct {
+                        DecisionEmission::DirectReturn
+                    } else {
+                        DecisionEmission::Expression
+                    },
+                );
                 let mut out = Rope::new();
                 out.anchored(AnchorKind::Match, head.start, head.end, extent.end, inner);
                 out
@@ -125,6 +299,27 @@ impl<'a> Emitter<'a> {
             Expr::ResultRegion(region) => self.emit_result_region(region),
             Expr::Template(template) => self.emit_template(template),
         }
+    }
+
+    fn emit_initializer_rewrite(&self, rewrite: &InitializerRewrite) -> Rope<'a> {
+        let Expr::Decision(decision) = &self.core.exprs[rewrite.expr.index()] else {
+            panic!("internal compiler error: initializer rewrite is not a decision")
+        };
+        let lowered = self.emit_value_decision(
+            decision,
+            DecisionEmission::Assign {
+                target: &rewrite.slot,
+            },
+        );
+        let head = self.span(decision.head);
+        let extent = self.span(decision.extent);
+        let mut anchored = Rope::new();
+        anchored.anchored(AnchorKind::Match, head.start, head.end, extent.end, lowered);
+        let mut out = Rope::new();
+        out.push_lit(format!("let {};\n", rewrite.slot));
+        out.append(anchored);
+        out.push_lit("\n");
+        out
     }
 
     fn emit_propagate(&self, propagate: &Propagate) -> Rope<'a> {
@@ -390,21 +585,21 @@ impl<'a> Emitter<'a> {
         out
     }
 
-    fn emit_value_decision(&self, decision: &Decision) -> Rope<'a> {
+    fn emit_value_decision(&self, decision: &Decision, emission: DecisionEmission<'_>) -> Rope<'a> {
         let DecisionKind::Match { dispatch, .. } = decision.kind else {
             panic!("internal compiler error: value decision is not a match")
         };
         let inner = match dispatch {
-            MatchDispatch::Conditional => self.emit_if_chain(decision),
+            MatchDispatch::Conditional => self.emit_if_chain(decision, emission),
             MatchDispatch::VariantSwitch | MatchDispatch::LiteralSwitch => {
-                self.emit_switch(decision)
+                self.emit_switch(decision, emission)
             }
         };
         let mut out = Rope::new();
-        out.push_lit(if decision.is_async {
-            "(await (async () => {"
-        } else {
-            "((() => {"
+        out.push_lit(match emission {
+            DecisionEmission::DirectReturn | DecisionEmission::Assign { .. } => "{",
+            DecisionEmission::Expression if decision.is_async => "(await (async () => {",
+            DecisionEmission::Expression => "((() => {",
         });
         for subject in &decision.subjects {
             out.push_lit("\n  const ");
@@ -415,11 +610,14 @@ impl<'a> Emitter<'a> {
         }
         out.push_lit("\n");
         out.append(inner);
-        out.push_lit("})())");
+        out.push_lit(match emission {
+            DecisionEmission::DirectReturn | DecisionEmission::Assign { .. } => "}",
+            DecisionEmission::Expression => "})())",
+        });
         out
     }
 
-    fn emit_switch(&self, decision: &Decision) -> Rope<'a> {
+    fn emit_switch(&self, decision: &Decision, emission: DecisionEmission<'_>) -> Rope<'a> {
         let DecisionKind::Match { dispatch, .. } = decision.kind else {
             panic!("internal compiler error: switch decision is not a match")
         };
@@ -451,7 +649,7 @@ impl<'a> Emitter<'a> {
             let mut recovery = BindingRecovery::new(self, &arm.pattern);
             out.push_lit(": { ");
             out.append(self.emit_bindings(&arm.pattern, decision, None, &mut recovery));
-            self.emit_arm_action(arm, "    ", false, &mut out);
+            self.emit_arm_action(arm, "    ", false, emission, &mut out);
         }
         if !wildcard {
             out.push_lit(unexpected_switch(literal));
@@ -460,11 +658,14 @@ impl<'a> Emitter<'a> {
         out
     }
 
-    fn emit_if_chain(&self, decision: &Decision) -> Rope<'a> {
+    fn emit_if_chain(&self, decision: &Decision, emission: DecisionEmission<'_>) -> Rope<'a> {
         let DecisionKind::Match { needs_label, .. } = decision.kind else {
             panic!("internal compiler error: conditional decision is not a match")
         };
         let mut out = Rope::new();
+        if matches!(emission, DecisionEmission::Assign { .. }) {
+            out.push_lit("  do {\n");
+        }
         if needs_label {
             out.push_lit("  $rl_b: {\n");
         }
@@ -481,7 +682,7 @@ impl<'a> Emitter<'a> {
                 let mut recovery = BindingRecovery::new(self, &arm.pattern);
                 out.append(self.emit_bindings(&arm.pattern, decision, None, &mut recovery));
             }
-            self.emit_arm_action(arm, "  ", true, &mut out);
+            self.emit_arm_action(arm, "  ", true, emission, &mut out);
             if !is_any || arm.guard.is_some() {
                 out.push_lit(" }\n");
             } else {
@@ -494,10 +695,20 @@ impl<'a> Emitter<'a> {
         if needs_label {
             out.push_lit("  }\n");
         }
+        if matches!(emission, DecisionEmission::Assign { .. }) {
+            out.push_lit("  } while (false);\n");
+        }
         out
     }
 
-    fn emit_arm_action(&self, arm: &DecisionArm, indent: &str, chain: bool, out: &mut Rope<'a>) {
+    fn emit_arm_action(
+        &self,
+        arm: &DecisionArm,
+        indent: &str,
+        chain: bool,
+        emission: DecisionEmission<'_>,
+        out: &mut Rope<'a>,
+    ) {
         let ArmAction::Yield { body, kind } = arm.action else {
             panic!("internal compiler error: match arm does not yield")
         };
@@ -510,16 +721,34 @@ impl<'a> Emitter<'a> {
                 } else {
                     ""
                 };
-                action.push_lit("return (");
+                match emission {
+                    DecisionEmission::Expression | DecisionEmission::DirectReturn => {
+                        action.push_lit("return (");
+                    }
+                    DecisionEmission::Assign { target } => {
+                        action.push_lit(format!("{target} = ("));
+                    }
+                }
                 action.append(body);
                 action.push_lit(format!("{newline});"));
+                if matches!(emission, DecisionEmission::Assign { .. }) {
+                    action.push_lit(" break;");
+                }
             }
             ArmBodyKind::Block if chain => {
+                assert!(
+                    !matches!(emission, DecisionEmission::Assign { .. }),
+                    "internal compiler error: statement match arm cannot assign a value slot"
+                );
                 action.push_lit("{ ");
                 action.append(body);
                 action.push_lit("\n    break $rl_b; }");
             }
             ArmBodyKind::Block => {
+                assert!(
+                    !matches!(emission, DecisionEmission::Assign { .. }),
+                    "internal compiler error: statement match arm cannot assign a value slot"
+                );
                 action.append(body);
                 action.push_lit("\n      break;");
             }
@@ -534,8 +763,14 @@ impl<'a> Emitter<'a> {
             out.push_lit("if ((");
             out.append(guard);
             out.push_lit(format!("{newline})) "));
+            if matches!(emission, DecisionEmission::Assign { .. }) {
+                out.push_lit("{ ");
+            }
         }
         out.append(action);
+        if arm.guard.is_some() && matches!(emission, DecisionEmission::Assign { .. }) {
+            out.push_lit(" }");
+        }
         if !chain {
             out.push_lit(" }\n");
         }

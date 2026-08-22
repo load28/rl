@@ -97,3 +97,7 @@ target IR 조각을 평탄화하고 source span mapping·mark·anchor를 함께 
 TASK-150에서 네 단계를 모두 완료했다. 현재 backend 경계는
 `emit_with_map(&SemanticFile, &CoreFile, source, ...)`이며 `src/codegen`은 parser AST를
 참조하지 않는다.
+
+전체 TypeScript 평가 문맥과 Core IR을 결합해 기본 IIFE lowering을 제거하는 후속 계층은
+[`program-lowering.md`](./program-lowering.md)에 정의한다. Core IR의 rl 의미 소유권은
+유지하며, SWC AST는 host TypeScript의 구조와 평가 문맥을 제공한다.

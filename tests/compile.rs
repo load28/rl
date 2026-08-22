@@ -136,9 +136,9 @@ const area = match (shape) {
 "#);
     assert!(out.contains("switch ($rl_m.kind)"));
     assert!(out.contains(
-        "case \"Circle\": { const { radius } = $rl_m; return (3.14 * radius * radius); }"
+        "case \"Circle\": { const { radius } = $rl_m; $rl_v0 = (3.14 * radius * radius); break; }"
     ));
-    assert!(out.contains("case \"Point\": { return (0); }"));
+    assert!(out.contains("case \"Point\": { $rl_v0 = (0); break; }"));
     // The output is plain TypeScript: a runtime guard, no type-level tricks.
     assert!(out.contains(
         "default: { throw new Error(\"rl match: unexpected case \" + JSON.stringify($rl_m)); }"
@@ -149,8 +149,17 @@ const area = match (shape) {
 #[test]
 fn match_wildcard_becomes_default() {
     let out = ok("const r = match (x) { A => 1, _ => 0 };");
-    assert!(out.contains("default: { return (0); }"));
+    assert!(out.contains("default: { $rl_v0 = (0); break; }"));
     assert!(!out.contains("never"));
+}
+
+#[test]
+fn whole_initializer_match_uses_a_statement_slot_without_an_iife() {
+    let out = ok("const r = match (x) { A => 1, _ => 0 };\n");
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(out.contains("let $rl_v0;"), "{out}");
+    assert!(out.contains("$rl_v0 = (1);"), "{out}");
+    assert!(out.contains("const r = $rl_v0;"), "{out}");
 }
 
 #[test]
@@ -168,11 +177,19 @@ fn match_duplicate_arm_is_error() {
 }
 
 #[test]
-fn match_await_arm_produces_awaited_async_iife() {
+fn direct_return_match_keeps_await_in_the_host_function() {
     let out = ok(
         "async function f(x: T) { return match (x) { A(url) => await fetch(url), _ => null }; }",
     );
-    assert!(out.contains("(await (async () => {"));
+    assert!(!out.contains("async () =>"), "{out}");
+    assert!(out.contains("return (await fetch(url));"), "{out}");
+}
+
+#[test]
+fn direct_return_match_does_not_require_a_semicolon() {
+    let out = ok("function f(x: T) {\n  return match (x) { A(value) => value, _ => 0 }\n}\n");
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(out.contains("switch ($rl_m.kind)"), "{out}");
 }
 
 #[test]
@@ -229,7 +246,7 @@ const action = match (key) {
 };
 "#);
     assert!(
-        out.contains("case \"Escape\": case \"Tab\": { return (\"cancel\"); }"),
+        out.contains("case \"Escape\": case \"Tab\": { $rl_v0 = (\"cancel\"); break; }"),
         "{out}"
     );
 }
@@ -238,7 +255,7 @@ const action = match (key) {
 fn or_pattern_with_identical_bindings_shares_destructuring() {
     let out = ok("const r = match (x) { A(v) | B(v) => v, _ => 0 };");
     assert!(
-        out.contains("case \"A\": case \"B\": { const { v } = $rl_m; return (v); }"),
+        out.contains("case \"A\": case \"B\": { const { v } = $rl_m; $rl_v0 = (v); break; }"),
         "{out}"
     );
 }
@@ -378,13 +395,13 @@ const grade = match (s) {
     assert!(!out.contains("switch ("), "{out}");
     assert!(
         out.contains(
-            "if ($rl_m.kind === \"Graded\") { const { points } = $rl_m; if ((points >= 90)) return (\"A\"); }"
+            "if ($rl_m.kind === \"Graded\") { const { points } = $rl_m; if ((points >= 90)) { $rl_v0 = (\"A\"); break; } }"
         ),
         "{out}"
     );
     assert!(
         out.contains(
-            "if ($rl_m.kind === \"Graded\") { const { points } = $rl_m; return (\"F\"); }"
+            "if ($rl_m.kind === \"Graded\") { const { points } = $rl_m; $rl_v0 = (\"F\"); break; }"
         ),
         "{out}"
     );
@@ -443,7 +460,7 @@ fn guard_with_or_pattern_emits_combined_condition() {
     let out = ok("const r = match (x) { A(v) | B(v) if v > 0 => v, _ => 0 };");
     assert!(
         out.contains(
-            "if ($rl_m.kind === \"A\" || $rl_m.kind === \"B\") { const { v } = $rl_m; if ((v > 0)) return (v); }"
+            "if ($rl_m.kind === \"A\" || $rl_m.kind === \"B\") { const { v } = $rl_m; if ((v > 0)) { $rl_v0 = (v); break; } }"
         ),
         "{out}"
     );
@@ -460,6 +477,15 @@ fn guarded_block_body_uses_labeled_break() {
 fn await_in_guard_makes_match_async() {
     let out = ok(
         "async function f(x: T) { return match (x) { A(u) if await allowed(u) => 1, _ => 0 }; }",
+    );
+    assert!(!out.contains("async () =>"), "{out}");
+    assert!(out.contains("if ((await allowed(u))) return (1);"), "{out}");
+}
+
+#[test]
+fn nested_await_match_keeps_its_expression_boundary() {
+    let out = ok(
+        "async function f(x: T) { return consume(match (x) { A(url) => await fetch(url), _ => null }); }",
     );
     assert!(out.contains("(await (async () => {"), "{out}");
 }
@@ -1596,7 +1622,10 @@ fn pipeline_inside_match_scrutinee_arm_and_template() {
         out.contains("const $rl_m = ($rl_ap((x), (norm)));"),
         "{out}"
     );
-    assert!(out.contains("return ($rl_ap((v), (double)));"), "{out}");
+    assert!(
+        out.contains("$rl_v0 = ($rl_ap((v), (double))); break;"),
+        "{out}"
+    );
     assert!(out.contains("`n=${$rl_ap((x), (f))}`"), "{out}");
 }
 
@@ -1773,11 +1802,13 @@ const step = match (dir, speed) {
     assert!(out.contains("const $rl_m0 = (dir);"), "{out}");
     assert!(out.contains("const $rl_m1 = (speed);"), "{out}");
     assert!(
-        out.contains("if ($rl_m0.kind === \"North\" && $rl_m1.kind === \"Fast\") { return (2); }"),
+        out.contains(
+            "if ($rl_m0.kind === \"North\" && $rl_m1.kind === \"Fast\") { $rl_v0 = (2); break; }"
+        ),
         "{out}"
     );
     assert!(
-        out.contains("if ($rl_m0.kind === \"South\") { return (-1); }"),
+        out.contains("if ($rl_m0.kind === \"South\") { $rl_v0 = (-1); break; }"),
         "{out}"
     );
     assert!(out.contains("JSON.stringify([$rl_m0, $rl_m1])"), "{out}");
@@ -1793,7 +1824,7 @@ const r = match (a, b) {
 "#);
     assert!(
         out.contains(
-            "{ const { value: x } = $rl_m0; const { value: y } = $rl_m1; return (x + y); }"
+            "{ const { value: x } = $rl_m0; const { value: y } = $rl_m1; $rl_v0 = (x + y); break; }"
         ),
         "{out}"
     );
@@ -1845,7 +1876,7 @@ const step = match (d, s) {
     assert!(out.contains("$rl_m0"), "{out}");
     assert!(
         out.contains(
-            "if (($rl_m0.kind === \"North\" || $rl_m0.kind === \"South\")) { return (1); }"
+            "if (($rl_m0.kind === \"North\" || $rl_m0.kind === \"South\")) { $rl_v0 = (1); break; }"
         ),
         "{out}"
     );
@@ -1878,7 +1909,7 @@ const r = match (a, b) {
   _ => 0,
 };
 "#);
-    assert!(out.contains("return (0);"), "{out}");
+    assert!(out.contains("$rl_v0 = (0); break;"), "{out}");
 
     let e = err("const r = match (a, b) {\n  _ => 0,\n  (A, B) => 1,\n};\n");
     assert!(e.message.contains("must be the last arm"), "{}", e.message);
@@ -1993,7 +2024,8 @@ fn tuple_match_await_in_scrutinee_makes_it_async() {
     let out = ok(
         "async function f() {\n  return match (await a, b) {\n    (X, Y) => 1,\n    _ => 0,\n  };\n}\n",
     );
-    assert!(out.contains("(await (async () => {"), "{out}");
+    assert!(!out.contains("async () =>"), "{out}");
+    assert!(out.contains("const $rl_m0 = (await a);"), "{out}");
 }
 
 #[test]
@@ -2023,11 +2055,13 @@ const n = match (r) {
 };
 "#);
     assert!(
-        out.contains("if ($rl_m.kind === \"Ok\" && $rl_m.value.kind === \"Some\") { const { value: v } = $rl_m.value; return (v); }"),
+        out.contains("if ($rl_m.kind === \"Ok\" && $rl_m.value.kind === \"Some\") { const { value: v } = $rl_m.value; $rl_v0 = (v); break; }"),
         "{out}"
     );
     assert!(
-        out.contains("if ($rl_m.kind === \"Ok\" && $rl_m.value.kind === \"None\") { return (0); }"),
+        out.contains(
+            "if ($rl_m.kind === \"Ok\" && $rl_m.value.kind === \"None\") { $rl_v0 = (0); break; }"
+        ),
         "{out}"
     );
     // nested patterns force the if-chain form
@@ -2059,7 +2093,7 @@ const n = match (r) {
 "#);
     assert!(
         out.contains(
-            "{ const { left } = $rl_m; const { value } = $rl_m.right; return (left + value); }"
+            "{ const { left } = $rl_m; const { value } = $rl_m.right; $rl_v0 = (left + value); break; }"
         ),
         "{out}"
     );
@@ -2160,7 +2194,10 @@ const n = match (r) {
   _ => 0,
 };
 "#);
-    assert!(out.contains("if ((v > 0)) return (v);"), "{out}");
+    assert!(
+        out.contains("if ((v > 0)) { $rl_v0 = (v); break; }"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -2634,9 +2671,9 @@ const label = match (dir) {
     assert!(out.contains("const $rl_m = (dir);"));
     assert!(out.contains("switch ($rl_m) {"));
     assert!(!out.contains("$rl_m.kind"));
-    assert!(out.contains(r#"case "north": { return ("N"); }"#));
-    assert!(out.contains(r#"case "south": { return ("S"); }"#));
-    assert!(out.contains(r#"default: { return ("?"); }"#));
+    assert!(out.contains(r#"case "north": { $rl_v0 = ("N"); break; }"#));
+    assert!(out.contains(r#"case "south": { $rl_v0 = ("S"); break; }"#));
+    assert!(out.contains(r#"default: { $rl_v0 = ("?"); break; }"#));
 }
 
 #[test]
@@ -2650,17 +2687,17 @@ const message = match (status) {
 };
 "#);
     assert!(out.contains("switch ($rl_m) {"));
-    assert!(out.contains(r#"case 200: { return ("ok"); }"#));
-    assert!(out.contains(r#"case 404: { return ("not found"); }"#));
-    assert!(out.contains(r#"case 500: { return ("error"); }"#));
+    assert!(out.contains(r#"case 200: { $rl_v0 = ("ok"); break; }"#));
+    assert!(out.contains(r#"case 404: { $rl_v0 = ("not found"); break; }"#));
+    assert!(out.contains(r#"case 500: { $rl_v0 = ("error"); break; }"#));
 }
 
 #[test]
 fn literal_boolean_match_emits_true_and_false_cases() {
     let out = ok("const v = match (flag) { true => 1, false => 0 };");
     assert!(out.contains("switch ($rl_m) {"));
-    assert!(out.contains("case true: { return (1); }"));
-    assert!(out.contains("case false: { return (0); }"));
+    assert!(out.contains("case true: { $rl_v0 = (1); break; }"));
+    assert!(out.contains("case false: { $rl_v0 = (0); break; }"));
 }
 
 #[test]
@@ -2672,10 +2709,10 @@ const kind = match (code) {
   _ => "unknown",
 };
 "#);
-    assert!(out.contains(r#"case 200: case 201: case 204: { return ("success"); }"#));
-    assert!(out.contains(r#"case 400: case 404: { return ("client error"); }"#));
+    assert!(out.contains(r#"case 200: case 201: case 204: { $rl_v0 = ("success"); break; }"#));
+    assert!(out.contains(r#"case 400: case 404: { $rl_v0 = ("client error"); break; }"#));
     // one body per arm, never duplicated per alternative
-    assert_eq!(out.matches(r#"return ("success")"#).count(), 1);
+    assert_eq!(out.matches(r#"$rl_v0 = ("success")"#).count(), 1);
 }
 
 #[test]
@@ -2713,8 +2750,8 @@ fn literal_match_block_bodies_break_out_of_the_switch() {
 fn literal_match_with_a_guard_becomes_an_if_chain() {
     let out = ok("const v = match (code) { 200 if ok => 1, 200 => 2, _ => 3 };");
     assert!(!out.contains("switch ("));
-    assert!(out.contains("if ($rl_m === 200) { if ((ok)) return (1); }"));
-    assert!(out.contains("if ($rl_m === 200) { return (2); }"));
+    assert!(out.contains("if ($rl_m === 200) { if ((ok)) { $rl_v0 = (1); break; } }"));
+    assert!(out.contains("if ($rl_m === 200) { $rl_v0 = (2); break; }"));
 }
 
 #[test]
@@ -2823,9 +2860,10 @@ const v = match (a) {
 }
 
 #[test]
-fn literal_match_with_await_becomes_an_async_iife() {
+fn direct_return_literal_match_keeps_await_in_the_host_function() {
     let out = ok(r#"async function f() { return match (s) { "a" => await g(), _ => null }; }"#);
-    assert!(out.contains("(await (async () => {"));
+    assert!(!out.contains("async () =>"), "{out}");
+    assert!(out.contains("return (await g());"), "{out}");
 }
 
 #[test]

@@ -420,6 +420,7 @@ impl Lower {
 
     fn lower_try(&mut self, stmt: &ast::TryStmt) -> TryStmt {
         let node = self.node(Self::span(stmt.span), AstOrigin::Try);
+        let owner = self.node(Self::span(stmt.owner_span), AstOrigin::TryOwner);
         let binding = stmt.decl.as_ref().map(|(keyword, span)| BindingText {
             node: self.node(Self::span(*span), AstOrigin::BindingText),
             mode: Self::binding_mode(keyword),
@@ -427,6 +428,7 @@ impl Lower {
         let expr = self.lower_expr_program(&stmt.expr, Self::span(stmt.span));
         TryStmt {
             node,
+            owner,
             binding,
             expr,
         }

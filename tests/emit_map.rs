@@ -113,7 +113,7 @@ function classify(a: Shape, b: Shape): string {
 }
 
 function run(r: Result<number, string>): Result<number, string> {
-  try const n = r;
+  const n = try r;
   const doubled = n |> ((x) => x * 2) |> .toString();
   const Circle(radius) = getShape() else { return r; };
   if let Circle(radius: rr) = getShape() {

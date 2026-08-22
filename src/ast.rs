@@ -349,6 +349,8 @@ pub(crate) struct TryStmt {
     /// Byte offset of the statement start (the declaration keyword, or `try`
     /// for the bare form), for error reporting.
     pub keyword_off: usize,
+    /// Complete source owner, including the terminating semicolon.
+    pub owner_span: Span,
     /// The propagation itself: the `try` keyword through the last byte of
     /// the expression it propagates, `;` excluded. This is the span a
     /// diagnostic about the propagation belongs on — Rust underlines the
