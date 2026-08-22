@@ -140,6 +140,14 @@ rlc가 "문제가 생겼을 때 그 케이스만 막는 코드"로 자라고 있
 - 2026-08-22: 검증 게이트 실행 중 `cargo test` 실패 발견 → `git stash -u`로
   `HEAD` 재현(기존 실패 확정), CLI 경로와 엔진 경로 대조, `defer_to_checker`
   추적으로 원인 규명(발견 1). 리뷰 문서를 재구성하고 우선순위표를 갱신.
+- 2026-08-22: 사용자 지시로 `microsoft/typescript-go`를 shallow clone 후
+  `go build -o built/local/tsgo ./cmd/tsgo`(Go 1.24.7)와
+  `npm ci && npx tsc -b _packages/native-preview`로 양쪽을 빌드
+  (`tsgo --version` → 7.1.0-dev). `RLC_TSGO_ROOT` + `RLC_REQUIRE_TSGO=1`로
+  전체 테스트 **673 passed / 0 failed** 확인. `tests/native.rs` 38건이
+  0.00초(스킵) → 13.51초(실제 실행)로 바뀐 것까지 확인해 발견 3의
+  "조용한 스킵" 주장을 수치로 확정. 이어 백엔드 유/무 A/B로 발견 1을
+  확증(이슈 6).
 - 2026-08-22: `docs/design/structural-review.md` 작성, 본 문서와 INDEX 갱신.
 
 ## 이슈 및 해결
@@ -202,19 +210,38 @@ rlc가 "문제가 생겼을 때 그 케이스만 막는 코드"로 자라고 있
   TypeScript 7 백엔드가 없으면 `answers`가 비어 모든 파일이 `continue`되고
   검사가 사라진다. CI는 `typescript@7`을 설치하므로 이 구성을 한 번도
   실행하지 않는다.
-- **해결**: 이 태스크에서는 고치지 않았다(결정 3·4). 발견 1로 문서화하고
-  우선순위 2위로 올렸다. 남은 부채: 백엔드 폴백 규칙 도입과, 백엔드 없는
-  구성을 도는 CI 잡. 그때까지 이 저장소의 `cargo test`는 TypeScript 7
-  툴체인이 없는 환경에서 빨간불이다.
+- **해결**: 사용자 지시로 typescript-go를 클론·빌드해 붙이고 진단을
+  확증했다(아래 이슈 6). 코드 수정은 하지 않았다(결정 3·4). 발견 1로
+  문서화하고 우선순위 2위로 올렸다. 남은 부채: 백엔드 폴백 규칙 도입과,
+  백엔드 없는 구성을 도는 CI 잡. 그때까지 rl 사용자는 TypeScript 7이 없는
+  환경의 에디터에서 소진성 경고를 받지 못한다.
+
+### 이슈 6: 첫 A/B 측정이 형제 경로 자동 탐색으로 오염됐다
+
+- **증상**: typescript-go를 빌드한 뒤 백엔드 유/무를 비교하려고
+  `env -u RLC_TSGO_ROOT -u RLC_TSGO_API -u RLC_TSGO_BIN`으로 돌렸는데
+  "백엔드 없음" 쪽에서도 소진성이 정상 보고됐다. 발견 1의 진단이 틀린
+  것처럼 보였다.
+- **원인**: `typescript/native.rs::Toolchain::resolve`가 환경 변수가 없으면
+  프로세스 CWD 기준 `../typescript-go`를 탐색한다. 측정을 `/home/user/rl`
+  에서 돌렸고 체크아웃을 `/home/user/typescript-go`에 두었으므로, 환경
+  변수를 지워도 방금 빌드한 백엔드를 그대로 찾아갔다. 두 실행의 문구가
+  달랐던 것(`match on enum E is not exhaustive` vs `match is not
+  exhaustive`)이 단서였다 — 앞은 `sema`의 선언 기반 문구, 뒤는
+  `engine/semantics.rs`의 체커 기반 문구다.
+- **해결**: 그 형제 경로가 보이지 않는 디렉터리에서 다시 측정했다. 그러자
+  백엔드 없는 쪽은 파이프 에러만 보고하고 소진성이 사라졌다. 재현 절차와
+  이 함정을 리뷰 문서 부록 B에 적어 두었다.
 
 ## 검증
 
 - [x] `cargo fmt --check`
 - [x] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test` — **기존 실패 1건** (이슈 5, 발견 1). 내 변경 이전
-      `HEAD`(e11a170)에서 동일하게 실패하며, 이 태스크는 소스를 바꾸지
-      않았다. `--no-fail-fast` 기준 672 passed / 1 failed
-      (기본 실행은 `engine_cache`에서 멈춰 이후 스위트가 돌지 않는다).
+- [x] `cargo test` — typescript-go를 빌드해 붙인 뒤
+      **673 passed / 0 failed** (`RLC_TSGO_ROOT` + `RLC_REQUIRE_TSGO=1`).
+      툴체인 없이는 672 passed / 1 failed이며(`--no-fail-fast` 기준; 기본
+      실행은 `engine_cache`에서 멈춰 이후 스위트가 돌지 않는다), 그 차이가
+      발견 1이다. 이 태스크는 소스를 바꾸지 않았다.
 
 소스 변경이 없어 게이트는 기준선 확인 용도다(측정용 국소 패치는 되돌린
 뒤 `git status` 청결을 확인했다).

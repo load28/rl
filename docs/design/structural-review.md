@@ -33,8 +33,11 @@
 소진성이 사라짐)과 발견 2(자가 검사가 남의 코드를 검사함)가 그렇다.
 그 결과 **두 절대 불변 원칙이 지금 둘 다 깨져 있다.**
 
-리뷰 중 확인된 사실 하나: 이 저장소의 `cargo test`는 **지금 빨간불이다.**
-내 변경 이전, `HEAD`(e11a170)에서 그렇다. 발견 1이 그 원인이다.
+리뷰 중 확인된 사실 하나: 이 저장소의 `cargo test`는 TypeScript 7 툴체인이
+없으면 **빨간불이다.** 내 변경 이전, `HEAD`(e11a170)에서 그렇다.
+typescript-go를 클론·빌드해 붙이면 673건 전부 초록으로 바뀐다 — 즉
+테스트가 잘못된 게 아니라, 툴체인 없는 구성에서 실제로 깨지는 것이 있다.
+발견 1이 그것이다.
 
 아래 발견은 심각도 순이다.
 
@@ -44,8 +47,8 @@
 
 ### 증상
 
-이 컨테이너에서 `cargo test`가 **빨간불이다.** 내 변경 이전, `HEAD`
-(e11a170)에서 그렇다:
+TypeScript 7 툴체인이 없으면 `cargo test`가 실패한다. 내 변경 이전,
+`HEAD`(e11a170)에서 그렇다:
 
 ```
 test result: FAILED. 2 passed; 1 failed
@@ -54,16 +57,43 @@ assertion `left == right` failed   left: 1   right: 2
 ```
 
 테스트는 파일 두 개(파싱 실패 1 + 소진되지 않은 `match` 1)에서 진단 2건을
-기대하는데 1건만 온다. 빠진 쪽은 소진성이다. 같은 두 파일을 CLI로 돌리면
-둘 다 보고된다:
+기대하는데 1건만 온다. 빠진 쪽은 소진성이다.
+
+typescript-go를 클론해서 빌드하고(`go build -o built/local/tsgo ./cmd/tsgo`,
+`npm ci && npx tsc -b _packages/native-preview`) `RLC_TSGO_ROOT`로 붙이면
+**673 passed / 0 failed**로 초록이 된다. 그 상태에서 백엔드만 떼고 같은
+입력을 돌리면 차이가 그대로 드러난다:
 
 ```sh
-$ rlc --check ps
+# 백엔드 없음 — 소진성이 사라진다
+$ rlc --check-types ps
 rlc: ps/a-blocked.rl:1:18: pipeline: `|>` could not be parsed here ...
-rlc: ps/b-valid.rl:2:15: match on enum E is not exhaustive: missing "B" ...
+rlc: no TypeScript compiler found — ...
+rlc: the TypeScript layer did not run — only rl-level diagnostics are shown
+
+# 백엔드 있음 — 둘 다 나온다
+$ RLC_TSGO_ROOT=../typescript-go rlc --check-types ps
+rlc: ps/a-blocked.rl:1:18: pipeline: `|>` could not be parsed here ...
+rlc: ps/b-valid.rl:2:15: match is not exhaustive: missing "B" ...
 ```
 
-즉 **같은 규칙에 대해 CLI 배치 경로와 엔진 경로의 답이 다르다.**
+(형제 경로 `../typescript-go`가 자동 탐색되므로, 백엔드 없는 쪽은 그
+경로가 보이지 않는 디렉터리에서 돌려야 한다 — 처음 측정했을 때 이것
+때문에 A/B가 오염됐다.)
+
+CLI 배치 경로(`--check`)는 백엔드와 무관하게 항상 둘 다 보고한다. 즉
+**같은 규칙에 대해 CLI 경로와 엔진 경로의 답이 다르고, 엔진 쪽은 외부
+툴체인 유무에 달려 있다.**
+
+경고 문구가 상황을 더 나쁘게 만든다. `main.rs`는 이렇게 말한다:
+
+```
+rlc: the TypeScript layer did not run — only rl-level diagnostics are shown
+```
+
+바로 위 주석은 한술 더 뜬다 — *"the rl diagnostics above are **complete**,
+the typed layer is missing"*. 소진성은 rl-level 진단이고, 지금 빠져 있다.
+사용자에게 "rl 진단은 다 보여줬다"고 말하면서 그중 하나를 빠뜨리고 있다.
 
 ### 원인
 
@@ -123,6 +153,13 @@ VS Code 확장)를 쓰면 **소진성 경고가 나오지 않는다.** 에러가
 
 이 테스트는 잘못되지 않았다. 실패가 옳다. 게이트가 그걸 볼 수 없는 곳에
 서 있을 뿐이다.
+
+**툴체인을 붙이는 것으로는 이 발견이 닫히지 않는다.** 붙이면 이 저장소의
+테스트는 초록이 되고 타입 계층을 실제로 검증할 수 있게 되지만(그래서
+붙일 가치가 있다), rl을 쓰는 사용자 쪽 사정은 그대로다: TypeScript 7이
+없는 환경의 에디터에서는 여전히 소진성 경고가 조용히 사라진다. 환경
+문제와 구조 문제가 같은 증상을 냈을 뿐이고, 고쳐야 할 것은 폴백 규칙의
+부재다.
 
 ### 구조적 해법
 
@@ -216,11 +253,24 @@ fuzz 타깃도, property 테스트도, 외부 코퍼스도 없다(`Cargo.toml`�
 dev-dependencies 자체가 없다). 발견 2가 지금까지 잡히지 않은 이유가
 정확히 이것이다.
 
-같은 문제가 타입 계층에도 있다. 이 컨테이너에서 `tests/native.rs` 38건은
-**0.00초에 전부 초록**이다 — TypeScript 7 툴체인이 없어 조용히 스킵된다.
+같은 문제가 타입 계층에도 있다. 툴체인 없이 이 컨테이너에서
+`tests/native.rs` 38건은 **0.00초에 전부 초록**이었다 — 조용히 스킵된
+것이다. typescript-go를 붙이고 다시 돌리니 같은 38건이 **13.51초**에
+실제로 실행됐다. 즉 그 초록은 38건분의 검증이 아니라 0건분의 침묵이었다.
+
 CI는 `RLC_REQUIRE_TSGO`로 이 스킵을 실패로 바꾸지만, 그건 툴체인이
 *있는* 구성 하나만 지킨다. 툴체인이 없는 구성에서 실제로 무엇이 깨지는지를
-아는 테스트는 딱 하나 있고(`engine_cache`의 그 테스트), 그건 지금 빨간불이다.
+아는 테스트는 딱 하나 있고(`engine_cache`의 그 테스트), 그건 그 구성에서
+빨간불이다.
+
+정리하면 게이트가 지키는 범위는 이렇다.
+
+| 구성 | `cargo test` | `native.rs` 38건 | 소진성 계약 |
+|------|--------------|------------------|-------------|
+| 툴체인 있음 (CI) | 673 passed | 실제 실행 (13.5s) | 지켜짐 |
+| 툴체인 없음 (기본) | 1 failed | 조용히 스킵 (0.0s) | **깨짐** |
+
+두 줄 중 CI가 도는 건 위 한 줄뿐이다.
 
 ### 구조적 해법
 
@@ -456,3 +506,31 @@ CLAUDE.md 지도와 파이프라인 문단은 실제 계층으로 다시 쓴다.
 2. **스케일링 벤치** — 구문 n개짜리 파일을 n=1000/2000/4000으로 컴파일해
    순수 통과 대비 기울기를 본다. 발견 4·5를 잡는다.
 3. **백엔드 없는 구성의 CI 잡** — 발견 1을 잡는다.
+
+## 부록 B — 로컬에 tsgo 붙이기
+
+이 리뷰의 A/B 측정과 673건 초록 확인에 쓴 절차다. `rlc`는 형제 경로
+`../typescript-go`를 자동 탐색하므로 저장소 옆에 두면 환경 변수도 필요 없다
+(`typescript/native.rs::Toolchain::resolve`).
+
+```sh
+cd ..                                   # rl 저장소의 부모
+git clone --depth 1 https://github.com/microsoft/typescript-go.git
+cd typescript-go
+go build -o built/local/tsgo ./cmd/tsgo     # Go 1.24+, 몇 분 걸린다
+npm ci && npx tsc -b _packages/native-preview
+built/local/tsgo --version                  # Version 7.1.0-dev
+```
+
+두 산출물이 **한 빌드에서 나와야** 한다(`Toolchain::check`가 강제한다):
+
+- `built/local/tsgo` — API 서버로 실행되는 실행 파일
+- `_packages/native-preview/dist/api/sync/api.js` — host가 import하는 JS
+  클라이언트. `host.mjs`는 그 옆의 `dist/ast/index.js`도 함께 쓴다.
+
+명시적으로 지정하려면 `RLC_TSGO_ROOT=<체크아웃>`, 또는 두 경로를 따로
+`RLC_TSGO_API` / `RLC_TSGO_BIN`으로 준다.
+
+측정할 때 주의: 자동 탐색 때문에 "백엔드 없음" 쪽은 `../typescript-go`가
+보이지 않는 디렉터리에서 돌려야 한다. 환경 변수만 지우면 형제 경로로
+그대로 찾아간다.
