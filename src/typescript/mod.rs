@@ -6,6 +6,14 @@
 //! resolves to, whether the emitted module type-checks — is asked here and
 //! answered by the real compiler, never guessed by rlc.
 //!
+//! This is a deliberately small semantic adapter. TypeScript syntax and the
+//! whole-program AST used for source-preserving lowering belong to SWC inside
+//! rlc (`crate::program_syntax`); generated-module syntax is self-checked at
+//! that same boundary (`crate::verify`). Do not route those responsibilities
+//! through this backend merely because TypeScript 7 is required by the product
+//! toolchain: availability policy says the adapter must exist, while this
+//! module boundary says which questions are allowed to cross it.
+//!
 //! The layering is deliberate:
 //!
 //! - [`backend::TypeScriptBackend`] is the seam. rl features speak to it in

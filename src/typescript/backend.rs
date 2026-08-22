@@ -19,6 +19,12 @@
 //! every analysis loop. A backend that cannot run degrades every typed fact
 //! to unknown ([`Answers::default`]) — it never takes the rl layer down
 //! with it (`engine::Project::check`).
+//!
+//! The port is intentionally semantic-only. SWC owns TypeScript parsing,
+//! whole-program AST structure, and generated-output syntax verification
+//! inside the compiler process. Whether a distribution requires a compatible
+//! TypeScript 7 installation is an availability contract for this port, not a
+//! reason to expand [`Query`] into a general parsing or lowering interface.
 
 use std::path::PathBuf;
 

@@ -4,6 +4,18 @@
 //! This module projects Core IR primitives to category-preserving TypeScript
 //! placeholders, parses the complete projection with SWC, and joins every
 //! placeholder to its exact SWC parent path and stable minimum host owner.
+//!
+//! SWC is the compiler's in-process TypeScript **syntax substrate**, not a
+//! substitute for TypeScript's type checker. Its whole-program AST supplies
+//! the parent/owner/evaluation structure that lowering must retain while it
+//! rewrites an rl value. Sending that work to the TypeScript 7 backend would
+//! turn a local compiler invariant into an external semantic-service call and
+//! would duplicate the source-preserving target model maintained here.
+//!
+//! TypeScript 7 has a deliberately narrower boundary: the compiler asks it
+//! only for facts that syntax cannot prove, such as inferred types, narrowing,
+//! and symbol identity (`crate::typescript`). Requiring that backend as part
+//! of the toolchain does not transfer syntax ownership away from this SWC AST.
 
 use std::collections::{HashMap, HashSet};
 

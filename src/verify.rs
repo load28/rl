@@ -10,6 +10,22 @@
 //! 2. `verify_output` — the fully generated TypeScript module is parsed as a
 //!    self-check that the compiler emitted valid code (and that passthrough
 //!    code was valid TS to begin with). Disabled with `--no-verify`.
+//!
+//! This SWC check is intentionally in the syntax pipeline. The compiler
+//! already uses a whole-program SWC AST to model TypeScript owners and
+//! evaluation contexts (`crate::program_syntax`), so parsing the final module
+//! here checks the target against the same in-process syntax boundary. It does
+//! not ask or approximate any type-semantic question.
+//!
+//! The TypeScript 7 backend remains the authority for inferred types,
+//! narrowing, resolution, diagnostics, and declaration emit. Even when that
+//! backend is a required toolchain component, using it for this self-check
+//! would broaden an external semantic adapter into the compiler's syntax
+//! layer, add a process/protocol dependency to a local invariant, and repeat
+//! work before the typed pass. A valid TypeScript form accepted by TypeScript
+//! but rejected here is therefore an SWC compatibility/configuration bug to
+//! reproduce and fix at this boundary, not evidence that syntax verification
+//! belongs to the type backend.
 
 use swc_common::input::StringInput;
 use swc_common::sync::Lrc;
