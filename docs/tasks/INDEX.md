@@ -160,7 +160,8 @@
 | TASK-150 | 전체 rl 구문의 Lowered IR 아키텍처 전환 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-150](./TASK-150-lowered-ir-architecture.md) |
 | TASK-151 | Core IR backend 의미 판단 제거 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-151](./TASK-151-core-ir-backend-boundary.md) |
 | TASK-152 | TanStack Start 기반 공식 홈페이지와 rl 하이라이팅 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-152](./TASK-152-tanstack-start-website.md) |
+| TASK-153 | 홈페이지 오버뷰 조합 예제 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-153](./TASK-153-overview-composed-example.md) |
 
 ## 다음 태스크 번호
 
-**TASK-153**
+**TASK-154**

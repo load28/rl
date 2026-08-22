@@ -57,7 +57,7 @@
         "en": "rl is a small language that adds tagged unions, exhaustive pattern matching, Result control flow, pipelines, and mutation-safe bindings to TypeScript. It compiles to readable TypeScript and adds no runtime.",
         "ko": "rl은 TypeScript에 태그드 유니언, 소진적 패턴 매칭, Result 제어 흐름, 파이프라인, 변경 안전 바인딩을 더하는 작은 언어입니다. 읽기 쉬운 TypeScript로 컴파일되며 별도 런타임이 없습니다."
       },
-      "code": "export enum Shape {\n  Circle(radius: number),\n  Rect(width: number, height: number),\n  Point,\n}\n\nconst area = (shape: Shape) =>\n  match (shape) {\n    Circle(radius) => Math.PI * radius ** 2,\n    Rect(width, height) => width * height,\n    Point => 0,\n  };",
+      "code": "import { Result } from \"@rl/std\";\n\nconst message = input\n  |> parse\n  |> Result.mapP(format)\n  |> (result => match (result) {\n    Ok(value) => value,\n    Err(error) => `Error: ${error}`,\n  });",
       "works": {
         "en": [
           "Every valid TypeScript file remains a valid .rl file.",
