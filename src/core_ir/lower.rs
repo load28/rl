@@ -5,6 +5,7 @@ use crate::hir::{self, FieldBinding, Pat};
 use crate::resolve::{Res, Resolution};
 use crate::scanner::contains_await;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 pub(crate) fn lower_semantic(semantic: &SemanticFile, source: &str) -> CoreFile {
     let temp_ordinals = temp_ordinals(semantic);
@@ -77,25 +78,41 @@ impl Lowering<'_> {
             }
             hir::Stmt::Item(owner) => match &self.semantic.hir.items[owner.0 as usize] {
                 hir::Item::Enum(item) => {
-                    let def = self
-                        .semantic
-                        .resolution
-                        .defs
-                        .iter()
-                        .find_map(|(def, definition)| match &definition.kind {
-                            crate::resolve::DefKind::Enum(data)
-                                if matches!(data.origin, crate::resolve::DeclOrigin::Local(node) if node == item.node) =>
-                            {
-                                Some(def)
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| {
-                            panic!("internal compiler error: HIR enum has no resolved definition")
-                        });
-                    Some(Statement::Adt(def))
+                    let mut emitted = HashSet::new();
+                    Some(Statement::Adt(Adt {
+                        name: item.name.clone(),
+                        exported: item.exported,
+                        generics: item.generics.clone(),
+                        variants: item
+                            .variants
+                            .iter()
+                            .map(|variant_id| {
+                                let variant = &self.semantic.hir.variants[*variant_id];
+                                AdtVariant {
+                                    name: variant.name.clone(),
+                                    fields: variant.fields.as_ref().map(|field_ids| {
+                                        field_ids
+                                            .iter()
+                                            .map(|field_id| {
+                                                let field = &self.semantic.hir.fields[*field_id];
+                                                AdtField {
+                                                    name: field.name.clone(),
+                                                    optional: field.optional,
+                                                    ty_text: field.ty_text.clone(),
+                                                }
+                                            })
+                                            .collect()
+                                    }),
+                                    emit_constructor: emitted.insert(variant.name.clone()),
+                                }
+                            })
+                            .collect(),
+                    }))
                 }
-                hir::Item::Import(_) => Some(Statement::Import(*owner)),
+                hir::Item::Import(item) => Some(Statement::Import(Import {
+                    specifier: item.node,
+                    kind: item.kind,
+                })),
             },
             hir::Stmt::Try(stmt) => Some(Statement::Propagate(Propagate {
                 node: stmt.node,
@@ -113,6 +130,12 @@ impl Lowering<'_> {
                     |_, _| ArmAction::BindThrough(stmt.binding_mode),
                     MissAction::Execute(stmt.else_body),
                     true,
+                    DecisionKind::LetElse {
+                        binding_mode: stmt.binding_mode,
+                        direct_variants: direct_variant_alternatives(
+                            &self.lower_pattern(site.arms[0].pattern),
+                        ),
+                    },
                 )))
             }
             hir::Stmt::IfLet(stmt) => Some(Statement::Decision(self.lower_if_let(stmt))),
@@ -130,7 +153,7 @@ impl Lowering<'_> {
                     .arms
                     .iter()
                     .any(|arm| pattern_has_literal(&self.semantic.hir, arm.pattern));
-                Expr::Decision(self.lower_decision(
+                let mut decision = self.lower_decision(
                     site,
                     *extent,
                     |arm, kind| ArmAction::Yield {
@@ -149,7 +172,13 @@ impl Lowering<'_> {
                         UnexpectedKind::Case
                     }),
                     false,
-                ))
+                    DecisionKind::Match {
+                        dispatch: MatchDispatch::Conditional,
+                        needs_label: false,
+                    },
+                );
+                decision.kind = match_kind(&decision);
+                Expr::Decision(decision)
             }
             hir::Expr::Pipe { node, head, steps } => Expr::Apply(Apply {
                 node: *node,
@@ -210,6 +239,7 @@ impl Lowering<'_> {
         action: impl Fn(&hir::SiteArm, Option<ArmBodyKind>) -> ArmAction,
         miss: MissAction,
         file_unique_temps: bool,
+        kind: DecisionKind,
     ) -> Decision {
         let subjects = site
             .subjects
@@ -244,6 +274,7 @@ impl Lowering<'_> {
             head: site.node,
             extent,
             is_async: !file_unique_temps && self.node_contains_await(extent),
+            kind,
         }
     }
 
@@ -268,6 +299,7 @@ impl Lowering<'_> {
             },
             miss,
             true,
+            DecisionKind::IfLet,
         )
     }
 
@@ -436,6 +468,83 @@ fn pattern_has_literal(hir: &hir::HirFile, pattern: hir::PatternId) -> bool {
     }
 }
 
+fn match_kind(decision: &Decision) -> DecisionKind {
+    let needs_label = decision.arms.iter().any(|arm| {
+        matches!(
+            arm.action,
+            ArmAction::Yield {
+                kind: ArmBodyKind::Block,
+                ..
+            }
+        )
+    });
+    let switch = decision.subjects.len() == 1
+        && decision.arms.iter().all(|arm| arm.guard.is_none())
+        && decision
+            .arms
+            .iter()
+            .all(|arm| !pattern_has_nested_test(&arm.pattern));
+    let dispatch = if !switch {
+        MatchDispatch::Conditional
+    } else if decision
+        .arms
+        .iter()
+        .any(|arm| pattern_has_literal_test(&arm.pattern))
+    {
+        MatchDispatch::LiteralSwitch
+    } else {
+        MatchDispatch::VariantSwitch
+    };
+    DecisionKind::Match {
+        dispatch,
+        needs_label,
+    }
+}
+
+fn pattern_has_literal_test(plan: &PatternPlan) -> bool {
+    match plan {
+        PatternPlan::Test(Test::Literal { .. }) => true,
+        PatternPlan::AllOf(parts) | PatternPlan::AnyOf(parts) => {
+            parts.iter().any(pattern_has_literal_test)
+        }
+        PatternPlan::Any | PatternPlan::Bind(_) | PatternPlan::Test(Test::Variant { .. }) => false,
+    }
+}
+
+fn pattern_has_nested_test(plan: &PatternPlan) -> bool {
+    match plan {
+        PatternPlan::Test(Test::Variant { place, .. }) => !place.fields.is_empty(),
+        PatternPlan::AllOf(parts) | PatternPlan::AnyOf(parts) => {
+            parts.iter().any(pattern_has_nested_test)
+        }
+        PatternPlan::Any | PatternPlan::Bind(_) | PatternPlan::Test(Test::Literal { .. }) => false,
+    }
+}
+
+fn pattern_alternatives(plan: &PatternPlan) -> Vec<&PatternPlan> {
+    match plan {
+        PatternPlan::AnyOf(parts) => parts.iter().collect(),
+        _ => vec![plan],
+    }
+}
+
+fn direct_variant_alternatives(plan: &PatternPlan) -> Option<Vec<Constructor>> {
+    pattern_alternatives(plan)
+        .into_iter()
+        .map(|alternative| match alternative {
+            PatternPlan::AllOf(parts) => parts.iter().find_map(|part| match part {
+                PatternPlan::Test(Test::Variant { place, constructor })
+                    if place.fields.is_empty() =>
+                {
+                    Some(constructor.clone())
+                }
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 fn validate(file: &CoreFile, semantic: &SemanticFile) {
     assert!(
         file.root.index() < file.bodies.len(),
@@ -497,14 +606,22 @@ fn validate(file: &CoreFile, semantic: &SemanticFile) {
 fn validate_statement(statement: &Statement, file: &CoreFile, semantic: &SemanticFile) {
     match statement {
         Statement::Opaque(node) => validate_node(*node, semantic),
-        Statement::Adt(def) => assert!(
-            def.index() < semantic.resolution.defs.len(),
-            "internal compiler error: Core IR ADT definition is invalid"
-        ),
-        Statement::Import(owner) => assert!(
-            (owner.0 as usize) < semantic.hir.items.len(),
-            "internal compiler error: Core IR import owner is invalid"
-        ),
+        Statement::Adt(adt) => {
+            assert!(
+                !adt.name.is_empty(),
+                "internal compiler error: empty Core ADT"
+            );
+            assert!(
+                !adt.variants.is_empty(),
+                "internal compiler error: Core ADT has no variants"
+            );
+        }
+        Statement::Import(import) => {
+            validate_node(import.specifier, semantic);
+            match import.kind {
+                hir::ImportKind::Std | hir::ImportKind::Relative => {}
+            }
+        }
         Statement::Propagate(propagate) => validate_propagate(propagate, file, semantic),
         Statement::Decision(decision) => validate_decision(decision, file, semantic),
         Statement::Expr(expr) => validate_expr(*expr, file),
@@ -522,6 +639,15 @@ fn validate_decision(decision: &Decision, file: &CoreFile, semantic: &SemanticFi
     }
     validate_node(decision.head, semantic);
     validate_node(decision.extent, semantic);
+    match decision.kind {
+        DecisionKind::Match { dispatch, .. } => match dispatch {
+            MatchDispatch::Conditional
+            | MatchDispatch::VariantSwitch
+            | MatchDispatch::LiteralSwitch => {}
+        },
+        DecisionKind::IfLet => {}
+        DecisionKind::LetElse { binding_mode, .. } => validate_binding_mode(binding_mode),
+    }
     if decision.is_async {
         assert!(
             decision

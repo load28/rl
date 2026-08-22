@@ -7,9 +7,8 @@
 
 mod lower;
 
-use crate::hir::{
-    ArmBodyKind, BindingMode, BindingText, BodyId, DefId, ExprId, FieldId, NodeId, OwnerId,
-};
+use crate::hir;
+use crate::hir::{ArmBodyKind, BindingMode, BindingText, BodyId, ExprId, FieldId, NodeId};
 use crate::resolve::{FieldRef, VariantRef};
 
 pub(crate) use lower::lower_semantic;
@@ -30,8 +29,8 @@ pub(crate) struct Body {
 #[derive(Debug)]
 pub(crate) enum Statement {
     Opaque(NodeId),
-    Adt(DefId),
-    Import(OwnerId),
+    Adt(Adt),
+    Import(Import),
     Propagate(Propagate),
     Decision(Decision),
     Expr(ExprId),
@@ -67,6 +66,27 @@ pub(crate) struct Decision {
     pub head: NodeId,
     pub extent: NodeId,
     pub is_async: bool,
+    pub kind: DecisionKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum DecisionKind {
+    Match {
+        dispatch: MatchDispatch,
+        needs_label: bool,
+    },
+    IfLet,
+    LetElse {
+        binding_mode: BindingMode,
+        direct_variants: Option<Vec<Constructor>>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchDispatch {
+    Conditional,
+    VariantSwitch,
+    LiteralSwitch,
 }
 
 #[derive(Debug)]
@@ -103,10 +123,38 @@ pub(crate) enum Test {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Constructor {
     Resolved { reference: VariantRef, node: NodeId },
     Recovery { node: NodeId, name: String },
+}
+
+#[derive(Debug)]
+pub(crate) struct Import {
+    pub specifier: NodeId,
+    pub kind: hir::ImportKind,
+}
+
+#[derive(Debug)]
+pub(crate) struct Adt {
+    pub name: String,
+    pub exported: bool,
+    pub generics: String,
+    pub variants: Vec<AdtVariant>,
+}
+
+#[derive(Debug)]
+pub(crate) struct AdtVariant {
+    pub name: String,
+    pub fields: Option<Vec<AdtField>>,
+    pub emit_constructor: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct AdtField {
+    pub name: String,
+    pub optional: bool,
+    pub ty_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -387,5 +435,58 @@ mod tests {
                 .iter()
                 .all(|element| matches!(element, PatternPlan::AnyOf(alts) if alts.len() == 2))
         );
+    }
+
+    #[test]
+    fn match_dispatch_is_fixed_before_target_lowering() {
+        let source = "enum E { A, B }\n\
+            const tagged = match (e) { A => 1, B => 2 };\n\
+            const literal = match (n) { 0 => 1, _ => 2 };\n\
+            const nested = match (e) { A => 1, B if ready => 2, _ => 3 };\n";
+        let core = lower(source);
+        let dispatches = core
+            .exprs
+            .iter()
+            .filter_map(|expr| match expr {
+                Expr::Decision(Decision {
+                    kind: DecisionKind::Match { dispatch, .. },
+                    ..
+                }) => Some(*dispatch),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dispatches,
+            vec![
+                MatchDispatch::VariantSwitch,
+                MatchDispatch::LiteralSwitch,
+                MatchDispatch::Conditional,
+            ]
+        );
+    }
+
+    #[test]
+    fn statement_decision_kind_is_fixed_before_target_lowering() {
+        let source = "enum E { A(value: number), B }\n\
+            if let A(value) = e { use(value); }\n\
+            const A(value) | B = e else { return; };\n";
+        let core = lower(source);
+        let kinds = core
+            .bodies
+            .iter()
+            .flat_map(|body| &body.statements)
+            .filter_map(|statement| match statement {
+                Statement::Decision(decision) => Some(&decision.kind),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(kinds[0], DecisionKind::IfLet));
+        assert!(matches!(
+            kinds[1],
+            DecisionKind::LetElse {
+                direct_variants: Some(variants),
+                ..
+            } if variants.len() == 2
+        ));
     }
 }

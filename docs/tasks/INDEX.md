@@ -158,7 +158,8 @@
 | TASK-148 | README 전면 개편과 언어 스펙 문서 정리 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-148](./TASK-148-readme-rework.md) |
 | TASK-149 | 공식 GitHub Pages 홈페이지 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-149](./TASK-149-official-github-pages.md) |
 | TASK-150 | 전체 rl 구문의 Lowered IR 아키텍처 전환 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-150](./TASK-150-lowered-ir-architecture.md) |
+| TASK-151 | Core IR backend 의미 판단 제거 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-151](./TASK-151-core-ir-backend-boundary.md) |
 
 ## 다음 태스크 번호
 
-**TASK-151**
+**TASK-152**

@@ -12,7 +12,6 @@ use crate::analysis::SemanticFile;
 use crate::core_ir::*;
 use crate::hir::ids::Idx;
 use crate::hir::{self, ArmBodyKind, BindingMode, ExprId, NodeId};
-use crate::resolve::{DeclOrigin, DefKind, Definition};
 use crate::scanner::{at, ident_end, is_ident_start, scan_type_end, skip_ws_comments};
 use crate::{AnchorKind, ImportRewrite};
 
@@ -91,8 +90,8 @@ impl<'a> Emitter<'a> {
         for statement in &self.core.bodies[body.index()].statements {
             match statement {
                 Statement::Opaque(node) => out.append(self.source_rope(*node)),
-                Statement::Adt(def) => out.push_lit(self.emit_adt(*def)),
-                Statement::Import(owner) => self.emit_import(*owner, &mut out),
+                Statement::Adt(adt) => out.push_lit(emit_adt_text(adt)),
+                Statement::Import(import) => self.emit_import(import, &mut out),
                 Statement::Propagate(propagate) => {
                     let span = self.span(propagate.node);
                     out.anchored(
@@ -269,11 +268,8 @@ impl<'a> Emitter<'a> {
         out
     }
 
-    fn emit_import(&self, owner: hir::OwnerId, out: &mut Rope<'a>) {
-        let hir::Item::Import(import) = &self.semantic.hir.items[owner.0 as usize] else {
-            panic!("internal compiler error: Core import points to a non-import item")
-        };
-        let (specifier, at) = self.source_node(import.node);
+    fn emit_import(&self, import: &Import, out: &mut Rope<'a>) {
+        let (specifier, at) = self.source_node(import.specifier);
         if import.kind == hir::ImportKind::Std {
             match self.std_import {
                 Some(path) => {
@@ -297,35 +293,15 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit_adt(&self, def: hir::DefId) -> String {
-        let definition = &self.semantic.resolution.defs[def];
-        let DefKind::Enum(data) = &definition.kind else {
-            panic!("internal compiler error: Core ADT points to a value definition")
-        };
-        let DeclOrigin::Local(node) = data.origin else {
-            panic!("internal compiler error: Core ADT is not local")
-        };
-        let item = self
-            .semantic
-            .hir
-            .items
-            .iter()
-            .find_map(|item| match item {
-                hir::Item::Enum(item) if item.node == node => Some(item),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("internal compiler error: local ADT has no HIR item"));
-        emit_adt_text(definition, data, item, &self.semantic.hir)
-    }
-
     fn emit_statement_decision(&self, decision: &Decision, out: &mut Rope<'a>) {
         let span = self.span(decision.head);
-        let (kind, inner) = match decision.arms.first().map(|arm| &arm.action) {
-            Some(ArmAction::BindThrough(mode)) => {
-                (AnchorKind::LetElse, self.emit_let_else(decision, *mode))
-            }
-            Some(ArmAction::Execute(_)) => (AnchorKind::IfLet, self.emit_if_let(decision)),
-            Some(ArmAction::Yield { .. }) | None => {
+        let (kind, inner) = match &decision.kind {
+            DecisionKind::LetElse { binding_mode, .. } => (
+                AnchorKind::LetElse,
+                self.emit_let_else(decision, *binding_mode),
+            ),
+            DecisionKind::IfLet => (AnchorKind::IfLet, self.emit_if_let(decision)),
+            DecisionKind::Match { .. } => {
                 panic!("internal compiler error: expression decision in statement position")
             }
         };
@@ -340,8 +316,13 @@ impl<'a> Emitter<'a> {
         out.push_lit(format!("const {temp} = ("));
         out.append(self.emit_expr(subject.value).trim());
         out.push_lit("); if (");
-        let variants = direct_variant_alternatives(&arm.pattern);
-        if let Some(variants) = variants {
+        let DecisionKind::LetElse {
+            direct_variants, ..
+        } = &decision.kind
+        else {
+            panic!("internal compiler error: let-else has wrong Core decision kind")
+        };
+        if let Some(variants) = direct_variants {
             for (index, constructor) in variants.iter().enumerate() {
                 if index > 0 {
                     out.push_lit(" && ");
@@ -410,16 +391,14 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value_decision(&self, decision: &Decision) -> Rope<'a> {
-        let switch = decision.subjects.len() == 1
-            && decision.arms.iter().all(|arm| arm.guard.is_none())
-            && decision
-                .arms
-                .iter()
-                .all(|arm| !pattern_has_nested_test(&arm.pattern));
-        let inner = if switch {
-            self.emit_switch(decision)
-        } else {
-            self.emit_if_chain(decision)
+        let DecisionKind::Match { dispatch, .. } = decision.kind else {
+            panic!("internal compiler error: value decision is not a match")
+        };
+        let inner = match dispatch {
+            MatchDispatch::Conditional => self.emit_if_chain(decision),
+            MatchDispatch::VariantSwitch | MatchDispatch::LiteralSwitch => {
+                self.emit_switch(decision)
+            }
         };
         let mut out = Rope::new();
         out.push_lit(if decision.is_async {
@@ -441,10 +420,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_switch(&self, decision: &Decision) -> Rope<'a> {
-        let literal = decision
-            .arms
-            .iter()
-            .any(|arm| pattern_has_literal_test(&arm.pattern));
+        let DecisionKind::Match { dispatch, .. } = decision.kind else {
+            panic!("internal compiler error: switch decision is not a match")
+        };
+        let literal = dispatch == MatchDispatch::LiteralSwitch;
         let temp = temp_name(decision.subjects[0].temporary);
         let mut out = Rope::new();
         out.push_lit(if literal {
@@ -482,15 +461,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_if_chain(&self, decision: &Decision) -> Rope<'a> {
-        let needs_label = decision.arms.iter().any(|arm| {
-            matches!(
-                arm.action,
-                ArmAction::Yield {
-                    kind: ArmBodyKind::Block,
-                    ..
-                }
-            )
-        });
+        let DecisionKind::Match { needs_label, .. } = decision.kind else {
+            panic!("internal compiler error: conditional decision is not a match")
+        };
         let mut out = Rope::new();
         if needs_label {
             out.push_lit("  $rl_b: {\n");
@@ -841,38 +814,11 @@ fn pattern_has_literal_test(plan: &PatternPlan) -> bool {
     }
 }
 
-fn pattern_has_nested_test(plan: &PatternPlan) -> bool {
-    match plan {
-        PatternPlan::Test(Test::Variant { place, .. }) => !place.fields.is_empty(),
-        PatternPlan::AllOf(parts) | PatternPlan::AnyOf(parts) => {
-            parts.iter().any(pattern_has_nested_test)
-        }
-        PatternPlan::Any | PatternPlan::Bind(_) | PatternPlan::Test(Test::Literal { .. }) => false,
-    }
-}
-
 fn pattern_alternatives(plan: &PatternPlan) -> Vec<&PatternPlan> {
     match plan {
         PatternPlan::AnyOf(parts) => parts.iter().collect(),
         _ => vec![plan],
     }
-}
-
-fn direct_variant_alternatives(plan: &PatternPlan) -> Option<Vec<&Constructor>> {
-    pattern_alternatives(plan)
-        .into_iter()
-        .map(|alternative| match alternative {
-            PatternPlan::AllOf(parts) => parts.iter().find_map(|part| match part {
-                PatternPlan::Test(Test::Variant { place, constructor })
-                    if place.fields.is_empty() =>
-                {
-                    Some(constructor)
-                }
-                _ => None,
-            }),
-            _ => None,
-        })
-        .collect()
 }
 
 type BindingGroup<'a> = (Place, Vec<(&'a Bind, bool)>);
@@ -982,14 +928,9 @@ fn unexpected_switch(literal: bool) -> &'static str {
     }
 }
 
-fn emit_adt_text(
-    definition: &Definition,
-    data: &crate::resolve::EnumDef,
-    item: &hir::EnumItem,
-    hir: &hir::HirFile,
-) -> String {
-    let export = if item.exported { "export " } else { "" };
-    let arms = data
+fn emit_adt_text(adt: &Adt) -> String {
+    let export = if adt.exported { "export " } else { "" };
+    let arms = adt
         .variants
         .iter()
         .map(|variant| match &variant.fields {
@@ -1011,22 +952,17 @@ fn emit_adt_text(
         })
         .collect::<Vec<_>>()
         .join("\n  | ");
-    let type_decl = format!(
-        "{export}type {}{} =\n  | {arms};",
-        definition.name, data.generics
-    );
-    let type_args = if data.generics.is_empty() {
+    let type_decl = format!("{export}type {}{} =\n  | {arms};", adt.name, adt.generics);
+    let type_args = if adt.generics.is_empty() {
         String::new()
     } else {
-        format!("<{}>", generic_param_names(&data.generics).join(", "))
+        format!("<{}>", generic_param_names(&adt.generics).join(", "))
     };
-    let mut emitted = HashSet::new();
-    let constructors = item
+    let constructors = adt
         .variants
         .iter()
-        .filter_map(|variant_id| {
-            let variant = &hir.variants[*variant_id];
-            if !emitted.insert(variant.name.as_str()) {
+        .filter_map(|variant| {
+            if !variant.emit_constructor {
                 return None;
             }
             Some(match &variant.fields {
@@ -1034,11 +970,7 @@ fn emit_adt_text(
                     "  {}: {{ kind: \"{}\" }} as const,",
                     variant.name, variant.name
                 ),
-                Some(field_ids) => {
-                    let fields = field_ids
-                        .iter()
-                        .map(|field| &hir.fields[*field])
-                        .collect::<Vec<_>>();
+                Some(fields) => {
                     let params = fields
                         .iter()
                         .map(|field| {
@@ -1057,7 +989,7 @@ fn emit_adt_text(
                         .join(", ");
                     format!(
                         "  {}: {}({params}): {}{type_args} => ({{ {object} }}),",
-                        variant.name, data.generics, definition.name
+                        variant.name, adt.generics, adt.name
                     )
                 }
             })
@@ -1066,7 +998,7 @@ fn emit_adt_text(
         .join("\n");
     format!(
         "{type_decl}\n{export}const {} = {{\n{constructors}\n}};",
-        definition.name
+        adt.name
     )
 }
 
