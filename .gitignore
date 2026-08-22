@@ -12,6 +12,7 @@ npm/rl-lang/rl-dev.local.json
 # Added by cargo
 
 /target
+/website/dist/
 
 # 표준 라이브러리 자동 방출물 (examples 컴파일 시)
 examples/rl.ts

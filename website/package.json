@@ -1,11 +1,29 @@
 {
   "name": "rl-official-site",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "node dist/serve.js"
+    "highlight": "bun scripts/highlight.ts",
+    "dev": "bun run highlight && vite dev",
+    "build": "bun run highlight && vite build",
+    "preview": "bun scripts/preview.ts",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "chokidar": "^4.0.3",
-    "ws": "^8.18.3"
+    "@tanstack/router-plugin": "^1.168.34",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  },
+  "dependencies": {
+    "@tanstack/react-router": "^1.170.31",
+    "@tanstack/react-start": "^1.168.48",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "shiki": "^4.4.3"
   }
 }

@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://load28.github.io/rl/sitemap.xml
