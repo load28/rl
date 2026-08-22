@@ -241,13 +241,16 @@ effect는 추론하지 않는다 — built-in mutator 정책 + symbol identity�
 
 ## 10. Codegen 경계 (Phase 7)
 
-codegen은 최종적으로 raw AST 문자열 추측이 아니라 검증된 lowering plan
-(`LoweredFile { hir, resolutions, pattern_analyses, flow }`)을 소비한다.
-첫 단계에서는 `codegen::emit_with_map(&Program, ...)`을 유지하되 semantic
-판단을 인자로 전달받게 하고, 안정화된 HIR node부터 순차 이동한다. 출력
+codegen은 raw AST 문자열 추측이 아니라 검증된 `SemanticFile`과 `CoreFile`을
+소비한다. `CoreFile`은 pattern 계열을 boolean decision tree로, Result 계열을
+`Propagate`로 정규화하고 target 실행 형태와 임시값 ID를 확정한다. 출력
 계약(discriminated union + constructor object, switch/IIFE, single
 evaluation과 early return, 사용자 바이트만 양방향 매핑, glue는
 `EmitAnchor`)은 그대로다.
+
+구체적인 `SemanticFile → Core IR → TypeScript IR → printer` 경계와 단계별
+불변조건은 [`lowered-ir.md`](./lowered-ir.md)를 따른다. parser AST를 그대로
+복제한 구문별 IR이나 생성 문자열 모음은 Lowered IR로 인정하지 않는다.
 
 ## 11. Query와 증분 (Phase 6)
 
@@ -306,8 +309,8 @@ INDEX 상태에 따라 조정될 수 있다 — 확정 번호는 INDEX가 진실
 - **Phase 6 잔여** — query 세분화(pattern_analysis/flow_body 단위).
   에디터 semantic API의 cache 소비는 TASK-130에서 완료(typed 패스와
   에디터 폴백이 `Project`의 한 캐시를 공유).
-- **Phase 7 실체** — 안정화된 HIR node의 codegen 이동(검증된 lowering
-  plan 소비의 실질 형태).
+- ~~Phase 7 실체~~ — TASK-150에서 전체 rl 표면을 `SemanticFile → CoreFile →
+  TypeScript target IR → printer`로 전환하고 AST 기반 emitter를 삭제했다.
 - ~~let-else·`if let`의 or-패턴~~ — TASK-133에서 구현(GAP-6 마지막 항목 해소).
 
 ## 14. 완료 기준

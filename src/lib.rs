@@ -55,6 +55,7 @@
 mod analysis;
 mod ast;
 mod codegen;
+mod core_ir;
 mod diagnostics;
 pub mod engine;
 mod error;
@@ -517,7 +518,9 @@ impl MappedEmit {
 /// ```
 pub fn emit_mapped(source: &str) -> MappedEmit {
     let program = parser::parse(source);
-    let flat = codegen::emit_with_map(&program, source, ImportRewrite::Off, None);
+    let semantics = analysis::coverage_semantics(&program, &[]);
+    let core = core_ir::lower_semantic(&semantics, source);
+    let flat = codegen::emit_with_map(&semantics, &core, source, ImportRewrite::Off, None);
     MappedEmit {
         code: flat.code,
         mappings: flat.mappings,
@@ -701,7 +704,9 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
     // the first error in source order — and skips emission when the checks
     // already failed.
     let (program, tokens) = parser::lex_and_parse(source);
-    if let Some(first) = rl_errors(source, &program, &tokens, options)
+    let semantics = analysis::coverage_semantics(&program, options.extern_enums);
+    let core = core_ir::lower_semantic(&semantics, source);
+    if let Some(first) = rl_errors(source, &program, &tokens, options, &semantics)
         .into_iter()
         .next()
     {
@@ -710,7 +715,8 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
         );
     }
     let flat = codegen::emit_with_map(
-        &program,
+        &semantics,
+        &core,
         source,
         options.rewrite_imports,
         options.std_import,
@@ -747,12 +753,13 @@ fn rl_errors(
     program: &ast::Program,
     tokens: &[lexer::Token],
     options: &Options,
+    semantics: &analysis::SemanticFile,
 ) -> Vec<RlError> {
     let mut errors = sema::check_all(
         program,
         options.verify,
-        options.extern_enums,
         options.defer_to_checker,
+        &semantics.patterns,
     );
     if !options.defer_to_checker {
         errors.extend(val::check_all(source, tokens));
@@ -783,7 +790,8 @@ fn rl_errors(
 /// ```
 pub fn analyze(source: &str, options: &Options) -> Vec<Diagnostic> {
     let (program, tokens) = parser::lex_and_parse(source);
-    rl_errors(source, &program, &tokens, options)
+    let semantics = analysis::coverage_semantics(&program, options.extern_enums);
+    rl_errors(source, &program, &tokens, options, &semantics)
         .into_iter()
         .map(diagnostics::Diagnostic::from_rl)
         .collect()
@@ -931,7 +939,9 @@ pub(crate) fn compile_projection_report(source: &str, options: &Options) -> Proj
 /// still-emitting form of [`compile_mapped`]. See [`CompileReport`].
 pub fn compile_report(source: &str, options: &Options) -> CompileReport {
     let (program, tokens) = parser::lex_and_parse(source);
-    let mut errors = rl_errors(source, &program, &tokens, options);
+    let semantics = analysis::coverage_semantics(&program, options.extern_enums);
+    let core = core_ir::lower_semantic(&semantics, source);
+    let mut errors = rl_errors(source, &program, &tokens, options, &semantics);
     if errors.iter().any(|e| e.code.blocks_projection()) {
         return CompileReport {
             emit: None,
@@ -942,7 +952,8 @@ pub fn compile_report(source: &str, options: &Options) -> CompileReport {
         };
     }
     let flat = codegen::emit_with_map(
-        &program,
+        &semantics,
+        &core,
         source,
         options.rewrite_imports,
         options.std_import,

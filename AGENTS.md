@@ -58,11 +58,10 @@ src/
   stdlib/
     rl_std.ts    std 모듈 본체 (Option/Result + 콤비네이터, --emit-std로 방출)
   codegen/
-    mod.rs       Program → TypeScript 방출 (verbatim 구간은 바이트 그대로 복사,
-                 try/let-else 문·파이프라인($rl_ap 헬퍼)·`result` 블록(IIFE)
-                 방출 포함)
-    enums.rs     enum 방출 (유니언 type + 생성자 const)
-    matches.rs   match 방출 (switch IIFE)
+    mod.rs       backend 경계 — SemanticFile + CoreFile → TypeScript
+    core.rs      전체 Core IR의 TypeScript target lowering
+                 (decision/propagation/ADT/apply/import/template)
+    rope.rs      mapping-aware structured writer와 최종 printer
   verify.rs      swc 기반 검증 — 타입 조각 검사 + 출력 자가 검사
 tests/
   compile.rs     컴파일 출력 스냅샷/에러 단위 테스트

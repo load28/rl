@@ -79,6 +79,18 @@ pub struct PatternAnalyses {
     pub declarations: Vec<DeclaredEnum>,
 }
 
+/// The complete semantic answer for one parsed file.
+///
+/// HIR identity, name resolution, and normalized pattern facts are kept
+/// together so diagnostics, lowering, and language tooling consume one
+/// computation instead of rebuilding adjacent views of the same file.
+#[derive(Debug)]
+pub(crate) struct SemanticFile {
+    pub hir: crate::hir::HirFile,
+    pub resolution: crate::resolve::Resolution,
+    pub patterns: PatternAnalyses,
+}
+
 /// One payload column's alphabet as a type checker named it: which
 /// `(constructor, field)` column, and the `kind` literals its type admits.
 ///
@@ -526,7 +538,7 @@ impl PatternAnalyses {
 pub fn pattern_analyses(source: &str, externs: &[EnumSymbol]) -> PatternAnalyses {
     let program = crate::parser::parse(source);
     let decls: Vec<crate::resolve::ExternDecl> = externs.iter().map(Into::into).collect();
-    analyses_over(&program, &decls, Depth::Full)
+    semantics_over(&program, &decls, Depth::Full).patterns
 }
 
 /// The coverage-only analysis of an already-parsed program — sema's input,
@@ -538,26 +550,67 @@ pub fn pattern_analyses(source: &str, externs: &[EnumSymbol]) -> PatternAnalyses
 /// which is all coverage needs. Pattern bindings are therefore not analyzed
 /// and every arm comes back empty — [`pattern_analyses`] is the entry point
 /// for those.
+#[cfg(test)]
 pub(crate) fn coverage_analyses(program: &Program, externs: &[ExternEnum]) -> PatternAnalyses {
+    coverage_semantics(program, externs).patterns
+}
+
+/// Builds the semantic file used by sema and lowering in the ordinary
+/// compiler pipeline.
+pub(crate) fn coverage_semantics(program: &Program, externs: &[ExternEnum]) -> SemanticFile {
     let decls: Vec<crate::resolve::ExternDecl> = externs.iter().map(Into::into).collect();
-    analyses_over(program, &decls, Depth::CoverageOnly)
+    semantics_over(program, &decls, Depth::CoverageOnly)
 }
 
 /// The one pipeline both entry points run: lower, resolve, build the
 /// declaration table **from the resolver's world** (one construction of
 /// the rules — local later-wins, imports shadowed by locals, built-ins by
 /// both), analyze, then attach the resolver's name answers.
-fn analyses_over(
+fn semantics_over(
     program: &Program,
     externs: &[crate::resolve::ExternDecl],
     depth: Depth,
-) -> PatternAnalyses {
+) -> SemanticFile {
     let mut hir = crate::hir::lower_program(crate::hir::FileId(0), program);
     let resolution = crate::resolve::resolve_file(&mut hir, externs);
     let table = Table::from_resolution(&resolution);
     let mut analyses = analyze(program, &table, depth);
     attach_resolution(&mut analyses, &hir, &resolution);
-    analyses
+    let semantics = SemanticFile {
+        hir,
+        resolution,
+        patterns: analyses,
+    };
+    validate_semantic(&semantics);
+    semantics
+}
+
+/// Checks cross-phase identity links. Failure means a compiler bug, never a
+/// user error: parser recovery must already be explicit in HIR/resolution.
+fn validate_semantic(file: &SemanticFile) {
+    for node in file.resolution.uses.keys() {
+        assert!(
+            file.hir.source_map.node_span(*node).is_some(),
+            "internal compiler error: resolved HIR use has no source span"
+        );
+    }
+    for unresolved in &file.resolution.unresolved {
+        assert!(
+            file.hir.source_map.node_span(unresolved.node).is_some(),
+            "internal compiler error: unresolved HIR use has no source span"
+        );
+    }
+    for analysis in &file.patterns.matches {
+        assert!(
+            file.hir.sites.iter().any(|(_, site)| {
+                file.hir
+                    .source_map
+                    .node_span(site.node)
+                    .is_some_and(|span| span.start == analysis.keyword_off)
+            }),
+            "internal compiler error: match analysis has no HIR pattern site"
+        );
+    }
 }
 
 /// Copies the resolver's answers into the analysis' vocabulary:

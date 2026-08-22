@@ -315,6 +315,7 @@ impl<'a> Rope<'a> {
 
 /// A flattened rope: the text, and everything language tooling reads off
 /// the emission.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Flat {
     pub code: String,
     pub mappings: Vec<EmitMapping>,

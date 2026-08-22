@@ -57,7 +57,6 @@
 //!   has no type information for them. The whole computation lives in
 //!   [`crate::analysis`]; what is here is the reporting.
 
-use crate::ExternEnum;
 use crate::analysis::{CoveredEnum, NameKind, Origin, has_nested};
 use crate::ast::*;
 use crate::diagnostics::{DiagnosticCode, non_exhaustive_message};
@@ -75,8 +74,8 @@ use crate::verify;
 pub(crate) fn check_all(
     program: &Program,
     verify: bool,
-    externs: &[ExternEnum],
     defer_to_checker: bool,
+    analyses: &crate::analysis::PatternAnalyses,
 ) -> Vec<RlError> {
     let mut checker = Checker {
         verify,
@@ -90,10 +89,9 @@ pub(crate) fn check_all(
     // accumulation the suppression is per match ([`MatchAnalysis::
     // has_unresolved`]), not per file: match B's coverage is not match A's
     // typo's business.
-    let analyses = crate::analysis::coverage_analyses(program, externs);
-    report_resolution(&analyses, &mut checker.errors);
+    report_resolution(analyses, &mut checker.errors);
     if !defer_to_checker {
-        report_coverage(&analyses, &checker.coverage_suppressed, &mut checker.errors);
+        report_coverage(analyses, &checker.coverage_suppressed, &mut checker.errors);
     }
     // Source order, whatever order the categories ran in — the reader fixes
     // a file top to bottom. Stable, so equal positions keep report order.

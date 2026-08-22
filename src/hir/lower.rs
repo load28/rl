@@ -57,6 +57,15 @@ impl Lower {
         Span::new(s.start, s.end)
     }
 
+    fn binding_mode(keyword: &str) -> BindingMode {
+        match keyword {
+            "const" => BindingMode::Const,
+            "let" => BindingMode::Let,
+            "var" => BindingMode::Var,
+            _ => panic!("internal compiler error: parser produced unknown binding mode"),
+        }
+    }
+
     /// A statement stream: one [`Body`] per `Program`.
     fn lower_body(&mut self, program: &ast::Program) -> BodyId {
         let mut stmts = Vec::with_capacity(program.segments.len());
@@ -196,7 +205,14 @@ impl Lower {
         let arms = expr
             .arms
             .iter()
-            .map(|arm| self.lower_arm(&arm.pattern, arm.pattern_span, &arm.guard, Some(&arm.body)))
+            .map(|arm| {
+                self.lower_arm(
+                    &arm.pattern,
+                    arm.pattern_span,
+                    &arm.guard,
+                    Some((&arm.body, arm.block)),
+                )
+            })
             .collect();
         let site_node = self.node(head, AstOrigin::Match);
         let site = self.hir.sites.alloc(PatternSite {
@@ -205,7 +221,11 @@ impl Lower {
             subjects: vec![subject],
             arms,
         });
-        self.hir.exprs.alloc(Expr::Match { node, site })
+        let extent = self.node(
+            Span::new(expr.keyword_off, expr.body_close + 1),
+            AstOrigin::Match,
+        );
+        self.hir.exprs.alloc(Expr::Match { node, site, extent })
     }
 
     fn lower_tuple_match(&mut self, expr: &ast::TupleMatchExpr) -> ExprId {
@@ -247,6 +267,11 @@ impl Lower {
                     pattern,
                     guard,
                     body: Some(body),
+                    body_kind: Some(if arm.block {
+                        ArmBodyKind::Block
+                    } else {
+                        ArmBodyKind::Expression
+                    }),
                 }
             })
             .collect();
@@ -257,7 +282,11 @@ impl Lower {
             subjects,
             arms,
         });
-        self.hir.exprs.alloc(Expr::Match { node, site })
+        let extent = self.node(
+            Span::new(expr.keyword_off, expr.body_close + 1),
+            AstOrigin::TupleMatch,
+        );
+        self.hir.exprs.alloc(Expr::Match { node, site, extent })
     }
 
     fn lower_arm(
@@ -265,17 +294,25 @@ impl Lower {
         pattern: &ast::Pattern,
         pattern_span: ast::Span,
         guard: &Option<ast::GuardExpr>,
-        body: Option<&ast::Program>,
+        body: Option<(&ast::Program, bool)>,
     ) -> SiteArm {
         let pattern_id = self.lower_pattern(pattern, pattern_span.start);
         let node = self.node(Self::span(pattern_span), AstOrigin::Arm);
         let guard = guard.as_ref().map(|g| self.lower_guard(g));
-        let body = body.map(|b| self.lower_body(b));
+        let body_kind = body.map(|(_, block)| {
+            if block {
+                ArmBodyKind::Block
+            } else {
+                ArmBodyKind::Expression
+            }
+        });
+        let body = body.map(|(body, _)| self.lower_body(body));
         SiteArm {
             node,
             pattern: pattern_id,
             guard,
             body,
+            body_kind,
         }
     }
 
@@ -383,10 +420,10 @@ impl Lower {
 
     fn lower_try(&mut self, stmt: &ast::TryStmt) -> TryStmt {
         let node = self.node(Self::span(stmt.span), AstOrigin::Try);
-        let binding = stmt
-            .decl
-            .as_ref()
-            .map(|(_, span)| self.node(Self::span(*span), AstOrigin::BindingText));
+        let binding = stmt.decl.as_ref().map(|(keyword, span)| BindingText {
+            node: self.node(Self::span(*span), AstOrigin::BindingText),
+            mode: Self::binding_mode(keyword),
+        });
         let expr = self.lower_expr_program(&stmt.expr, Self::span(stmt.span));
         TryStmt {
             node,
@@ -425,12 +462,14 @@ impl Lower {
                 // The bindings flow into the statements after the
                 // construct; there is no body that runs "on match".
                 body: None,
+                body_kind: None,
             }],
         });
         let else_body = self.lower_body(&stmt.else_body);
         LetElseStmt {
             node,
             site,
+            binding_mode: Self::binding_mode(&stmt.kw),
             else_body,
             else_diverges_hint: stmt.diverges,
         }
@@ -462,6 +501,7 @@ impl Lower {
                 pattern,
                 guard: None,
                 body: Some(body),
+                body_kind: Some(ArmBodyKind::Block),
             }],
         });
         let else_part = stmt.else_part.as_ref().map(|else_part| match else_part {
@@ -490,17 +530,19 @@ impl Lower {
             })
             .unwrap_or((0, 0));
         let node = self.node(Span::new(start, end), AstOrigin::Template);
-        let interps = template
+        let chunks = template
             .chunks
             .iter()
-            .filter_map(|chunk| match chunk {
+            .map(|chunk| match chunk {
                 ast::TemplateChunk::Interp(program) => {
-                    Some(self.lower_expr_program(program, Span::new(start, end)))
+                    TemplatePart::Interp(self.lower_expr_program(program, Span::new(start, end)))
                 }
-                ast::TemplateChunk::Raw(_) => None,
+                ast::TemplateChunk::Raw(span) => {
+                    TemplatePart::Raw(self.node(Self::span(*span), AstOrigin::Verbatim))
+                }
             })
             .collect();
-        self.hir.exprs.alloc(Expr::Template { node, interps })
+        self.hir.exprs.alloc(Expr::Template { node, chunks })
     }
 
     fn lower_pipe(&mut self, pipe: &ast::PipeExpr) -> ExprId {
@@ -540,7 +582,10 @@ impl Lower {
                         Span::new(bind.binding_span.start, bind.expr_span.end),
                         AstOrigin::ResultBind,
                     );
-                    let binding = self.node(Self::span(bind.binding_span), AstOrigin::BindingText);
+                    let binding = BindingText {
+                        node: self.node(Self::span(bind.binding_span), AstOrigin::BindingText),
+                        mode: Self::binding_mode(&bind.kw),
+                    };
                     let expr = self.lower_expr_program(&bind.expr, Self::span(bind.expr_span));
                     ResultItem::Bind {
                         node: bind_node,
@@ -759,7 +804,7 @@ mod tests {
                 for item in items {
                     if let ResultItem::Bind { binding, .. } = item {
                         binds += 1;
-                        let span = hir.source_map.node_span(*binding).unwrap();
+                        let span = hir.source_map.node_span(binding.node).unwrap();
                         assert_eq!(text(src, span), "b");
                     }
                 }

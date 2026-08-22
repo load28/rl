@@ -15,8 +15,8 @@
 //!   needs to *point at* (a scrutinee, a guard, a pipeline step's text) is
 //!   an [`Expr::OpaqueTs`] span; its type is the checker's answer, asked
 //!   through the backend seam.
-//! - It does not replace the AST for emission. Codegen keeps consuming the
-//!   byte-faithful AST until Phase 7 moves it onto verified lowering plans.
+//! - It does not print TypeScript. Core lowering consumes the HIR together
+//!   with semantic facts, and the TypeScript backend consumes that Core IR.
 //! - It does not resolve names. A constructor pattern carries an
 //!   [`UnresolvedPath`]; `DefId`/`LocalId`/`ScopeId` exist so the source
 //!   map's shape is final, and the resolver (Phase 2) fills that space.
@@ -306,9 +306,30 @@ pub struct TryStmt {
     /// The declaration form's binding text (`const <binding> =`), when
     /// there is one — kept as a node whose span is the user's binding
     /// bytes.
-    pub binding: Option<NodeId>,
+    pub binding: Option<BindingText>,
     /// The propagated expression.
     pub expr: ExprId,
+}
+
+/// A source binding copied into generated TypeScript, with its declaration
+/// mode already classified by lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindingText {
+    /// Span = the binding bytes, excluding the declaration keyword.
+    pub node: NodeId,
+    /// Which declaration keyword introduced the binding.
+    pub mode: BindingMode,
+}
+
+/// Declaration mode shared by `try`, let-else, and `result` propagation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingMode {
+    /// `const`.
+    Const,
+    /// `let`.
+    Let,
+    /// `var`.
+    Var,
 }
 
 /// See [`Stmt::LetElse`]. The pattern half lives in the site; the statement
@@ -319,6 +340,8 @@ pub struct LetElseStmt {
     pub node: NodeId,
     /// The pattern half — a one-arm site with no body of its own.
     pub site: PatternSiteId,
+    /// Declaration mode of the binding introduced after the decision.
+    pub binding_mode: BindingMode,
     /// The `else { ... }` block's statements.
     pub else_body: BodyId,
     /// The parser's syntactic divergence hint (last statement starts with
@@ -367,6 +390,8 @@ pub enum Expr {
         node: NodeId,
         /// The pattern site the match lowers to.
         site: PatternSiteId,
+        /// Span = the complete match expression, including its closing `}`.
+        extent: NodeId,
     },
     /// A pipeline (`head |> step |> ...`), or a `flow` composition when
     /// `head` is `None`.
@@ -393,8 +418,8 @@ pub enum Expr {
     Template {
         /// Span = the template's extent.
         node: NodeId,
-        /// The `${ ... }` interpolation bodies, in source order.
-        interps: Vec<ExprId>,
+        /// Raw source chunks and interpolation expressions in source order.
+        chunks: Vec<TemplatePart>,
     },
 }
 
@@ -409,6 +434,16 @@ pub struct PipeStep {
     pub body: ExprId,
 }
 
+/// One template component. Keeping raw chunks in HIR lets backend lowering
+/// consume HIR alone rather than consulting the parser AST again.
+#[derive(Debug)]
+pub enum TemplatePart {
+    /// Raw template bytes, including delimiters where present.
+    Raw(NodeId),
+    /// A `${ ... }` expression.
+    Interp(ExprId),
+}
+
 /// One item of a `result` block's body.
 #[derive(Debug)]
 pub enum ResultItem {
@@ -419,7 +454,7 @@ pub enum ResultItem {
         /// Span = the binding through its expression.
         node: NodeId,
         /// The binding text's node (span = the user's binding bytes).
-        binding: NodeId,
+        binding: BindingText,
         /// The expression after `<-`.
         expr: ExprId,
     },
@@ -474,6 +509,17 @@ pub struct SiteArm {
     /// The statements that run on a match. `None` for let-else, whose
     /// bindings flow into the statements after the construct.
     pub body: Option<BodyId>,
+    /// Whether the arm body yields an expression or executes a block.
+    pub body_kind: Option<ArmBodyKind>,
+}
+
+/// The two source forms of a pattern arm body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmBodyKind {
+    /// `pattern => expression`.
+    Expression,
+    /// `pattern => { statements }`.
+    Block,
 }
 
 /// One pattern node. Or-patterns are a node with alternatives; nested
