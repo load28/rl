@@ -57,7 +57,7 @@
         "en": "rl is a small language that adds tagged unions, exhaustive pattern matching, Result control flow, pipelines, and mutation-safe bindings to TypeScript. It compiles to readable TypeScript and adds no runtime.",
         "ko": "rl은 TypeScript에 태그드 유니언, 소진적 패턴 매칭, Result 제어 흐름, 파이프라인, 변경 안전 바인딩을 더하는 작은 언어입니다. 읽기 쉬운 TypeScript로 컴파일되며 별도 런타임이 없습니다."
       },
-      "code": "import { Result } from \"@rl/std\";\n\nconst message = input\n  |> parse\n  |> Result.mapP(format)\n  |> (result => match (result) {\n    Ok(value) => value,\n    Err(error) => `Error: ${error}`,\n  });",
+      "code": "import * as Result from \"@rl/std/result\";\n\nconst message = input\n  |> parse\n  |> Result.mapP(format)\n  |> (result => match (result) {\n    Ok(value) => value,\n    Err(error) => `Error: ${error}`,\n  });",
       "works": {
         "en": [
           "Every valid TypeScript file remains a valid .rl file.",
@@ -178,7 +178,7 @@
         "en": "Unwrap Ok or return Err from the enclosing function.",
         "ko": "Ok 값을 풀고 Err이면 현재 함수를 즉시 반환합니다."
       },
-      "code": "function load(id: string): Result<User, LoadError> {\n  const raw = try read(id);\n  const user = try decode(raw);\n  return Result.Ok(user);\n}",
+      "code": "import type { TResult } from \"@rl/std\";\nimport * as Result from \"@rl/std/result\";\n\nfunction load(id: string): TResult<User, LoadError> {\n  const raw = try read(id);\n  const user = try decode(raw);\n  return Result.Ok(user);\n}",
       "works": {
         "en": [
           "Value binding and propagate-only statements.",
@@ -444,14 +444,14 @@
         "ko": "Option"
       },
       "title": {
-        "en": "Option<T>",
-        "ko": "Option<T>"
+        "en": "TOption<T>",
+        "ko": "TOption<T>"
       },
       "summary": {
         "en": "Represent an optional value as Some(value) or None.",
         "ko": "선택적인 값을 Some(value) 또는 None으로 표현합니다."
       },
-      "code": "import { Option } from \"@rl/std\";\n\nconst port = Option.fromNullable(env.PORT)\n  |> Option.mapP(Number)\n  |> Option.filterP(Number.isFinite)\n  |> Option.unwrapOrP(3000);",
+      "code": "import * as Option from \"@rl/std/option\";\n\nconst port = Option.fromNullable(env.PORT)\n  |> Option.mapP(Number)\n  |> Option.filterP(Number.isFinite)\n  |> Option.unwrapOrP(3000);",
       "works": {
         "en": [
           "Construct with Option.Some(value) and the Option.None value.",
@@ -470,12 +470,12 @@
         "en": [
           "The payload field is named value.",
           "try and result blocks operate on Result, not Option.",
-          "Import @rl/std to construct values even though match recognizes Option tags as built-ins."
+          "Import @rl/std/option to construct values even though match recognizes Option tags as built-ins."
         ],
         "ko": [
           "페이로드 필드 이름은 value입니다.",
           "try와 result 블록은 Option이 아니라 Result에만 동작합니다.",
-          "match는 Option 태그를 내장으로 알지만 값을 만들려면 @rl/std를 import해야 합니다."
+          "match는 Option 태그를 내장으로 알지만 값을 만들려면 @rl/std/option을 import해야 합니다."
         ]
       }
     },
@@ -485,38 +485,38 @@
         "ko": "Result"
       },
       "title": {
-        "en": "Result<T, E>",
-        "ko": "Result<T, E>"
+        "en": "TResult<T, E>",
+        "ko": "TResult<T, E>"
       },
       "summary": {
         "en": "Represent success as Ok(value) and failure as Err(error).",
         "ko": "성공은 Ok(value), 실패는 Err(error)로 표현합니다."
       },
-      "code": "import { Result } from \"@rl/std\";\n\nconst user = Result.fromThrowable(() => JSON.parse(raw))\n  |> Result.andThenP(validateUser)\n  |> Result.mapP(normalizeUser);",
+      "code": "import * as Result from \"@rl/std/result\";\n\nconst user = Result.fromThrowable(() => JSON.parse(raw))\n  |> Result.andThenP(validateUser)\n  |> Result.mapP(normalizeUser);",
       "works": {
         "en": [
-          "Constructors infer their own variant: Ok<T> or Err<E>.",
+          "Constructors infer their own variant: TOk<T> or TErr<E>.",
           "andThen and andThenP preserve incoming errors and union new error types.",
           "Use map, mapErr, orElse, flatten, transpose, collect, fromThrowable, and fromPromise.",
-          "ErrorOf<R> extracts the union of error types."
+          "TErrorOf<R> extracts the union of error types."
         ],
         "ko": [
-          "생성자는 자신의 변종인 Ok<T> 또는 Err<E>를 추론합니다.",
+          "생성자는 자신의 변종인 TOk<T> 또는 TErr<E>를 추론합니다.",
           "andThen과 andThenP는 기존 오류를 유지하고 새 오류 타입을 유니언으로 합칩니다.",
           "map, mapErr, orElse, flatten, transpose, collect, fromThrowable, fromPromise를 지원합니다.",
-          "ErrorOf<R>로 오류 타입 유니언을 추출합니다."
+          "TErrorOf<R>로 오류 타입 유니언을 추출합니다."
         ]
       },
       "limits": {
         "en": [
           "Ok and Some use value; Err uses error.",
           "An inline callback passed to andThenP needs an annotated parameter when inference has no input type.",
-          "Annotate a variable or return type when the full Result<T, E> shape is required."
+          "Annotate a variable or return type when the full TResult<T, E> shape is required."
         ],
         "ko": [
           "Ok와 Some은 value, Err는 error 필드를 사용합니다.",
           "andThenP의 인라인 콜백은 입력 타입을 추론할 수 없으면 매개변수 타입을 적어야 합니다.",
-          "완전한 Result<T, E> 형태가 필요하면 변수나 반환 타입을 명시해야 합니다."
+          "완전한 TResult<T, E> 형태가 필요하면 변수나 반환 타입을 명시해야 합니다."
         ]
       }
     },
@@ -533,7 +533,7 @@
         "en": "Keep .rl on source imports and let rlc rewrite emitted specifiers.",
         "ko": "소스 import에는 .rl을 유지하고 방출 지정자는 rlc가 재작성합니다."
       },
-      "code": "import { Token } from \"./token.rl\";\nimport { Option, Result } from \"@rl/std\";\n\nexport { Parser } from \"./parser.rl\";",
+      "code": "import { Token } from \"./token.rl\";\nimport type { TOption, TResult } from \"@rl/std\";\nimport * as Option from \"@rl/std/option\";\nimport * as Result from \"@rl/std/result\";\n\nexport { Parser } from \"./parser.rl\";",
       "works": {
         "en": [
           "Relative .rl imports emit as .js by default.",

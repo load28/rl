@@ -1322,27 +1322,44 @@ fn rewrite_keeps_quote_style_and_parent_paths() {
 fn the_std_specifier_is_left_alone_by_default() {
     // A bundler plugin resolves `@rl/std` itself, so the untouched
     // specifier is the right default.
-    let src = "import { Option, Result } from \"@rl/std\";\n";
+    let src = "import type { TOption, TResult } from \"@rl/std\";\n\
+import * as Option from \"@rl/std/option\";\n\
+import * as Result from \"@rl/std/result\";\n";
     assert_eq!(ok(src), src);
 }
 
 #[test]
 fn the_std_specifier_is_rewritten_when_the_caller_places_the_module() {
     let opts = Options {
-        std_import: Some("../rl.js"),
+        std_imports: rlc::StdImports {
+            types: Some("../rl/index.js"),
+            option: Some("../rl/option.js"),
+            result: Some("../rl/result.js"),
+        },
         ..Options::default()
     };
-    let out = compile("import { Option } from '@rl/std';\n", &opts).unwrap();
+    let out = compile(
+        "import type { TOption } from '@rl/std';\n\
+import * as Option from '@rl/std/option';\n\
+import * as Result from '@rl/std/result';\n",
+        &opts,
+    )
+    .unwrap();
     // The quote style survives; only the specifier's text changes.
-    assert_eq!(out, "import { Option } from '../rl.js';\n");
+    assert_eq!(
+        out,
+        "import type { TOption } from '../rl/index.js';\n\
+import * as Option from '../rl/option.js';\n\
+import * as Result from '../rl/result.js';\n"
+    );
 }
 
 #[test]
 fn the_std_specifier_is_not_a_project_module() {
     // It has no file to follow, so it is not part of the module graph the
     // CLI walks for declarations.
-    assert!(rlc::rl_imports("import { Option } from \"@rl/std\";\n").is_empty());
-    assert!(rlc::imports_std("export { Result } from \"@rl/std\";\n"));
+    assert!(rlc::rl_imports("import type { TOption } from \"@rl/std\";\n").is_empty());
+    assert!(rlc::imports_std("export * from \"@rl/std/result\";\n"));
     assert!(!rlc::imports_std("import { Option } from \"./rl.js\";\n"));
 }
 
@@ -1571,9 +1588,9 @@ fn scan_module_answers_both_questions_in_one_pass() {
     // views must never disagree — that equivalence is what lets the CLI
     // parse each input once.
     for source in [
-        "import { Option } from \"@rl/std\";\nimport { T } from \"./t.rl\";\n",
+        "import * as Option from \"@rl/std/option\";\nimport { T } from \"./t.rl\";\n",
         "import { T } from \"./t.rl\";\n",
-        "export { Result } from \"@rl/std\";\n",
+        "export * from \"@rl/std/result\";\n",
         "const match = 1;\n",
         "",
     ] {
@@ -1582,8 +1599,9 @@ fn scan_module_answers_both_questions_in_one_pass() {
         assert_eq!(scan.imports_std, rlc::imports_std(source), "{source:?}");
     }
 
-    let scan =
-        rlc::scan_module("import { Option } from \"@rl/std\";\nimport * as ns from \"../b.rl\";\n");
+    let scan = rlc::scan_module(
+        "import * as Option from \"@rl/std/option\";\nimport * as ns from \"../b.rl\";\n",
+    );
     assert!(scan.imports_std);
     assert_eq!(scan.imports.len(), 1);
     assert_eq!(scan.imports[0].specifier, "../b.rl");

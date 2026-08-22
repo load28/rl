@@ -71,11 +71,19 @@ pub struct Checked {
 /// The declarations of one emitting pass, matched back to their sources.
 #[derive(Debug, Default)]
 pub struct Declarations {
-    /// The standard library's own declarations, when `@rl/std` is in the
-    /// graph — the `rl.d.ts` a consumer's `paths` points at.
-    pub std: Option<String>,
+    /// The standard library package declarations, keyed by physical module.
+    pub std: Vec<StdDeclaration>,
     /// One entry per requested `.rl` file the compiler emitted for.
     pub modules: Vec<ModuleDeclaration>,
+}
+
+/// One emitted declaration module of `@rl/std`.
+#[derive(Debug)]
+pub struct StdDeclaration {
+    /// Which standard-library module this declaration describes.
+    pub module: crate::StdModule,
+    /// The declaration text emitted by TypeScript.
+    pub text: String,
 }
 
 /// One lowered module's declarations, paired with the file they belong to.
@@ -1042,13 +1050,19 @@ pub(crate) fn match_declarations(
 ) -> Declarations {
     let mut out = Declarations::default();
     // The standard library's own declarations, so a consumer running plain
-    // tsc can point `@rl/std` at them (`paths`). It is a module of the
-    // project like any other, so the compiler emitted it too — it just has
-    // no `.rl` source to sit beside.
-    let std_declaration = root.join(projection::STD_MODULE).with_extension("d.ts");
+    // tsc can map every `@rl/std` entry to them. They are project modules
+    // like any other, but have no `.rl` sources to sit beside.
     for declaration in &answers.declarations {
-        if declaration.path == std_declaration {
-            out.std = Some(declaration.text.clone());
+        if let Some(module) = crate::StdModule::ALL.into_iter().find(|module| {
+            declaration.path
+                == root
+                    .join(projection::std_module_path(*module))
+                    .with_extension("d.ts")
+        }) {
+            out.std.push(StdDeclaration {
+                module,
+                text: declaration.text.clone(),
+            });
             continue;
         }
         let Some(file) = snapshot

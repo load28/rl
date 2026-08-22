@@ -32,8 +32,8 @@ pub struct ProjectedDocument {
     pub(crate) module_path: PathBuf,
     /// The emitted TypeScript and its verbatim-chunk mappings.
     pub(crate) emit: MappedEmit,
-    /// Whether the file imports `@rl/std` — decides whether the standard
-    /// library joins the project graph.
+    /// Whether the file imports any `@rl/std` entry — decides whether the
+    /// standard-library package joins the project graph.
     pub(crate) imports_std: bool,
     /// The literal-match exhaustiveness probes of this file.
     pub(crate) literal_probes: Vec<LiteralMatch>,
@@ -113,7 +113,7 @@ impl ProjectedDocument {
             defer_to_checker: true,
             // Specifiers stay exactly as written. `"./token.rl"` already
             // names the lowered module ([`module_path_of`]), and `"@rl/std"`
-            // already names the standard library ([`STD_MODULE`]) — so the
+            // entries already name the standard-library package — so the
             // declarations the compiler emits are usable as they are, by a
             // consumer that never sees this compile.
             rewrite_imports: crate::ImportRewrite::Off,
@@ -161,14 +161,15 @@ pub(crate) fn module_path_of(source_path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Where the standard library sits in the project graph, relative to the
-/// project root: the package `"@rl/std"` names.
+/// Where one standard-library module sits in the project graph.
 ///
 /// It is a module of the project like any other — served from the same
 /// layered file system, resolved by ordinary node resolution — so the
 /// specifier stays bare in the source and in every declaration emitted from
 /// it. Nothing is written to the user's `node_modules`.
-pub(crate) const STD_MODULE: &str = "node_modules/@rl/std/index.ts";
+pub(crate) fn std_module_path(module: crate::StdModule) -> PathBuf {
+    Path::new("node_modules/@rl/std").join(module.file_name())
+}
 
 /// The path the compiler emits a lowered module's declarations to:
 /// `src/token.rl.ts` → `src/token.rl.d.ts`, which is the sidecar name a
@@ -194,10 +195,12 @@ pub(crate) fn assemble(
     let mut probes = Probes::default();
 
     if files.iter().any(|f| f.imports_std) {
-        query.modules.push(Module {
-            path: root.join(STD_MODULE),
-            text: crate::STD_SOURCE.to_string(),
-        });
+        query
+            .modules
+            .extend(crate::StdModule::ALL.map(|module| Module {
+                path: root.join(std_module_path(module)),
+                text: module.source().to_string(),
+            }));
     }
 
     for file in files {

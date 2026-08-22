@@ -175,9 +175,11 @@ async function open(source: string) {
 }
 
 const STD_SOURCE = [
-  'import { Option, Result } from "@rl/std";',
+  'import type { TOption, TResult } from "@rl/std";',
+  'import * as Option from "@rl/std/option";',
+  'import * as Result from "@rl/std/result";',
   "",
-  "declare const r: Result<number, string>;",
+  "declare const r: TResult<number, string>;",
   "const out = Result.",
   "",
 ].join("\n");
@@ -199,7 +201,7 @@ test(
 
       const resolved = await resolve("map");
       assert.ok(
-        String(resolved.detail).includes("Result<U, E>"),
+        String(resolved.detail).includes("TResult<U, E>"),
         `detail was: ${resolved.detail}`,
       );
       assert.ok(
@@ -272,9 +274,10 @@ test(
   { skip: skipTyped, timeout },
   async () => {
     const source = [
-      'import { Result } from "@rl/std";',
+      'import type { TResult } from "@rl/std";',
+      'import * as Result from "@rl/std/result";',
       "",
-      "declare const r: Result<number, string>;",
+      "declare const r: TResult<number, string>;",
       "const out = r",
       "  |> Result.mapP((n) => n + 1)",
       "  |> Result.",
@@ -578,7 +581,7 @@ test(
     const source = [
       "const a = () => Result.Err(10);",
       "",
-      "function Test(): Result<string, string> {",
+      "function Test(): TResult<string, string> {",
       "  return try a();",
       "}",
       "",

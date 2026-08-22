@@ -48,6 +48,14 @@ fn as_module(src: &str) -> String {
     format!("{src}\nexport {{}};\n")
 }
 
+fn write_std(dir: &std::path::Path) {
+    let std_dir = dir.join("rl");
+    fs::create_dir_all(&std_dir).unwrap();
+    for module in rlc::StdModule::ALL {
+        fs::write(std_dir.join(module.file_name()), module.source()).unwrap();
+    }
+}
+
 /// Compile rl source and type-check the output with tsc. Returns (ok, tsc output).
 fn typecheck(src: &str) -> (bool, String) {
     let code = compile(&as_module(src), &Options::default()).expect("rl compile failed");
@@ -92,16 +100,18 @@ fn typecheck_recovery(src: &str) -> (bool, String) {
 }
 
 /// Type-check a snippet that imports the standard library: the std module is
-/// written next to it as `rl.ts` and both files go through tsc (`--noEmit`).
+/// written under `rl/` and all files go through tsc (`--noEmit`).
 /// Returns (ok, tsc output + compiled source).
 fn typecheck_with_std(src: &str) -> (bool, String) {
     let code = compile(&as_module(src), &Options::default()).expect("rl compile failed");
     let dir = tmpdir();
-    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    write_std(&dir);
     fs::write(dir.join("main.ts"), &code).unwrap();
     let out = Command::new("tsc")
         .arg(dir.join("main.ts"))
-        .arg(dir.join("rl.ts"))
+        .arg(dir.join("rl/index.ts"))
+        .arg(dir.join("rl/option.ts"))
+        .arg(dir.join("rl/result.ts"))
         .arg("--noEmit")
         .args([
             "--strict",
@@ -173,18 +183,18 @@ fn run(src: &str) -> Vec<String> {
 }
 
 /// Compile a snippet that imports the standard library, emit JS for it and
-/// the std module with tsc, execute with node, return stdout lines. The
-/// two-file shape mirrors real projects: `./rl.js` in the source resolves to
-/// `rl.ts` for tsc and to the emitted `rl.js` for node.
+/// the std package with tsc, execute with node, return stdout lines.
 fn run_with_std(src: &str) -> Vec<String> {
     let code = compile(src, &Options::default()).expect("rl compile failed");
     let dir = tmpdir();
-    fs::write(dir.join("rl.ts"), rlc::STD_SOURCE).unwrap();
+    write_std(&dir);
     fs::write(dir.join("main.ts"), &code).unwrap();
     fs::write(dir.join("package.json"), "{ \"type\": \"module\" }\n").unwrap();
     let out = Command::new("tsc")
         .arg(dir.join("main.ts"))
-        .arg(dir.join("rl.ts"))
+        .arg(dir.join("rl/index.ts"))
+        .arg(dir.join("rl/option.ts"))
+        .arg(dir.join("rl/result.ts"))
         .arg("--outDir")
         .arg(&dir)
         .args([
@@ -485,20 +495,20 @@ console.log(tally(Score.Graded(-1)));
 fn runtime_generic_enum() {
     require_toolchain!();
     let lines = run(r#"
-enum Option<T> {
+enum TOption<T> {
   Some(value: T),
   None,
 }
 
-function unwrapOr<T>(o: Option<T>, fallback: T): T {
+function unwrapOr<T>(o: TOption<T>, fallback: T): T {
   return match (o) {
     Some(value) => value,
     None => fallback,
   };
 }
 
-console.log(unwrapOr(Option.Some(7), 0));
-console.log(unwrapOr<number>(Option.None, 42));
+console.log(unwrapOr(TOption.Some(7), 0));
+console.log(unwrapOr<number>(TOption.None, 42));
 "#);
     assert_eq!(lines, vec!["7", "42"]);
 }
@@ -579,14 +589,16 @@ fn runtime_std_option_result_functional_pipeline() {
     require_toolchain!();
     let lines = run_with_std(
         r#"
-import { Option, Result } from "./rl.js";
+import type { TOption, TResult } from "./rl/index.js";
+import * as Option from "./rl/option.js";
+import * as Result from "./rl/result.js";
 
-function parseNum(raw: string): Result<number, string> {
+function parseNum(raw: string): TResult<number, string> {
   const n = Number(raw);
   return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
 }
 
-const half = (n: number): Option<number> =>
+const half = (n: number): TOption<number> =>
   n % 2 === 0 ? Option.Some(n / 2) : Option.None;
 
 const describe = (raw: string): string =>
@@ -602,7 +614,7 @@ console.log(describe("42"));
 console.log(describe("7"));
 console.log(describe("x"));
 console.log(Option.unwrapOr(Option.map(Option.fromNullable([1, 2].find((n) => n > 1)), (n) => n * 2), -1));
-console.log(Result.unwrapOr(Result.andThen(parseNum("10"), (n): Result<number, string> => n > 5 ? Result.Ok(n * 2) : Result.Err("small")), -1));
+console.log(Result.unwrapOr(Result.andThen(parseNum("10"), (n): TResult<number, string> => n > 5 ? Result.Ok(n * 2) : Result.Err("small")), -1));
 console.log(Result.isErr(Result.fromThrowable(() => JSON.parse("{"))));
 "#,
     );
@@ -624,7 +636,9 @@ fn runtime_std_new_combinators() {
     require_toolchain!();
     let lines = run_with_std(
         r#"
-import { Option, Result } from "./rl.js";
+import type { TOption, TResult } from "./rl/index.js";
+import * as Option from "./rl/option.js";
+import * as Result from "./rl/result.js";
 
 console.log(JSON.stringify(Option.zip(Option.Some(1), Option.Some("a"))));
 console.log(JSON.stringify(Option.zip(Option.Some(1), Option.None)));
@@ -635,7 +649,7 @@ console.log(JSON.stringify(Option.transpose(Option.Some(Result.Ok<number>(3)))))
 console.log(JSON.stringify(Result.collect([Result.Ok(1), Result.Ok(2)])));
 console.log(JSON.stringify(Result.collect<number, string>([Result.Ok(1), Result.Err("x")])));
 console.log(JSON.stringify(Result.flatten<number, string>(Result.Ok(Result.Ok(4)))));
-const nested: Result<Option<number>, string> = Result.Ok(Option.None);
+const nested: TResult<TOption<number>, string> = Result.Ok(Option.None);
 console.log(JSON.stringify(Result.transpose(nested)));
 Result.fromPromise(Promise.resolve(5))
   .then((r) => console.log(JSON.stringify(r)))
@@ -667,14 +681,15 @@ fn runtime_try_error_propagation() {
     require_toolchain!();
     let lines = run_with_std(
         r#"
-import { Result } from "./rl.js";
+import type { TResult } from "./rl/index.js";
+import * as Result from "./rl/result.js";
 
-function parseNum(raw: string): Result<number, string> {
+function parseNum(raw: string): TResult<number, string> {
   const n = Number(raw);
   return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
 }
 
-function sumList(raws: string[]): Result<number, string> {
+function sumList(raws: string[]): TResult<number, string> {
   let total = 0;
   for (const raw of raws) {
     const n = try parseNum(raw);
@@ -683,7 +698,7 @@ function sumList(raws: string[]): Result<number, string> {
   return Result.Ok(total);
 }
 
-function checked(raw: string): Result<number, string> {
+function checked(raw: string): TResult<number, string> {
   try parseNum(raw);
   let big: number = try parseNum(raw);
   return Result.Ok(big * 10);
@@ -742,14 +757,16 @@ fn runtime_try_inside_an_if_let_body_propagates_from_the_function() {
     // propagates from `f` — not from any construct in between.
     let lines = run_with_std(
         r#"
-import { Option, Result } from "./rl.js";
+import type { TOption, TResult } from "./rl/index.js";
+import * as Option from "./rl/option.js";
+import * as Result from "./rl/result.js";
 
-function parseNum(raw: string): Result<number, string> {
+function parseNum(raw: string): TResult<number, string> {
   const n = Number(raw);
   return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
 }
 
-function f(o: Option<string>): Result<number, string> {
+function f(o: TOption<string>): TResult<number, string> {
   if let Some(value) = o {
     const n = try parseNum(value);
     return Result.Ok(n * 10);
@@ -780,15 +797,16 @@ fn runtime_try_inside_a_closure_propagates_from_the_closure() {
     // Result it produced.
     let lines = run_with_std(
         r#"
-import { Result } from "./rl.js";
+import type { TResult } from "./rl/index.js";
+import * as Result from "./rl/result.js";
 
-function parseNum(raw: string): Result<number, string> {
+function parseNum(raw: string): TResult<number, string> {
   const n = Number(raw);
   return Number.isNaN(n) ? Result.Err("not a number: " + raw) : Result.Ok(n);
 }
 
 function describe(raw: string): string {
-  return match (((): Result<number, string> => {
+  return match (((): TResult<number, string> => {
     const n = try parseNum(raw);
     return Result.Ok(n * 2);
   })()) {
@@ -811,9 +829,11 @@ fn runtime_let_else_narrows_and_diverges() {
     // else block narrows the temporary to the matched case.
     let lines = run_with_std(
         r#"
-import { Option, Result } from "./rl.js";
+import type { TOption, TResult } from "./rl/index.js";
+import * as Option from "./rl/option.js";
+import * as Result from "./rl/result.js";
 
-function findUser(id: number): Option<string> {
+function findUser(id: number): TOption<string> {
   return id === 1 ? Option.Some("amy") : Option.None;
 }
 
@@ -822,7 +842,7 @@ function greet(id: number): string {
   return "hello, " + user;
 }
 
-function parseNum(raw: string): Result<number, string> {
+function parseNum(raw: string): TResult<number, string> {
   const n = Number(raw);
   return Number.isNaN(n) ? Result.Err("bad") : Result.Ok(n);
 }
@@ -849,13 +869,15 @@ fn runtime_let_else_else_block_returns_an_object_literal() {
     // so the divergence check still sees a `return`.
     let lines = run_with_std(
         r#"
-import { Option, Result } from "./rl.js";
+import type { TOption, TResult } from "./rl/index.js";
+import * as Option from "./rl/option.js";
+import * as Result from "./rl/result.js";
 
-function findUser(id: number): Option<string> {
+function findUser(id: number): TOption<string> {
   return id === 1 ? Option.Some("amy") : Option.None;
 }
 
-function greet(id: number): Result<string, string> {
+function greet(id: number): TResult<string, string> {
   const Some(value: user) = findUser(id) else { return { kind: "Err", error: "no user " + id }; };
   return { kind: "Ok", value: "hello, " + user };
 }
@@ -912,23 +934,24 @@ fn std_result_constructors_type_only_their_own_variant() {
     require_toolchain!();
     // `Ok` carries no error type and `Err` carries no success type, so each
     // constructor is typed by its own variant — and both still fit a
-    // `Result<T, E>` wherever one is expected.
+    // `TResult<T, E>` wherever one is expected.
     let (ok, out) = typecheck_with_std(
         r#"
-import { Result } from "./rl.js";
-import type { Ok, Err } from "./rl.js";
+import type { TResult } from "./rl/index.js";
+import * as Result from "./rl/result.js";
+import type { TOk, TErr } from "./rl/index.js";
 
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 const ok = Result.Ok(123);
 const err = Result.Err("bad");
-const okIsOkOfNumber: Exact<typeof ok, Ok<number>> = true;
-const errIsErrOfString: Exact<typeof err, Err<string>> = true;
+const okIsOkOfNumber: Exact<typeof ok, TOk<number>> = true;
+const errIsErrOfString: Exact<typeof err, TErr<string>> = true;
 
-const fromOk: Result<number, string> = Result.Ok(1);
-const fromErr: Result<number, string> = Result.Err("bad");
+const fromOk: TResult<number, string> = Result.Ok(1);
+const fromErr: TResult<number, string> = Result.Err("bad");
 
-function parse(value: string): Result<number, string> {
+function parse(value: string): TResult<number, string> {
   if (value.length === 0) {
     return Result.Err("empty");
   }
@@ -945,20 +968,21 @@ console.log(okIsOkOfNumber, errIsErrOfString, fromOk, fromErr, parse("1"));
 fn try_error_types_infer_as_a_union_without_an_annotation() {
     require_toolchain!();
     // Two `try`s over results with different error types: the lowered early
-    // returns plus `Result.Ok(...)` give tsc `Err<UserError> | Err<ConfigError>
-    // | Ok<Data>`, which is exactly `Result<Data, UserError | ConfigError>`.
+    // returns plus `Result.Ok(...)` give tsc `TErr<UserError> | TErr<ConfigError>
+    // | TOk<Data>`, which is exactly `TResult<Data, UserError | ConfigError>`.
     // rlc collects no error types of its own — this is tsc's union inference.
     let (ok, out) = typecheck_with_std(
         r#"
-import { Result } from "./rl.js";
+import type { TResult } from "./rl/index.js";
+import * as Result from "./rl/result.js";
 
 type User = { id: number };
 type Config = { port: number };
 type UserError = { tag: "user" };
 type ConfigError = { tag: "config" };
 
-declare function getUser(): Result<User, UserError>;
-declare function getConfig(): Result<Config, ConfigError>;
+declare function getUser(): TResult<User, UserError>;
+declare function getConfig(): TResult<Config, ConfigError>;
 
 function load() {
   const user = try getUser();
@@ -966,7 +990,7 @@ function load() {
   return Result.Ok({ user, config });
 }
 
-const loaded: Result<{ user: User; config: Config }, UserError | ConfigError> = load();
+const loaded: TResult<{ user: User; config: Config }, UserError | ConfigError> = load();
 console.log(loaded);
 "#,
     );
@@ -981,11 +1005,12 @@ fn try_error_union_stays_checked_against_the_declared_return_type() {
     // by tsc on the emitted early return.
     let (ok, out) = typecheck_with_std(
         r#"
-import { Result } from "./rl.js";
+import type { TResult } from "./rl/index.js";
+import * as Result from "./rl/result.js";
 
-declare function getUser(): Result<number, { tag: "user" }>;
+declare function getUser(): TResult<number, { tag: "user" }>;
 
-function load(): Result<number, string> {
+function load(): TResult<number, string> {
   const user = try getUser();
   return Result.Ok(user);
 }
@@ -1000,7 +1025,8 @@ console.log(load());
 /// failing its own way, so a chain that loses an error type is visible in the
 /// asserted union.
 const ERROR_UNION_PRELUDE: &str = r#"
-import { Result } from "./rl.js";
+import type { TResult } from "./rl/index.js";
+import * as Result from "./rl/result.js";
 
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
@@ -1012,25 +1038,25 @@ type TokenError = { tag: "token" };
 type FetchError = { tag: "fetch" };
 type ValidationError = { tag: "validation" };
 
-declare function loadConfig(): Result<string, ConfigError>;
-declare function loadToken(config: string): Result<User, TokenError>;
-declare function getCompany(user: User): Result<Company, FetchError>;
-declare function fetchProfile(user: User): Result<Profile, FetchError>;
-declare function validateProfile(profile: Profile): Result<Profile, ValidationError>;
+declare function loadConfig(): TResult<string, ConfigError>;
+declare function loadToken(config: string): TResult<User, TokenError>;
+declare function getCompany(user: User): TResult<Company, FetchError>;
+declare function fetchProfile(user: User): TResult<Profile, FetchError>;
+declare function validateProfile(profile: Profile): TResult<Profile, ValidationError>;
 "#;
 
 #[test]
 fn std_result_and_then_unions_the_two_error_types() {
     require_toolchain!();
     // `andThen` takes the chained function's error type as its own generic,
-    // so chaining a `Result<User, TokenError>` with a step that fails with
+    // so chaining a `TResult<User, TokenError>` with a step that fails with
     // `FetchError` keeps both — no `mapErr` to a common type first.
     let (ok, out) = typecheck_with_std(&format!(
         r#"{ERROR_UNION_PRELUDE}
-declare const first: Result<User, TokenError>;
+declare const first: TResult<User, TokenError>;
 
 const chained = Result.andThen(first, (user) => getCompany(user));
-const exact: Exact<typeof chained, Result<Company, TokenError | FetchError>> = true;
+const exact: Exact<typeof chained, TResult<Company, TokenError | FetchError>> = true;
 
 console.log(chained, exact);
 "#
@@ -1041,14 +1067,14 @@ console.log(chained, exact);
 #[test]
 fn std_result_and_then_on_a_variant_typed_value_keeps_the_chained_error() {
     require_toolchain!();
-    // A value typed as the `Ok<T>` variant alone (what `Result.Ok(...)` and a
+    // A value typed as the `TOk<T>` variant alone (what `Result.Ok(...)` and a
     // never-failing function give) offers nothing to infer the incoming `E`
     // from. The `E = never` default is what keeps that case precise instead of
     // collapsing the union to `unknown`.
     let (ok, out) = typecheck_with_std(&format!(
         r#"{ERROR_UNION_PRELUDE}
 const chained = Result.andThen(Result.Ok({{ id: 1 }}), (user: User) => fetchProfile(user));
-const exact: Exact<typeof chained, Result<Profile, FetchError>> = true;
+const exact: Exact<typeof chained, TResult<Profile, FetchError>> = true;
 
 console.log(chained, exact);
 "#
@@ -1079,7 +1105,7 @@ const profile = loadUser()
 
 const exact: Exact<
   typeof profile,
-  Result<Profile, ConfigError | TokenError | FetchError | ValidationError>
+  TResult<Profile, ConfigError | TokenError | FetchError | ValidationError>
 > = true;
 
 console.log(profile, exact);
@@ -1095,13 +1121,13 @@ fn std_result_map_p_keeps_the_error_type_it_was_given() {
     // unchanged — including a union an earlier `andThenP` accumulated.
     let (ok, out) = typecheck_with_std(&format!(
         r#"{ERROR_UNION_PRELUDE}
-declare const first: Result<User, TokenError>;
+declare const first: TResult<User, TokenError>;
 
 const title = first
   |> Result.andThenP(fetchProfile)
   |> Result.mapP((profile) => profile.title);
 
-const exact: Exact<typeof title, Result<string, TokenError | FetchError>> = true;
+const exact: Exact<typeof title, TResult<string, TokenError | FetchError>> = true;
 
 console.log(title, exact);
 "#
@@ -1114,10 +1140,10 @@ fn std_result_and_then_p_composes_under_flow() {
     require_toolchain!();
     // `andThenP` returns a function still generic in `E`, so a `flow`
     // composition of two steps stays open at its input end: applying it to a
-    // `Result<User, TokenError>` unions that error in too.
+    // `TResult<User, TokenError>` unions that error in too.
     let (ok, out) = typecheck_with_std(&format!(
         r#"{ERROR_UNION_PRELUDE}
-declare const first: Result<User, TokenError>;
+declare const first: TResult<User, TokenError>;
 
 const pipeline = flow
   |> Result.andThenP(fetchProfile)
@@ -1126,7 +1152,7 @@ const pipeline = flow
 const profile = pipeline(first);
 const exact: Exact<
   typeof profile,
-  Result<Profile, TokenError | FetchError | ValidationError>
+  TResult<Profile, TokenError | FetchError | ValidationError>
 > = true;
 
 console.log(profile, exact);
@@ -1143,10 +1169,10 @@ fn std_result_and_then_p_takes_an_annotated_inline_callback() {
     // other test here) needs nothing.
     let (ok, out) = typecheck_with_std(&format!(
         r#"{ERROR_UNION_PRELUDE}
-declare const first: Result<User, TokenError>;
+declare const first: TResult<User, TokenError>;
 
 const profile = first |> Result.andThenP((user: User) => fetchProfile(user));
-const exact: Exact<typeof profile, Result<Profile, TokenError | FetchError>> = true;
+const exact: Exact<typeof profile, TResult<Profile, TokenError | FetchError>> = true;
 
 console.log(profile, exact);
 "#
@@ -1171,7 +1197,7 @@ const user = result {{
 const profile = user |> Result.andThenP(fetchProfile);
 const exact: Exact<
   typeof profile,
-  Result<Profile, ConfigError | TokenError | FetchError>
+  TResult<Profile, ConfigError | TokenError | FetchError>
 > = true;
 
 console.log(profile, exact);
@@ -1190,9 +1216,9 @@ fn std_result_and_then_error_union_stays_checked_against_an_annotation() {
     // covers only one of the two chained error types is still a tsc error.
     let (ok, out) = typecheck_with_std(&format!(
         r#"{ERROR_UNION_PRELUDE}
-declare const first: Result<User, TokenError>;
+declare const first: TResult<User, TokenError>;
 
-function chain(): Result<Profile, TokenError> {{
+function chain(): TResult<Profile, TokenError> {{
   return Result.andThen(first, (user) => fetchProfile(user));
 }}
 
@@ -1212,18 +1238,19 @@ fn runtime_result_and_then_chain_short_circuits_on_the_first_err() {
     // return the first `Err` untouched and run the rest only on `Ok`.
     let lines = run_with_std(
         r#"
-import { Result } from "./rl.js";
+import type { TResult } from "./rl/index.js";
+import * as Result from "./rl/result.js";
 
 type Parsed = { n: number };
 type ParseError = { tag: "parse"; raw: string };
 type RangeError = { tag: "range"; n: number };
 
-const parse = (raw: string): Result<Parsed, ParseError> =>
+const parse = (raw: string): TResult<Parsed, ParseError> =>
   Number.isNaN(Number(raw))
     ? Result.Err({ tag: "parse" as const, raw })
     : Result.Ok({ n: Number(raw) });
 
-const inRange = (p: Parsed): Result<number, RangeError> =>
+const inRange = (p: Parsed): TResult<number, RangeError> =>
   p.n <= 10 ? Result.Ok(p.n) : Result.Err({ tag: "range" as const, n: p.n });
 
 const check = (raw: string) => parse(raw) |> Result.andThenP(inRange);
@@ -1511,9 +1538,9 @@ fn symbols_reports_imports_and_positions_as_valid_json() {
 
 const LEVEL_RL: &str = "export enum Level {\n  Low,\n  High(threshold: number),\n}\n";
 
-const NOTICE_RL: &str = "import { Option } from \"@rl/std\";\nimport { Level } from \"./level.rl\";\n\nexport enum Notice {\n  Info(text: string),\n  Warn(text: string, code: number),\n}\n\nexport function render(n: Notice): string {\n  return match (n) {\n    Info(text) => `info: ${text}`,\n    Warn(text, code) => `warn[${code}]: ${text}`,\n  };\n}\n\nexport function gate(l: Level): number {\n  return match (l) {\n    Low => 0,\n    High(threshold) => threshold,\n  };\n}\n\nexport function first(list: Notice[]): Option<Notice> {\n  return list.length > 0 ? Option.Some(list[0]) : Option.None;\n}\n";
+const NOTICE_RL: &str = "import type { TOption } from \"@rl/std\";\nimport * as Option from \"@rl/std/option\";\nimport { Level } from \"./level.rl\";\n\nexport enum Notice {\n  Info(text: string),\n  Warn(text: string, code: number),\n}\n\nexport function render(n: Notice): string {\n  return match (n) {\n    Info(text) => `info: ${text}`,\n    Warn(text, code) => `warn[${code}]: ${text}`,\n  };\n}\n\nexport function gate(l: Level): number {\n  return match (l) {\n    Low => 0,\n    High(threshold) => threshold,\n  };\n}\n\nexport function first(list: Notice[]): TOption<Notice> {\n  return list.length > 0 ? Option.Some(list[0]) : Option.None;\n}\n";
 
-const CONSUMER_MAIN_TS: &str = "import { Option } from \"@rl/std\";\nimport { Notice, render, first } from \"./notice.rl\";\n\nconst items = [Notice.Info(\"hello\"), Notice.Warn(\"careful\", 7)];\nfor (const n of items) console.log(render(n));\nconsole.log(Option.isSome(first(items)));\n";
+const CONSUMER_MAIN_TS: &str = "import * as Option from \"@rl/std/option\";\nimport { Notice, render, first } from \"./notice.rl\";\n\nconst items = [Notice.Info(\"hello\"), Notice.Warn(\"careful\", 7)];\nfor (const n of items) console.log(render(n));\nconsole.log(Option.isSome(first(items)));\n";
 
 /// A mixed source tree: two `.rl` modules (one importing the other and the
 /// standard library) plus a hand-written `.ts` entry that imports `.rl`.
@@ -1561,9 +1588,11 @@ fn cli_build_emits_a_complete_tree_that_runs() {
         main_ts,
         CONSUMER_MAIN_TS
             .replace("./notice.rl", "./notice.js")
-            .replace("@rl/std", "./rl.js")
+            .replace("@rl/std/option", "./rl/option.js")
     );
-    assert!(dir.join("build/rl.ts").exists(), "std not materialized");
+    for module in rlc::StdModule::ALL {
+        assert!(dir.join("build/rl").join(module.file_name()).exists());
+    }
 
     // The emitted tree stands on its own: tsc compiles it, node runs it.
     fs::write(dir.join("build/package.json"), "{ \"type\": \"module\" }\n").unwrap();
@@ -1642,7 +1671,14 @@ fn cli_types_leaves_nothing_but_the_sidecars() {
     assert!(dir.join(".rl-types/notice.rl.d.ts").exists());
     assert!(dir.join(".rl-types/notice.rl.d.ts.map").exists());
     assert!(dir.join(".rl-types/level.rl.d.ts").exists());
-    assert!(dir.join(".rl-types/rl.d.ts").exists());
+    for module in rlc::StdModule::ALL {
+        assert!(
+            dir.join(".rl-types/rl")
+                .join(module.file_name())
+                .with_extension("d.ts")
+                .exists()
+        );
+    }
 }
 
 #[test]
@@ -1681,9 +1717,10 @@ fn cli_types_reports_rl_type_errors_at_the_source_position() {
     // IIFE that moves the offending expression far from where it was
     // written, and the file it lives in is never written to disk — the
     // diagnostic has to name `bad.rl` and the source line/column anyway.
-    let bad = "import { Result } from \"@rl/std\";\n\
+    let bad = "import type { TResult } from \"@rl/std\";\n\
+               import * as Result from \"@rl/std/result\";\n\
                \n\
-               declare function evaluate(): Result<number, string>;\n\
+               declare function evaluate(): TResult<number, string>;\n\
                \n\
                export const bad = evaluate() |> Result.mapP((n) => n.length);\n";
     fs::write(dir.join("src/bad.rl"), bad).unwrap();
@@ -1698,7 +1735,7 @@ fn cli_types_reports_rl_type_errors_at_the_source_position() {
     // `length` sits at column 55 of line 5 of the source. The emitted code
     // puts it elsewhere entirely, and there is no `bad.ts` to open.
     assert!(
-        line.starts_with("rlc: src/bad.rl:5:55: "),
+        line.starts_with("rlc: src/bad.rl:6:55: "),
         "diagnostic should point into the .rl source: {line}"
     );
     assert!(
@@ -1743,7 +1780,16 @@ fn cli_types_sidecars_typecheck_the_source_tree() {
     );
     assert!(dir.join(".rl-types/notice.rl.d.ts.map").exists());
     assert!(dir.join(".rl-types/level.rl.d.ts").exists());
-    assert!(dir.join(".rl-types/rl.d.ts").exists(), "std types missing");
+    for module in rlc::StdModule::ALL {
+        assert!(
+            dir.join(".rl-types/rl")
+                .join(module.file_name())
+                .with_extension("d.ts")
+                .exists(),
+            "std declaration missing: {:?}",
+            module
+        );
+    }
 
     // Round trip: the untouched source tree typechecks once the sidecars
     // are merged in (`rootDirs`) and `@rl/std` is mapped (`paths`).
@@ -1758,7 +1804,10 @@ fn cli_types_sidecars_typecheck_the_source_tree() {
     "skipLibCheck": true,
     "noEmit": true,
     "rootDirs": ["./src", "./.rl-types"],
-    "paths": { "@rl/std": ["./.rl-types/rl.d.ts"] }
+    "paths": {
+      "@rl/std": ["./.rl-types/rl/index.d.ts"],
+      "@rl/std/*": ["./.rl-types/rl/*.d.ts"]
+    }
   },
   "include": ["src"]
 }
@@ -1784,20 +1833,20 @@ fn cli_types_sidecars_typecheck_the_source_tree() {
 // Inline the curried std combinators so the snippets need no module
 // resolution (the std source itself is covered by tests/stdlib.rs).
 const PIPE_PRELUDE: &str = r#"
-type Option<T> = { kind: "Some"; value: T } | { kind: "None" };
+type TOption<T> = { kind: "Some"; value: T } | { kind: "None" };
 const Option = {
-  Some: <T>(value: T): Option<T> => ({ kind: "Some", value }),
+  Some: <T>(value: T): TOption<T> => ({ kind: "Some", value }),
   None: { kind: "None" } as const,
   mapP:
     <T, U>(f: (value: T) => U) =>
-    (o: Option<T>): Option<U> =>
+    (o: TOption<T>): TOption<U> =>
       o.kind === "Some" ? { kind: "Some", value: f(o.value) } : { kind: "None" },
   unwrapOrP:
     <T>(fallback: T) =>
-    (o: Option<T>): T =>
+    (o: TOption<T>): T =>
       o.kind === "Some" ? o.value : fallback,
 };
-const half = (n: number): Option<number> =>
+const half = (n: number): TOption<number> =>
   n % 2 === 0 ? Option.Some(n / 2) : Option.None;
 "#;
 
@@ -2212,16 +2261,17 @@ fn runtime_result_block_replaces_nested_combinator_callbacks() {
     // written flat, against the real standard library.
     let lines = run_with_std(
         r#"
-import { Result } from "./rl.js";
+import type { TResult } from "./rl/index.js";
+import * as Result from "./rl/result.js";
 
 type User = { id: number; companyId: number; name: string };
 type Company = { id: number; name: string };
 
-const getUser = (id: number): Result<User, string> =>
+const getUser = (id: number): TResult<User, string> =>
   id === 1 ? Result.Ok({ id, companyId: 7, name: " Ada " }) : Result.Err("no user " + id);
-const getCompany = (id: number): Result<Company, string> =>
+const getCompany = (id: number): TResult<Company, string> =>
   Result.Ok({ id, name: "Acme" });
-const getPermission = (u: User, c: Company): Result<string, string> =>
+const getPermission = (u: User, c: Company): TResult<string, string> =>
   Result.Ok(u.name.trim() + "@" + c.name);
 
 const view = (id: number) => result {

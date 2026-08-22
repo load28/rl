@@ -622,7 +622,7 @@ fn validate_statement(statement: &Statement, file: &CoreFile, semantic: &Semanti
         Statement::Import(import) => {
             validate_node(import.specifier, semantic);
             match import.kind {
-                hir::ImportKind::Std | hir::ImportKind::Relative => {}
+                hir::ImportKind::Std(_) | hir::ImportKind::Relative => {}
             }
         }
         Statement::Propagate(propagate) => validate_propagate(propagate, file, semantic),

@@ -113,12 +113,13 @@ test(
  * -------------------------------------------------------------------- */
 
 const PIPE_SOURCE = [
-  'import { Result } from "@rl/std";',
+  'import type { TResult } from "@rl/std";',
+  'import * as Result from "@rl/std/result";',
   "",
-  "declare function tokenize(s: string): Result<string[], string>;",
-  "declare function parse(t: string[]): Result<number, string>;",
+  "declare function tokenize(s: string): TResult<string[], string>;",
+  "declare function parse(t: string[]): TResult<number, string>;",
   "",
-  "export function calculate(input: string): Result<number, string> {",
+  "export function calculate(input: string): TResult<number, string> {",
   "  return input",
   "    |> .trim()",
   "    |> tokenize",
@@ -137,7 +138,7 @@ test("a pipeline step over the std module is not `any`", { skip }, async () => {
   );
   assert.ok(info, "expected quick info");
   assert.ok(
-    info!.signature.includes("Result<number, string>"),
+    info!.signature.includes("TResult<number, string>"),
     `signature was: ${info!.signature}`,
   );
 });
@@ -216,9 +217,10 @@ test(
  * -------------------------------------------------------------------- */
 
 const BAD_PIPE = [
-  'import { Result } from "@rl/std";',
+  'import type { TResult } from "@rl/std";',
+  'import * as Result from "@rl/std/result";',
   "",
-  "declare function evaluate(): Result<number, string>;",
+  "declare function evaluate(): TResult<number, string>;",
   "",
   "// `n` is a number; `n.length` is not a thing.",
   "export const bad = evaluate() |> Result.mapP((n) => n.length);",
@@ -290,10 +292,11 @@ test("a buffer mid-edit is never invented errors for", { skip }, async () => {
  * -------------------------------------------------------------------- */
 
 const TUPLE_SOURCE = [
-  'import { Result } from "@rl/std";',
+  'import type { TResult } from "@rl/std";',
+  'import * as Result from "@rl/std/result";',
   "",
-  "type Evaluated = Result<number, string>;",
-  "type Operands = Result<[number, number], string>;",
+  "type Evaluated = TResult<number, string>;",
+  "type Operands = TResult<[number, number], string>;",
   "",
   "export const applyP =",
   "  (f: (a: number, b: number) => number) =>",
@@ -318,10 +321,12 @@ test("tuple destructuring over the std module reports nothing", { skip }, async 
  * -------------------------------------------------------------------- */
 
 const BINDING_SOURCE = [
-  'import { Option, Result } from "@rl/std";',
+  'import type { TOption, TResult } from "@rl/std";',
+  'import * as Option from "@rl/std/option";',
+  'import * as Result from "@rl/std/result";',
   "",
-  "declare function load(): Result<number, string>;",
-  "declare function boxed(): Option<string>;",
+  "declare function load(): TResult<number, string>;",
+  "declare function boxed(): TOption<string>;",
   "",
   "export function run(): number {",
   "  const total = try load();",
@@ -386,7 +391,8 @@ test("let-else and if let bindings hover with the extracted type", { skip }, asy
  * -------------------------------------------------------------------- */
 
 const NAMED_SOURCE = [
-  'import { Result } from "@rl/std";',
+  'import type { TResult } from "@rl/std";',
+  'import * as Result from "@rl/std/result";',
   "",
   "enum Wire { OutOfRange(value: number), Missing }",
   "enum ParseError { NotANumber(text: string) }",
@@ -396,7 +402,7 @@ const NAMED_SOURCE = [
   "  return Result.Ok(1);",
   "}",
   "",
-  "export function outer(w: Wire): Result<number, ParseError> {",
+  "export function outer(w: Wire): TResult<number, ParseError> {",
   "  const n = try inner(w);",
   "  return Result.Ok(n);",
   "}",
@@ -418,12 +424,12 @@ test("a restated diagnostic names the case it is about", { skip }, async () => {
   // a union covering a whole enum is that enum.
   assert.match(
     error!.message,
-    /in rl's names: Type 'Err<Wire\.OutOfRange>' is not assignable to type 'Result<number, ParseError>'/,
+    /in rl's names: Type 'TErr<Wire\.OutOfRange>' is not assignable to type 'TResult<number, ParseError>'/,
   );
   // TypeScript's own text rides along, unchanged.
   assert.match(
     error!.message,
-    /ts2322: Type 'Err<\{ kind: "OutOfRange"; value: number; \}>'/,
+    /ts2322: Type 'TErr<\{ kind: "OutOfRange"; value: number; \}>'/,
   );
 });
 

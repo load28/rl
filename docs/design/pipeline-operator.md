@@ -24,7 +24,8 @@ rl에 **파이프 기반 함수형 체이닝**을 추가한다. 요구사항은 
 목표 사용감:
 
 ```rl
-import { Option } from "@rl/std";
+import type { TOption } from "@rl/std";
+import * as Option from "@rl/std/option";
 
 const label = half(4)
   |> Option.mapP(x => x + 1)
@@ -165,7 +166,7 @@ const label = ($rl_ap($rl_ap((half(4)),
 
 반면 (C)는 step을 `$rl_ap`의 **인자 위치**에 두므로, 파라미터 타입
 `(v: A) => B`가 문맥 타입이 되어 **반환 타입 문맥 추론**(fp-ts `pipe`가
-동작하는 바로 그 메커니즘)이 작동한다: `A = Option<number>`가 먼저 고정되고,
+동작하는 바로 그 메커니즘)이 작동한다: `A = TOption<number>`가 먼저 고정되고,
 지연 검사되는 화살표의 `x`가 `number`로 추론된다. 부수 효과로 두 문제가 함께
 풀린다:
 
@@ -287,7 +288,7 @@ half(4) |> Option.mapP(x => x + 1) |> Option.unwrapOrP(0)
 - 추가 목록: `Option.mapP/andThenP/orElseP/filterP/unwrapOrP/unwrapOrElseP/`
   `expectP/okOrP`, `Result.mapP/mapErrP/andThenP/orElseP/unwrapOrP/`
   `unwrapOrElseP/expectP`. 각각 순수 TS 한 줄 커링이다:
-  `mapP: <T, U>(f: (v: T) => U) => (o: Option<T>): Option<U> => ...`.
+  `mapP: <T, U>(f: (v: T) => U) => (o: TOption<T>): TOption<U> => ...`.
 - **이미 단항인 멤버는 변형이 필요 없다** — `Option.isSome/isNone/toNullable`,
   `Result.isOk/isErr/ok/err`는 지금 그대로 파이프에 들어간다:
   `r |> Result.ok |> Option.toNullable`.

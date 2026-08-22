@@ -37,9 +37,10 @@ function project(source: string): { file: string; done: () => void } {
 }
 
 const STD_SOURCE = [
-  'import { Result } from "@rl/std";',
+  'import type { TResult } from "@rl/std";',
+  'import * as Result from "@rl/std/result";',
   "",
-  "declare const r: Result<number, string>;",
+  "declare const r: TResult<number, string>;",
   "const doubled = Result.map(r, (n) => n * 2);",
   "",
 ].join("\n");
@@ -93,14 +94,14 @@ test("a completion entry resolves to its type", { skip }, async () => {
   );
   assert.ok(detail, "expected details for andThen");
   // The engine resolves the entry against the position it was asked at, so
-  // the signature comes back instantiated (`Result<number, string>`) rather
+  // the signature comes back instantiated (`TResult<number, string>`) rather
   // than in the type parameters the declaration is written in.
   assert.ok(
     detail!.signature.includes("andThen:"),
     `signature was: ${detail!.signature}`,
   );
   assert.ok(
-    detail!.signature.includes("Result<number, string>"),
+    detail!.signature.includes("TResult<number, string>"),
     `signature was: ${detail!.signature}`,
   );
   assert.ok(
@@ -123,7 +124,7 @@ test("signature help types a combinator's arguments", { skip }, async () => {
   assert.equal(help!.activeParameter, 1);
   const sig = help!.signatures[help!.activeSignature];
   assert.ok(
-    sig.label.includes("r: Result<number, string>"),
+    sig.label.includes("r: TResult<number, string>"),
     `label was: ${sig.label}`,
   );
   assert.equal(sig.parameters.length, 2);
@@ -175,9 +176,10 @@ test("a pipeline step's members need a probe", { skip }, async () => {
 });
 
 const PIPE_STD_SOURCE = [
-  'import { Result } from "@rl/std";',
+  'import type { TResult } from "@rl/std";',
+  'import * as Result from "@rl/std/result";',
   "",
-  "declare const r: Result<number, string>;",
+  "declare const r: TResult<number, string>;",
   "const out = r",
   "  |> Result.mapP((n) => n + 1)",
   "  |> .",

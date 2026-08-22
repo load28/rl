@@ -423,8 +423,9 @@ fn the_standard_library_enters_the_graph_as_a_module_of_the_project() {
     let root = require_emit!();
     let dir = project(&[(
         "src/parse.rl",
-        "import { Result } from \"@rl/std\";\n\
-         export function parse(text: string): Result<number, string> {\n\
+        "import type { TResult } from \"@rl/std\";\n\
+         import * as Result from \"@rl/std/result\";\n\
+         export function parse(text: string): TResult<number, string> {\n\
          \x20 const n = Number(text);\n\
          \x20 return Number.isNaN(n) ? Result.Err(\"not a number\") : Result.Ok(n);\n\
          }\n",
@@ -488,14 +489,15 @@ fn a_restated_diagnostic_calls_a_case_by_its_declared_name() {
     // the object type it lowers to. rl names both sides from declarations.
     let dir = project(&[(
         "src/named.rl",
-        "import { Result } from \"@rl/std\";\n\
+        "import type { TResult } from \"@rl/std\";\n\
+         import * as Result from \"@rl/std/result\";\n\
          enum Wire { OutOfRange(value: number), Missing }\n\
          enum ParseError { NotANumber(text: string) }\n\
          function inner(w: Wire) {\n\
          \x20 if (w.kind === \"OutOfRange\") { return Result.Err(w); }\n\
          \x20 return Result.Ok(1);\n\
          }\n\
-         export function outer(w: Wire): Result<number, ParseError> {\n\
+         export function outer(w: Wire): TResult<number, ParseError> {\n\
          \x20 const n = try inner(w);\n\
          \x20 return Result.Ok(n);\n\
          }\n",
@@ -503,7 +505,7 @@ fn a_restated_diagnostic_calls_a_case_by_its_declared_name() {
     let out = check(&dir, &root);
     assert!(
         out.contains("type mismatch: expected `ParseError`, found `Wire.OutOfRange`")
-            && out.contains("required type: `Result<number, ParseError>`"),
+            && out.contains("required type: `TResult<number, ParseError>`"),
         "the case and surrounding obligation use rl declaration names: {out}"
     );
     assert!(
@@ -517,10 +519,11 @@ fn assignability_diagnostics_report_the_minimal_type_difference() {
     let root = require_tsgo!();
     let dir = project(&[(
         "src/mismatch.rl",
-        "import { Result } from \"@rl/std\";\n\
+        "import type { TResult } from \"@rl/std\";\n\
+         import * as Result from \"@rl/std/result\";\n\
          enum InputError { Empty, NotANumber(raw: string) }\n\
          enum RangeError { TooLarge(value: number, max: number) }\n\
-         export function port(value: number): Result<number, InputError> {\n\
+         export function port(value: number): TResult<number, InputError> {\n\
          \x20 return value > 65535\n\
          \x20   ? Result.Err(RangeError.TooLarge(value, 65535))\n\
          \x20   : Result.Err(InputError.Empty);\n\
@@ -532,7 +535,7 @@ fn assignability_diagnostics_report_the_minimal_type_difference() {
         "minimal incompatible leaf: {out}"
     );
     assert!(
-        out.contains("required type: `Result<number, InputError>`"),
+        out.contains("required type: `TResult<number, InputError>`"),
         "the surrounding obligation remains visible: {out}"
     );
     assert!(
@@ -563,9 +566,10 @@ fn one_structured_cause_replaces_try_lowering_consequences() {
     let root = require_tsgo!();
     let dir = project(&[(
         "src/try.rl",
-        "import { Result } from \"@rl/std\";\n\
+        "import type { TResult } from \"@rl/std\";\n\
+         import * as Result from \"@rl/std/result\";\n\
          const a = () => Result.Err(10);\n\
-         function test(): Result<string, string> {\n\
+         function test(): TResult<string, string> {\n\
          \x20 const value = try a();\n\
          \x20 return value;\n\
          }\n",
@@ -578,7 +582,7 @@ fn one_structured_cause_replaces_try_lowering_consequences() {
     );
     assert!(
         out.contains("expected `string`, found `number`")
-            && out.contains("required type: `Result<string, string>`"),
+            && out.contains("required type: `TResult<string, string>`"),
         "the checker-proven incompatible types are reported: {out}"
     );
     assert!(
@@ -606,19 +610,20 @@ fn a_precise_rl_error_owns_an_overlapping_type_consequence() {
 #[test]
 fn typed_diagnostic_ranges_follow_source_ownership_not_mapping_accidents() {
     let root = require_tsgo!();
-    let source = "import { Result } from \"@rl/std\";\n\
+    let source = "import type { TResult } from \"@rl/std\";\n\
+        import * as Result from \"@rl/std/result\";\n\
         enum Input { Blank, Num(value: number) }\n\
         enum InputError { Empty }\n\
         enum RangeError { TooLarge(value: number) }\n\
         enum Conn { Up(value: number), Down }\n\
-        export function toPort(input: Input): Result<number, InputError> {\n\
+        export function toPort(input: Input): TResult<number, InputError> {\n\
         \x20 return match (input) {\n\
         \x20   Blank => Result.Err(InputError.Empty),\n\
         \x20   Num(value) => Result.Err(RangeError.TooLarge(value)),\n\
         \x20 };\n\
         }\n\
-        const test = (): Result<string, number> => Result.Err(10);\n\
-        export function bind(): Result<number, InputError> {\n\
+        const test = (): TResult<string, number> => Result.Err(10);\n\
+        export function bind(): TResult<number, InputError> {\n\
         \x20 return result {\n\
         \x20   const n <- test();\n\
         \x20   n\n\
@@ -645,7 +650,7 @@ fn typed_diagnostic_ranges_follow_source_ownership_not_mapping_accidents() {
         .find(|d| {
             d["message"]
                 .as_str()
-                .is_some_and(|m| m.contains("expected `Result<number, InputError>`"))
+                .is_some_and(|m| m.contains("expected `TResult<number, InputError>`"))
                 && d["line"].as_u64().is_some_and(|line| line > 10)
         })
         .unwrap_or_else(|| panic!("missing result mismatch: {answer}"));
@@ -689,19 +694,20 @@ fn parser_errors_do_not_hide_an_independent_type_error_in_the_same_file() {
     let root = require_tsgo!();
     let dir = project(&[(
         "src/recovery.rl",
-        "import { Result } from \"@rl/std\";\n\
-         function read(value: number): Result<number, string> {\n\
+        "import type { TResult } from \"@rl/std\";\n\
+         import * as Result from \"@rl/std/result\";\n\
+         function read(value: number): TResult<number, string> {\n\
          \x20 return Result.Ok(value);\n\
          }\n\
-         export function nested(value: number): Result<number, string> {\n\
+         export function nested(value: number): TResult<number, string> {\n\
          \x20 return result {\n\
          \x20   const first <- read(value);\n\
          \x20   if (first > 0) { const second <- read(first); }\n\
          \x20   first\n\
          \x20 };\n\
          }\n\
-         const wrong = (): Result<string, number> => Result.Err(10);\n\
-         export function bindNonResult(): Result<number, string> {\n\
+         const wrong = (): TResult<string, number> => Result.Err(10);\n\
+         export function bindNonResult(): TResult<number, string> {\n\
          \x20 return result { const value <- wrong(); value };\n\
          }\n\
          export const malformed = match value { Missing => 0 };\n",
@@ -717,7 +723,7 @@ fn parser_errors_do_not_hide_an_independent_type_error_in_the_same_file() {
         "the malformed construct remains visible: {out}"
     );
     assert!(
-        out.contains("type mismatch: expected `Result<number, string>`")
+        out.contains("type mismatch: expected `TResult<number, string>`")
             && out.contains("Err<number>"),
         "the independent bindNonResult type error survives recovery: {out}"
     );

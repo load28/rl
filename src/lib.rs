@@ -17,10 +17,9 @@
 //! [`ImportRewrite`]) and error type [`CompileError`] — code, or the first
 //! error. The multi-diagnostic forms are [`analyze`] (every rl-level
 //! [`Diagnostic`], in source order) and [`compile_report`] (the same, plus
-//! the emission when one is possible); the standard library source is
-//! [`STD_SOURCE`] (`Option`/`Result` with functional combinators, written
-//! out by `rlc --emit-std`). The `rlc` binary in this crate is a thin CLI
-//! over it.
+//! the emission when one is possible); the tree-shakeable standard library
+//! modules are exposed through [`StdModule`] and the `STD_*_SOURCE`
+//! constants. The `rlc` binary in this crate is a thin CLI over it.
 //!
 //! # Example
 //!
@@ -86,7 +85,9 @@ pub use probe::{
     Literal, LiteralMatch, PayloadProbe, TagMatch, literal_matches, payload_probes, tag_matches,
 };
 pub use sidecar::{Sidecar, build_sidecar};
-pub use stdlib::{STD_SOURCE, STD_SPECIFIER};
+pub use stdlib::{
+    STD_OPTION_SOURCE, STD_RESULT_SOURCE, STD_SPECIFIER, STD_TYPES_SOURCE, StdImports, StdModule,
+};
 pub use val::{Mutation, ValBinding, ValFn, ValParam, ValPass, ValProbes, is_builtin_mutator_name};
 
 use error::RlError;
@@ -199,15 +200,15 @@ pub fn rl_imports(source: &str) -> Vec<RlImport> {
     scan_module(source).imports
 }
 
-/// Whether a source file imports the standard library ([`STD_SPECIFIER`]).
+/// Whether a source file imports any standard-library module.
 ///
 /// Build tools use this to decide whether the module has to be written out
 /// (the `rlc` CLI does it automatically) and where the importing file
-/// should point — see [`Options::std_import`].
+/// should point — see [`Options::std_imports`].
 ///
 /// ```
-/// assert!(rlc::imports_std("import { Option } from \"@rl/std\";\n"));
-/// assert!(!rlc::imports_std("import { Option } from \"./rl.js\";\n"));
+/// assert!(rlc::imports_std("import * as Option from \"@rl/std/option\";\n"));
+/// assert!(!rlc::imports_std("import * as Option from \"./rl/option.js\";\n"));
 /// ```
 pub fn imports_std(source: &str) -> bool {
     scan_module(source).imports_std
@@ -235,7 +236,7 @@ pub struct ModuleScan {
 ///
 /// ```
 /// let scan = rlc::scan_module(
-///     "import { Option } from \"@rl/std\";\nimport { T } from \"./t.rl\";\n",
+///     "import type { TOption } from \"@rl/std\";\nimport { T } from \"./t.rl\";\n",
 /// );
 /// assert!(scan.imports_std);
 /// assert_eq!(scan.imports[0].specifier, "./t.rl");
@@ -250,7 +251,7 @@ pub fn scan_module(source: &str) -> ModuleScan {
         match decl.kind {
             // The standard library is not a project module — nothing to
             // resolve or collect declarations from.
-            ast::RlSpecifier::Std => scan.imports_std = true,
+            ast::RlSpecifier::Std(_) => scan.imports_std = true,
             ast::RlSpecifier::Relative => scan.imports.push(RlImport {
                 specifier: source[decl.spec.start + 1..decl.spec.end - 1].to_string(),
                 names: match &decl.names {
@@ -508,8 +509,8 @@ impl MappedEmit {
 /// Unlike [`compile`] this is **infallible**: semantic checks and output
 /// verification are skipped, so a buffer mid-edit (with, say, a
 /// non-exhaustive match) still emits — diagnostics remain [`compile`]/`rlc
-/// --check`'s job. Relative `.rl` import specifiers and `"@rl/std"` are
-/// left untouched ([`ImportRewrite::Off`] semantics): the consumer — an
+/// --check`'s job. Relative `.rl` import specifiers and `@rl/std` entries
+/// are left untouched ([`ImportRewrite::Off`] semantics): the consumer — an
 /// editor serving the output as a virtual TypeScript document — resolves
 /// them itself. Corresponds to the CLI's `--emit-map`.
 ///
@@ -522,7 +523,13 @@ pub fn emit_mapped(source: &str) -> MappedEmit {
     let program = parser::parse(source);
     let semantics = analysis::coverage_semantics(&program, &[]);
     let core = core_ir::lower_semantic(&semantics, source);
-    let flat = codegen::emit_with_map(&semantics, &core, source, ImportRewrite::Off, None);
+    let flat = codegen::emit_with_map(
+        &semantics,
+        &core,
+        source,
+        ImportRewrite::Off,
+        StdImports::default(),
+    );
     MappedEmit {
         code: flat.code,
         mappings: flat.mappings,
@@ -621,12 +628,9 @@ pub struct Options<'a> {
     /// Every other rl-level check runs either way: duplicate cases,
     /// misplaced wildcards, bad field types, `val`'s call-capability rule.
     pub defer_to_checker: bool,
-    /// What `"@rl/std"` ([`STD_SPECIFIER`]) is rewritten to on the way out
-    /// — the path of the standard library module this output will sit
-    /// next to (`"./rl.js"`, `"../rl.ts"`, ...). `None` leaves the bare
-    /// specifier untouched, which is what a bundler plugin wants: it
-    /// resolves the module itself.
-    pub std_import: Option<&'a str>,
+    /// Per-module rewrites for the standard-library package. Missing entries
+    /// leave their bare specifiers untouched for a bundler plugin to resolve.
+    pub std_imports: StdImports<'a>,
 }
 
 impl Default for Options<'_> {
@@ -637,7 +641,7 @@ impl Default for Options<'_> {
             rewrite_imports: ImportRewrite::default(),
             extern_enums: &[],
             defer_to_checker: false,
-            std_import: None,
+            std_imports: StdImports::default(),
         }
     }
 }
@@ -721,7 +725,7 @@ pub fn compile_mapped(source: &str, options: &Options) -> Result<MappedEmit, Com
         &core,
         source,
         options.rewrite_imports,
-        options.std_import,
+        options.std_imports,
     );
     if options.verify
         && let Err(failure) = verify::verify_output(&flat.code)
@@ -958,7 +962,7 @@ pub fn compile_report(source: &str, options: &Options) -> CompileReport {
         &core,
         source,
         options.rewrite_imports,
-        options.std_import,
+        options.std_imports,
     );
     let mut emit = Some(MappedEmit {
         code: flat.code,

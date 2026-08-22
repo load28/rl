@@ -94,7 +94,7 @@ fn construct_corpus_upholds_mapping_invariants() {
     // or-patterns and nested patterns, tuple match, try, let-else, if let,
     // pipeline, template interpolation, .rl import.
     let src = r#"import { Token } from "./token.rl";
-import { Option, Result } from "@rl/std";
+import type { TOption, TResult } from "@rl/std";
 enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
 
 const area = (s: Shape): number =>
@@ -112,7 +112,7 @@ function classify(a: Shape, b: Shape): string {
   };
 }
 
-function run(r: Result<number, string>): Result<number, string> {
+function run(r: TResult<number, string>): TResult<number, string> {
   const n = try r;
   const doubled = n |> ((x) => x * 2) |> .toString();
   const Circle(radius) = getShape() else { return r; };
@@ -199,8 +199,9 @@ fn val_modifier_is_dropped_and_the_rest_keeps_mapping() {
 
 #[test]
 fn result_block_bindings_are_mapped_to_emitted_declarations() {
-    let src = r#"import { Result, Ok } from "@rl/std";
-function load(): Result<number, string> { return Ok(1); }
+    let src = r#"import type { TResult } from "@rl/std";
+import * as Result from "@rl/std/result";
+function load(): TResult<number, string> { return Result.Ok(1); }
 const total = result {
   const first <- load();
   let { a, b }: { a: number; b: number } <- load2();
@@ -246,9 +247,9 @@ fn assert_mapped_in(src: &str, m: &rlc::MappedEmit, context: &str, needle: &str)
 fn try_declaration_bindings_are_mapped_to_emitted_declarations() {
     // The binding is where the editor asks what `try` produced, so it has
     // to reach `const n = $rl_t0.value;` through the map.
-    let src = r#"import { Result } from "@rl/std";
-declare function load(): Result<number, string>;
-function run(): Result<number, string> {
+    let src = r#"import type { TResult } from "@rl/std";
+declare function load(): TResult<number, string>;
+function run(): TResult<number, string> {
   const n = try load();
   let { a, b }: { a: number; b: number } = try load();
   return { kind: "Ok", value: n + a + b };
@@ -268,10 +269,10 @@ fn pattern_bindings_are_mapped_to_their_destructurings() {
     // Every binding a pattern introduces — match arm, let-else, if let,
     // nested — is copied from the source into the emitted destructuring,
     // so the editor can hover it and jump to it.
-    let src = r#"import { Option } from "@rl/std";
+    let src = r#"import type { TOption } from "@rl/std";
 enum Shape { Circle(radius: number), Rect(w: number, h: number), Point }
 declare function getShape(): Shape;
-declare function boxed(): Option<Shape>;
+declare function boxed(): TOption<Shape>;
 
 const area = match (getShape()) {
   Circle(radius) => radius,

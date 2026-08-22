@@ -234,8 +234,8 @@ pub(crate) struct RlImportDecl {
 pub(crate) enum RlSpecifier {
     /// A relative path ending in `.rl` — another module of this project.
     Relative,
-    /// The standard library (`@rl/std`), which rlc supplies itself.
-    Std,
+    /// One standard-library package module supplied by rlc.
+    Std(crate::stdlib::StdModule),
 }
 
 /// The bindings a lifted `.rl` import brings into local scope. Collection

@@ -169,7 +169,8 @@
 | TASK-159 | 값 continuation과 direct-return lowering (Phase 4 1/n) | 완료 | 2026-08-22 | 2026-08-22 | [TASK-159](./TASK-159-value-continuation-direct-return.md) |
 | TASK-160 | SWC whole-owner 기반 RL→TS 최적 lowering | 진행 중 | 2026-08-22 | — | [TASK-160](./TASK-160-whole-owner-ast-lowering.md) |
 | TASK-161 | SWC와 TypeScript 7 책임 경계 주석 | 완료 | 2026-08-22 | 2026-08-22 | [TASK-161](./TASK-161-swc-ts7-responsibility-comments.md) |
+| TASK-162 | 사용된 표준 라이브러리 멤버만 방출 | 완료 | 2026-08-22 | 2026-08-23 | [TASK-162](./TASK-162-stdlib-member-pruning.md) |
 
 ## 다음 태스크 번호
 
-**TASK-162**
+**TASK-163**

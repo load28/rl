@@ -20,14 +20,14 @@ use crate::program_syntax::{
     HostEvaluationOperation, HostExit, SourceSpan,
 };
 use crate::scanner::{at, ident_end, is_ident_start, scan_type_end, skip_ws_comments};
-use crate::{AnchorKind, ImportRewrite};
+use crate::{AnchorKind, ImportRewrite, StdImports};
 
 pub(crate) fn emit_with_map<'a>(
     semantic: &'a SemanticFile,
     core: &'a CoreFile,
     source: &'a str,
     rewrite_imports: ImportRewrite,
-    std_import: Option<&'a str>,
+    std_imports: StdImports<'a>,
 ) -> Flat {
     let lowering_plan = if core.requires_host_lowering() {
         let syntax = crate::program_syntax::ProgramSyntax::build(semantic, core, source)
@@ -50,7 +50,7 @@ pub(crate) fn emit_with_map<'a>(
         core,
         source,
         rewrite_imports,
-        std_import,
+        std_imports,
         owner_slot_rewrites: target.owner_slots,
         compose_rewrites: target.composes,
         source_replacements: target.source_replacements,
@@ -335,7 +335,7 @@ struct Emitter<'a> {
     core: &'a CoreFile,
     source: &'a str,
     rewrite_imports: ImportRewrite,
-    std_import: Option<&'a str>,
+    std_imports: StdImports<'a>,
     owner_slot_rewrites: Vec<OwnerSlotRewrite>,
     compose_rewrites: Vec<ComposeRewrite>,
     source_replacements: Vec<SourceReplacement>,
@@ -1190,8 +1190,8 @@ impl<'a> Emitter<'a> {
 
     fn emit_import(&self, import: &Import, out: &mut Rope<'a>) {
         let (specifier, at) = self.source_node(import.specifier);
-        if import.kind == hir::ImportKind::Std {
-            match self.std_import {
+        if let hir::ImportKind::Std(module) = import.kind {
+            match self.std_imports.get(module) {
                 Some(path) => {
                     let quote = &specifier[..1];
                     out.push_lit(format!("{quote}{path}{quote}"));

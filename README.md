@@ -50,7 +50,7 @@ Run `rlc --help` for compiler options or `rlc help <topic>` for the built-in lan
 ## The language at a glance
 
 - Model data with Rust-style `enum` declarations and unpack it with exhaustive `match` expressions, including guards, tuples, literals, or-patterns, and nested patterns.
-- Work with `Option` and `Result` through `try`, `let-else`, `if let`, and `result` blocks. Import the standard types from `@rl/std`.
+- Work with `TOption` and `TResult` through `try`, `let-else`, `if let`, and `result` blocks. Types come from `@rl/std`; tree-shakeable operations use `@rl/std/option` and `@rl/std/result`.
 - Build value and function pipelines with `|>` and `flow`.
 - Mark bindings and parameters with `val` when mutation through them must be rejected.
 

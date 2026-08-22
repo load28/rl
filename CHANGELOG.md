@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **표준 라이브러리가 멤버 단위로 트리셰이킹된다** (TASK-162). 타입은
+  `@rl/std`에서 `TOption`·`TResult`로 가져오고, 런타임 연산은
+  `import * as Option from "@rl/std/option"`과
+  `import * as Result from "@rl/std/result"`로 가져온다. 생성자와 콤비네이터를
+  독립 ESM export로 바꿔 실제 사용하지 않은 연산이 최종 번들에서 제거된다.
+  기존 `Option`·`Result` 객체 export는 제거했다.
+
 ### Fixed
 
 - **진단이 구문의 범위를 가진다 — 에디터의 밑줄이 정확해졌다** (TASK-116).

@@ -50,7 +50,7 @@ cargo install --git https://github.com/load28/rl
 ## 언어 한눈에 보기
 
 - Rust 스타일 `enum`으로 데이터를 모델링하고, 가드·튜플·리터럴·or-패턴·중첩 패턴을 지원하는 소진적 `match`로 값을 추출합니다.
-- `@rl/std`의 `Option`과 `Result`를 `try`, `let-else`, `if let`, `result` 블록으로 다룹니다.
+- `@rl/std`의 `TOption`과 `TResult`를 `try`, `let-else`, `if let`, `result` 블록으로 다룹니다. 트리셰이킹 가능한 연산은 `@rl/std/option`과 `@rl/std/result`에서 가져옵니다.
 - `|>`와 `flow`로 값 파이프라인과 함수 파이프라인을 만듭니다.
 - 변경을 허용하지 않을 바인딩과 매개변수에는 `val`을 붙입니다.
 

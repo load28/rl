@@ -187,7 +187,7 @@ impl Lower {
             node,
             kind: match decl.kind {
                 ast::RlSpecifier::Relative => ImportKind::Relative,
-                ast::RlSpecifier::Std => ImportKind::Std,
+                ast::RlSpecifier::Std(module) => ImportKind::Std(module),
             },
             names: match &decl.names {
                 ast::RlImportNames::Namespace(ns) => ImportNames::Namespace(ns.clone()),

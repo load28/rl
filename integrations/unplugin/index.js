@@ -46,10 +46,22 @@ function defaultCompiler() {
 const TS_SUFFIX = ".ts";
 
 /** The bare specifier rl sources use for the standard library. */
-const STD_SPECIFIER = "@rl/std";
+const STD_MODULES = new Map([
+  ["@rl/std", "types"],
+  ["@rl/std/option", "option"],
+  ["@rl/std/result", "result"],
+]);
 
 /** Virtual module id for the standard library, per working directory. */
-const stdId = () => path.resolve(process.cwd(), `__rl_std__${TS_SUFFIX}`);
+const stdId = (module) =>
+  path.resolve(process.cwd(), "__rl_std__", `${module}${TS_SUFFIX}`);
+
+const stdModuleOfId = (id) => {
+  for (const module of STD_MODULES.values()) {
+    if (id === stdId(module)) return module;
+  }
+  return null;
+};
 
 /**
  * @typedef {object} Options
@@ -73,7 +85,15 @@ export const unpluginFactory = (options = {}) => {
     resolveId(source, importer) {
       // The standard library has no file: rlc prints it on demand, so it
       // becomes a virtual module. Nothing lands in the project tree.
-      if (source === STD_SPECIFIER) return stdId();
+      const stdModule = STD_MODULES.get(source);
+      if (stdModule !== undefined) return stdId(stdModule);
+      if (importer !== undefined && importer !== null) {
+        const importerModule = stdModuleOfId(importer);
+        if (importerModule !== null) {
+          if (source === "./option.js") return stdId("option");
+          if (source === "./result.js") return stdId("result");
+        }
+      }
       if (!source.endsWith(".rl")) return null;
 
       const file = path.isAbsolute(source)
@@ -85,8 +105,9 @@ export const unpluginFactory = (options = {}) => {
     },
 
     async load(id) {
-      if (id === stdId()) {
-        const { stdout } = await run(compiler, ["--emit-std", "--no-banner"], {
+      const stdModule = stdModuleOfId(id);
+      if (stdModule !== null) {
+        const { stdout } = await run(compiler, ["--emit-std", stdModule, "--no-banner"], {
           maxBuffer: 16 * 1024 * 1024,
         });
         return { code: stdout, map: null };
@@ -115,8 +136,8 @@ export const unpluginFactory = (options = {}) => {
       // esbuild resolves and loads through its own filters, and its `load`
       // may only return JavaScript — so narrow the filters to our ids and
       // name the loader for the TypeScript rlc emits.
-      onResolveFilter: /(\.rl|^@rl\/std)$/,
-      onLoadFilter: /(\.rl\.ts|__rl_std__\.ts)$/,
+      onResolveFilter: /(\.rl|^@rl\/std(?:\/(?:option|result))?$|\.\/(?:option|result)\.js$)/,
+      onLoadFilter: /(\.rl\.ts|__rl_std__\/(?:types|option|result)\.ts)$/,
       loader: "ts",
     },
   };

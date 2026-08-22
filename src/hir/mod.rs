@@ -190,7 +190,7 @@ pub enum AstOrigin {
 pub enum Item {
     /// An rl enum declaration.
     Enum(EnumItem),
-    /// A lifted `.rl`/`@rl/std` import.
+    /// A lifted `.rl`/`@rl/std` package import.
     Import(ImportItem),
 }
 
@@ -240,7 +240,7 @@ pub struct FieldData {
     pub ty_text: String,
 }
 
-/// A lifted import: a relative `.rl` specifier or `@rl/std`.
+/// A lifted import: a relative `.rl` specifier or an `@rl/std` entry.
 #[derive(Debug)]
 pub struct ImportItem {
     /// The specifier's node (span = the quoted specifier).
@@ -256,8 +256,8 @@ pub struct ImportItem {
 pub enum ImportKind {
     /// A relative path ending in `.rl`.
     Relative,
-    /// The standard library, `@rl/std`.
-    Std,
+    /// One module of the standard-library package.
+    Std(crate::StdModule),
 }
 
 /// What an import brings into scope — the resolver's raw material.

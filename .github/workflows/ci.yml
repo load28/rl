@@ -36,6 +36,9 @@ jobs:
       - name: Install TypeScript
         run: npm install -g typescript@6
 
+      - name: Install Rolldown for std tree-shaking regression
+        run: npm install -g rolldown@1.2.5
+
       # What `--check-types`/`--types` drive: TypeScript 7's own compiler,
       # through its API client. Without one the `tests/native.rs` suite
       # skips silently, so the gate installs it and points rlc at it.

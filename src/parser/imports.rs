@@ -188,8 +188,8 @@ fn rl_spec_span(cur: &Cursor, span: Span) -> Option<(Span, RlSpecifier)> {
         return None;
     }
     let spec = &src[span.start + 1..span.end - 1];
-    if spec == crate::stdlib::STD_SPECIFIER.as_bytes() {
-        return Some((span, RlSpecifier::Std));
+    if let Some(module) = crate::stdlib::StdModule::from_specifier(spec) {
+        return Some((span, RlSpecifier::Std(module)));
     }
     let relative = spec.starts_with(b"./") || spec.starts_with(b"../");
     if relative && spec.ends_with(b".rl") {
