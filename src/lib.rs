@@ -358,7 +358,7 @@ pub fn enum_symbols(source: &str) -> Vec<EnumSymbol> {
 /// One chunk of emitted output copied verbatim from the source: `len` bytes
 /// starting at byte `src` of the source appear at byte `out` of the output.
 /// Produced by [`emit_mapped`]; chunks are non-overlapping in both
-/// coordinate spaces. Compiler-written glue (IIFE scaffolding,
+/// coordinate spaces. Compiler-written glue (region scaffolding,
 /// destructurings, enum emissions) has no mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitMapping {

@@ -244,7 +244,7 @@ effect는 추론하지 않는다 — built-in mutator 정책 + symbol identity�
 codegen은 raw AST 문자열 추측이 아니라 검증된 `SemanticFile`과 `CoreFile`을
 소비한다. `CoreFile`은 pattern 계열을 boolean decision tree로, Result 계열을
 `Propagate`로 정규화하고 target 실행 형태와 임시값 ID를 확정한다. 출력
-계약(discriminated union + constructor object, switch/IIFE, single
+계약(discriminated union + constructor object, owner-scoped switch/CFG, single
 evaluation과 early return, 사용자 바이트만 양방향 매핑, glue는
 `EmitAnchor`)은 그대로다.
 

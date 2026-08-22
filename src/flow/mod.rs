@@ -349,7 +349,7 @@ fn find_close(tokens: &[Token], open: usize) -> Option<usize> {
 /// placement question `try` asks: its lowering emits a `return`, and that
 /// `return` must have a function of the user's to exit. At the top level
 /// of a module (or of an rl construct's own statement region, which
-/// compiles into an IIFE) there is none; inside a `function`, a method, or
+/// forms an isolated value region) there is none; inside a `function`, a method, or
 /// an arrow body written in the region there is.
 ///
 /// The classification is per opening brace, from its immediate left

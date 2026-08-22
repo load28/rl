@@ -52,7 +52,7 @@ pub(crate) struct Program {
     pub result_missing_kw: Vec<Span>,
     /// Byte spans of `result` bindings written **below** a block's top
     /// level (inside an `if` body, a loop, a function written in the
-    /// block) — a binding early-returns the block's IIFE, and only a
+    /// block) — a binding exits the block's isolated value region, and only a
     /// top-level statement can (`rlc help result`). Same
     /// reporting story as [`Self::stray_pipes`]: the shape is never valid
     /// TypeScript, so it cannot pass through either.
@@ -169,10 +169,11 @@ pub(crate) struct PipeStep {
 /// followed by a block would be ambiguous with an expression statement
 /// naming a variable `result` plus a block statement on the next line.
 ///
-/// Compiles to an IIFE of plain statements — each binding evaluates once
-/// and early-`return`s the `Err`, exactly like a [`TryStmt`] — so tsc
-/// narrows every step on its own and the block's type (including the union
-/// of the steps' error types) is inferred with no type-level tricks.
+/// Lowers to a value-producing control-flow region. Each binding evaluates
+/// once and routes `Err` to the region continuation, while the trailing value
+/// routes `Ok(value)` to the same continuation. The target can therefore
+/// inline the region into a host statement without a generated function
+/// boundary while tsc still narrows every step on its own.
 #[derive(Debug)]
 pub(crate) struct ResultBlock {
     /// Byte offset of the `result` keyword, for error reporting.
@@ -287,7 +288,7 @@ pub(crate) struct LetElseStmt {
     /// Whether the statement sits inside a function body written in the
     /// same parse region — same fact as [`TryStmt::in_function`]. Inside
     /// an rl construct's statement region it decides placement: the
-    /// `else`'s exits must not leave the construct's IIFE, so without a
+    /// `else`'s exits must not leave the construct's value region, so without a
     /// function written there the statement is rejected.
     pub in_function: bool,
 }
@@ -298,7 +299,7 @@ pub(crate) struct LetElseStmt {
 /// when the pattern matches, the `else` part (a block or another `if let`)
 /// otherwise. Contract safety: in valid TypeScript `if` is always followed
 /// by `(`, never by `let`. Compiles to a self-contained block statement —
-/// no IIFE and no `return` of its own — so it is valid in any statement
+/// no isolated value boundary and no `return` of its own — so it is valid in any statement
 /// position; the bindings materialize as `const`s, which keeps their
 /// narrowed types inside closures.
 #[derive(Debug)]
@@ -371,7 +372,7 @@ pub(crate) struct TryStmt {
     /// placement fact sema judges: the emitted `return` must have a
     /// user-written function to exit. At a module's top level there is
     /// none; inside an rl construct's own statement region (which compiles
-    /// into an IIFE) the region boundary is the construct, so only a
+    /// into an isolated value region) the region boundary is the construct, so only a
     /// function the user wrote *inside* it counts.
     pub in_function: bool,
 }

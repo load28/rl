@@ -17,8 +17,9 @@ SWC AST는 최적화 가능 여부를 분류하는 보조 도구가 아니라 �
 `return`·대입·선언으로 TypeScript를 다시 구조화한다. `match`나 `result`뿐 아니라 모든
 Core primitive가 이 경로를 사용하며 IIFE 제거는 전체 최적 lowering의 한 결과다.
 
-호출의 Reference, 기본 매개변수 환경, 클래스 초기화, 단락·반복 문맥은 closure fallback
-사유가 아니다. SWC parent path에서 평가 프로토콜을 만들고 필요한 만큼 owner를 확장한다.
+호출의 Reference, 단락·반복 문맥은 SWC parent path에서 평가 프로토콜을 만들고 필요한
+만큼 owner를 확장한다. 기본 매개변수와 클래스 초기화처럼 표준 TypeScript가 statement를
+허용하지 않는 owner는 익명 IIFE가 아니라 이름 있는 expression-boundary intrinsic을 쓴다.
 Reference는 receiver·property·callee의 평가 순서와 `thisValue`를 명시적인 IR 연산으로
 보존한다. 독립 실행 환경은 해당 함수·클래스 owner 안에서 별도 region으로 구조화한다.
 
@@ -228,16 +229,50 @@ const value = $rl_value;
 이는 `match` 전용 rewrite가 아니다. 값을 생산하는 모든 `EvalRegion`이 같은 result-local
 규칙을 쓴다.
 
+자식 value region은 부모가 선택한 continuation을 상속한다. 부모 leaf가 slot에 합류하면
+자식의 정상 leaf도 같은 slot에 직접 합류한다. host return도 모든 edge를 owner-scoped
+slot에 합류시킨 뒤 원래 TypeScript return이 한 번만 소비한다. 따라서 nested decision을
+다시 expression wrapper로 물질화하지 않으면서 전체 contextual type 경계를 보존한다.
+
+concise arrow의 expression body는 `ArrowReturn` continuation이다. 기존 arrow 실행 환경을
+유지한 채 body만 block으로 구조화하고, result local을 명시적으로 반환한다. 새 함수 경계를
+만들지 않으며 parameter와 return type을 포함한 주변 TypeScript source piece는 보존한다.
+
+continuation은 destination 하나가 아니라 value wrapper와 합성된다.
+
+```text
+ValueContinuation
+  destination = Expression | Assign(slot)
+  wrappers = [ResultOk, ...]
+```
+
+`ResultRegion`의 propagation 실패 edge는 현재 continuation을 그대로 소비한다. 정상 edge는
+`ResultOk` wrapper를 추가한 continuation을 소비한다. nested decision과 nested result는 이
+wrapper stack을 leaf까지 전달하므로 중간 함수나 성공 temporary가 필요 없다.
+
+`Sequence`는 선행 statement를 순서대로 실행하고 마지막 value region만 continuation에
+연결한다. 마지막 value 뒤의 source trivia는 원본 piece로 보존한다. 따라서 주석이나 선행
+효과가 있다는 이유로 expression wrapper로 돌아가지 않는다.
+
+join slot의 소비 지점은 Core value의 source anchor를 상속한다. Decision은 Match anchor,
+ResultRegion은 ResultBind anchor, Sequence는 마지막 value의 anchor를 사용한다. 생성
+identifier에서 발생한 TypeScript 진단도 원래 value 전체의 위치와 문맥 타입에 귀속된다.
+
 ### 7.4 실행 환경은 owner protocol로 구조화한다
 
-평가 환경이 달라지는 위치는 closure 생성 사유가 아니다. parameter, class initializer,
-static block, async/generator는 각각 독립 `EvaluationOwner`를 형성하고 해당 환경 안에서
-statement slot과 CFG를 만든다. Reference도 값으로 강제 materialize하지 않고
+parameter, class initializer, static block, async/generator는 각각 독립
+`EvaluationOwner`를 형성한다. statement를 넣을 수 있는 owner는 해당 환경 안에서 slot과
+CFG를 만든다. 표준 TypeScript 문법상 statement를 넣을 수 없는 parameter initializer와
+class field initializer는 파일마다 하나인 hygiene된 `$rl_expr` intrinsic에 Core CFG callback을
+전달한다. callback은 원래 위치에서 즉시 실행되므로 parameter environment, `this`,
+`arguments`, field 초기화 순서를 보존한다. Reference는 값으로 강제 materialize하지 않고
 `Reference` 입력으로 다음 call/member 연산까지 전달한다.
 
 지원하지 않는 parent edge나 실행 환경을 만나면 legacy IIFE로 우회하지 않는다.
-Evaluation IR validator가 누락된 protocol을 내부 컴파일러 오류로 검출한다. 따라서
-backend의 유효한 상태에는 `BoundaryClosure`나 이유 코드가 존재하지 않는다.
+Evaluation IR validator가 누락된 protocol을 내부 컴파일러 오류로 검출한다. expression
+boundary는 분석 실패 fallback이 아니라 `EvaluationOwner`가 선택하는 명시적 target
+capability다. 이름은 전체 SWC identifier 집합과 충돌하지 않으며 실제 사용 파일에 한 번만
+방출한다.
 
 ## 8. 전체 rl 표면의 공통 배치
 
@@ -389,7 +424,8 @@ variable initializer owner를 `value slot + statement decision + rewritten initi
 - 모든 rl 구문이 `ProgramSyntax + CoreFile → Evaluation IR` 한 경로를 사용한다.
 - backend에 `match`/`result` 전용 IIFE 선택 로직이 없다.
 - 모든 Core primitive가 host owner에 맞는 TypeScript 제어 흐름·표현식·선언으로 출력된다.
-- backend에는 RL 구문을 감싸는 생성 closure/IIFE 경로가 없다.
+- backend에는 self-invoked anonymous closure/IIFE 경로가 없다. statement 불가 owner만
+  이름 있는 expression-boundary intrinsic을 사용한다.
 - 기존 rl 진단 snapshot과 source 위치가 바이트 단위로 같다.
 - pure TypeScript passthrough와 non-RL source-piece 보존 검사가 통과한다.
 - runtime trace corpus에서 평가 횟수·순서·`this`·throw·await가 기존과 같다.

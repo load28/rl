@@ -27,7 +27,7 @@ pub(crate) enum MarkKind {
 }
 
 enum Piece<'a> {
-    /// Compiler-written glue (IIFE scaffolding, destructurings, labels).
+    /// Compiler-written glue (region scaffolding, destructurings, labels).
     Lit(Cow<'a, str>),
     /// Text copied from the source, starting at source byte offset `src`.
     Src { text: &'a str, src: usize },

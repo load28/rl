@@ -11,8 +11,9 @@ use swc_common::input::StringInput;
 use swc_common::sync::Lrc;
 use swc_common::{FileName, SourceMap, Spanned};
 use swc_ecma_ast::{
-    AwaitExpr, BinExpr, BinaryOp, CallExpr, CondExpr, Ident, MemberExpr, MemberProp, Module,
-    ModuleItem, NewExpr, OptCall, Stmt, TaggedTpl, YieldExpr,
+    ArrayLit, ArrowExpr, AssignExpr, AwaitExpr, BinExpr, BinaryOp, CallExpr, CondExpr, Constructor,
+    Function, Ident, MemberExpr, MemberProp, Module, ModuleItem, NewExpr, ObjectLit, OptCall, Prop,
+    PropName, PropOrSpread, ReturnStmt, SeqExpr, Stmt, TaggedTpl, Tpl, UnaryExpr, YieldExpr,
 };
 use swc_ecma_parser::lexer::Lexer;
 use swc_ecma_parser::{Parser, Syntax, TsSyntax};
@@ -76,6 +77,13 @@ struct OverlayEntry {
     protocol: HostEvaluationProtocol,
     core_root: CoreRoot,
     host_owner: HostOwner,
+    exits: Vec<HostExit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostExit {
+    pub(crate) statement: SourceSpan,
+    pub(crate) argument: Option<SourceSpan>,
 }
 
 /// Ordered JavaScript evaluation obligations between one RL value and its
@@ -102,12 +110,14 @@ pub(crate) struct HostEvaluationStep {
 pub(crate) struct HostEvaluationInput {
     pub(crate) source: SourceSpan,
     pub(crate) mode: EvaluationInputMode,
+    pub(crate) receiver: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvaluationInputMode {
     Value,
-    Reference,
+    DirectReference,
+    MemberReference,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,8 +132,14 @@ pub(crate) enum HostEvaluationOperation {
 pub(crate) enum EagerPosition {
     BinaryLeft,
     BinaryRight,
+    ArrayElement(u32),
+    ObjectEvaluation(u32),
+    AssignmentRight,
+    SequenceElement(u32),
+    UnaryOperand,
     CallArgument(u32),
     ConstructArgument(u32),
+    TemplateInterpolation(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +222,7 @@ pub(crate) enum ValueRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostContinuation {
     Return,
+    ArrowReturn,
     Initialize,
     Discard,
     Compose,
@@ -338,6 +355,10 @@ fn host_continuation(parents: &[AstParentKind]) -> HostContinuation {
         .find(|parent| !is_transparent_expression_edge(parent));
     match significant {
         Some(AstParentKind::ReturnStmt(fields::ReturnStmtField::Arg)) => HostContinuation::Return,
+        Some(AstParentKind::ArrowFunctionBody(fields::ArrowFunctionBodyField::Expr))
+        | Some(AstParentKind::ArrowExpr(fields::ArrowExprField::Body)) => {
+            HostContinuation::ArrowReturn
+        }
         Some(AstParentKind::VarDeclarator(fields::VarDeclaratorField::Init)) => {
             HostContinuation::Initialize
         }
@@ -352,6 +373,11 @@ fn is_transparent_expression_edge(parent: &AstParentKind) -> bool {
         AstParentKind::Expr(_)
             | AstParentKind::ExprOrSpread(fields::ExprOrSpreadField::Expr)
             | AstParentKind::ParenExpr(fields::ParenExprField::Expr)
+            | AstParentKind::TsAsExpr(fields::TsAsExprField::Expr)
+            | AstParentKind::TsSatisfiesExpr(fields::TsSatisfiesExprField::Expr)
+            | AstParentKind::TsNonNullExpr(fields::TsNonNullExprField::Expr)
+            | AstParentKind::TsTypeAssertion(fields::TsTypeAssertionField::Expr)
+            | AstParentKind::TsInstantiation(fields::TsInstantiationField::Expr)
     )
 }
 
@@ -423,6 +449,7 @@ impl ProgramSyntax {
             HostEvaluationProtocol,
             SourceSpan,
             HostOwner,
+            Vec<HostExit>,
         ),
     > + '_ {
         self.overlay.iter().map(|entry| {
@@ -433,6 +460,7 @@ impl ProgramSyntax {
                 entry.protocol.clone(),
                 entry.source,
                 entry.host_owner,
+                entry.exits.clone(),
             )
         })
     }
@@ -465,6 +493,7 @@ impl ProgramSyntax {
             }
             match entry.context.continuation {
                 HostContinuation::Return
+                | HostContinuation::ArrowReturn
                 | HostContinuation::Initialize
                 | HostContinuation::Discard
                 | HostContinuation::Compose => {}
@@ -521,6 +550,14 @@ struct PendingOverlay {
     source: SourceSpan,
     projected: ProjectedSpan,
     core_root: CoreRoot,
+    marker: OverlayMarker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayMarker {
+    Identifier,
+    CallExpression,
+    DecisionCallExpression,
 }
 
 struct ProjectionBuilder<'a> {
@@ -626,6 +663,7 @@ impl<'a> ProjectionBuilder<'a> {
             source,
             projected: ProjectedSpan { start, end },
             core_root,
+            marker: OverlayMarker::Identifier,
         });
         Ok(())
     }
@@ -676,11 +714,7 @@ impl<'a> ProjectionBuilder<'a> {
         match &self.core.exprs[expr.index()] {
             Expr::Opaque(node) => self.push_source(*node),
             Expr::Sequence(body) => self.emit_body(*body),
-            Expr::Decision(decision) => self.push_placeholder(
-                SyntaxCategory::Expression,
-                self.source_span(decision.extent)?,
-                CoreRoot::Expr(expr),
-            ),
+            Expr::Decision(decision) => self.emit_decision_region(expr, decision),
             Expr::Apply(apply) => self.emit_apply(expr, apply),
             Expr::ResultRegion(region) => self.emit_result_region(expr, region),
             Expr::Template(template) => self.emit_template(template),
@@ -702,11 +736,110 @@ impl<'a> ProjectionBuilder<'a> {
         expr: ExprId,
         region: &ResultRegion,
     ) -> Result<(), ProgramSyntaxError> {
-        self.push_placeholder(
-            SyntaxCategory::Expression,
-            self.source_span(region.node)?,
-            CoreRoot::Expr(expr),
-        )
+        let source = self.source_span(region.node)?;
+        let ordinal =
+            u32::try_from(self.pending.len()).map_err(|_| ProgramSyntaxError::NodeCountOverflow)?;
+        let id = RlNodeId(ordinal);
+        let start = ProjectedByte(self.code.len());
+        let pending_index = self.pending.len();
+        self.pending.push(PendingOverlay {
+            id,
+            category: SyntaxCategory::Expression,
+            source,
+            projected: ProjectedSpan { start, end: start },
+            core_root: CoreRoot::Expr(expr),
+            marker: OverlayMarker::CallExpression,
+        });
+        self.code.push('(');
+        if region.is_async {
+            self.code.push_str("async ");
+        }
+        self.code.push_str("() => {");
+        for item in &region.items {
+            match item {
+                crate::core_ir::ResultRegionItem::Statements(body) => self.emit_body(*body)?,
+                crate::core_ir::ResultRegionItem::Propagate(_) => self.code.push(';'),
+            }
+        }
+        self.code.push_str("0;})()");
+        let end = ProjectedByte(self.code.len());
+        let projected = ProjectedSpan { start, end };
+        self.source_segments.insert(
+            0,
+            ProjectionSourceSegment {
+                projected,
+                source,
+                kind: ProjectionSegmentKind::Placeholder,
+            },
+        );
+        self.pending[pending_index].projected = projected;
+        Ok(())
+    }
+
+    fn emit_decision_region(
+        &mut self,
+        expr: ExprId,
+        decision: &Decision,
+    ) -> Result<(), ProgramSyntaxError> {
+        let source = self.source_span(decision.extent)?;
+        let ordinal =
+            u32::try_from(self.pending.len()).map_err(|_| ProgramSyntaxError::NodeCountOverflow)?;
+        let id = RlNodeId(ordinal);
+        let start = ProjectedByte(self.code.len());
+        let pending_index = self.pending.len();
+        self.pending.push(PendingOverlay {
+            id,
+            category: SyntaxCategory::Expression,
+            source,
+            projected: ProjectedSpan { start, end: start },
+            core_root: CoreRoot::Expr(expr),
+            marker: OverlayMarker::DecisionCallExpression,
+        });
+        self.code.push('(');
+        if decision.is_async {
+            self.code.push_str("async ");
+        }
+        self.code.push_str("() => {");
+        for subject in &decision.subjects {
+            self.code.push('(');
+            self.emit_expr(subject.value)?;
+            self.code.push_str(");");
+        }
+        for arm in &decision.arms {
+            if let Some(guard) = arm.guard {
+                self.code.push('(');
+                self.emit_expr(guard)?;
+                self.code.push_str(");");
+            }
+            let crate::core_ir::ArmAction::Yield { body, kind } = arm.action else {
+                continue;
+            };
+            match kind {
+                hir::ArmBodyKind::Expression => {
+                    self.code.push('(');
+                    self.emit_body(body)?;
+                    self.code.push_str(");");
+                }
+                hir::ArmBodyKind::Block => {
+                    self.code.push('{');
+                    self.emit_body(body)?;
+                    self.code.push('}');
+                }
+            }
+        }
+        self.code.push_str("0;})()");
+        let end = ProjectedByte(self.code.len());
+        let projected = ProjectedSpan { start, end };
+        self.source_segments.insert(
+            0,
+            ProjectionSourceSegment {
+                projected,
+                source,
+                kind: ProjectionSegmentKind::Placeholder,
+            },
+        );
+        self.pending[pending_index].projected = projected;
+        Ok(())
     }
 
     fn emit_template(&mut self, template: &Template) -> Result<(), ProgramSyntaxError> {
@@ -767,13 +900,17 @@ fn parse_module(code: &str) -> Result<ParsedModule, ProgramSyntaxError> {
 
 struct ParentCollector {
     source_start: u32,
-    expected: HashMap<ProjectedSpan, RlNodeId>,
+    expected_identifiers: HashMap<ProjectedSpan, RlNodeId>,
+    expected_calls: HashMap<ProjectedSpan, RlNodeId>,
+    expected_exit_calls: HashSet<RlNodeId>,
     found: HashMap<RlNodeId, FoundOverlay>,
     duplicates: Vec<RlNodeId>,
     source_segments: Vec<ProjectionSourceSegment>,
     host_owners: Vec<ProjectedHostOwner>,
     protocol_frames: Vec<ProjectedProtocolFrame>,
     occupied_names: HashSet<String>,
+    function_depth: usize,
+    exit_regions: Vec<(RlNodeId, usize)>,
 }
 
 struct CollectedProgramSyntax {
@@ -786,10 +923,22 @@ struct FoundOverlay {
     parents: Vec<AstParentKind>,
     host_owners: Vec<ProjectedHostOwner>,
     protocol_frames: Vec<ProjectedProtocolFrame>,
+    exits: Vec<ProjectedHostExit>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProjectedHostExit {
+    statement: ProjectedSpan,
+    argument: Option<ProjectedSpan>,
 }
 
 #[derive(Debug, Clone)]
 enum ProjectedProtocolFrame {
+    Ordered {
+        parent: ProjectedSpan,
+        positions: Vec<ProjectedSpan>,
+        kind: OrderedEvaluationKind,
+    },
     Binary {
         parent: ProjectedSpan,
         operator: BinaryOp,
@@ -805,6 +954,8 @@ enum ProjectedProtocolFrame {
     Call {
         parent: ProjectedSpan,
         callee: Option<ProjectedSpan>,
+        callee_mode: EvaluationInputMode,
+        callee_receiver: Option<ProjectedSpan>,
         arguments: Vec<ProjectedSpan>,
         optional: bool,
     },
@@ -821,6 +972,13 @@ enum ProjectedProtocolFrame {
     TaggedTemplate {
         parent: ProjectedSpan,
         tag: ProjectedSpan,
+        tag_mode: EvaluationInputMode,
+        tag_receiver: Option<ProjectedSpan>,
+        expressions: Vec<ProjectedSpan>,
+    },
+    Template {
+        parent: ProjectedSpan,
+        expressions: Vec<ProjectedSpan>,
     },
     Suspend {
         parent: ProjectedSpan,
@@ -829,10 +987,58 @@ enum ProjectedProtocolFrame {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+enum OrderedEvaluationKind {
+    Array,
+    Object,
+    Assignment,
+    Sequence,
+    Unary,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct ProjectedHostOwner {
     kind: HostOwnerKind,
     span: ProjectedSpan,
+}
+
+fn object_evaluation_positions(node: &ObjectLit, source_start: u32) -> Vec<ProjectedSpan> {
+    let mut positions = Vec::new();
+    for property in &node.props {
+        match property {
+            PropOrSpread::Spread(spread) => {
+                positions.push(projected_span(spread.expr.span(), source_start));
+            }
+            PropOrSpread::Prop(property) => match &**property {
+                Prop::Shorthand(identifier) => {
+                    positions.push(projected_span(identifier.span, source_start));
+                }
+                Prop::KeyValue(property) => {
+                    push_computed_property(&mut positions, &property.key, source_start);
+                    positions.push(projected_span(property.value.span(), source_start));
+                }
+                Prop::Assign(property) => {
+                    positions.push(projected_span(property.value.span(), source_start));
+                }
+                Prop::Getter(property) => {
+                    push_computed_property(&mut positions, &property.key, source_start);
+                }
+                Prop::Setter(property) => {
+                    push_computed_property(&mut positions, &property.key, source_start);
+                }
+                Prop::Method(property) => {
+                    push_computed_property(&mut positions, &property.key, source_start);
+                }
+            },
+        }
+    }
+    positions
+}
+
+fn push_computed_property(positions: &mut Vec<ProjectedSpan>, name: &PropName, source_start: u32) {
+    if let PropName::Computed(computed) = name {
+        positions.push(projected_span(computed.expr.span(), source_start));
+    }
 }
 
 impl ParentCollector {
@@ -841,19 +1047,57 @@ impl ParentCollector {
         pending: &[PendingOverlay],
         source_segments: &[ProjectionSourceSegment],
     ) -> Self {
-        let expected = pending
+        let expected_identifiers = pending
             .iter()
+            .filter(|entry| entry.marker == OverlayMarker::Identifier)
             .map(|entry| (entry.projected, entry.id))
+            .collect();
+        let expected_calls = pending
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.marker,
+                    OverlayMarker::CallExpression | OverlayMarker::DecisionCallExpression
+                )
+            })
+            .map(|entry| (entry.projected, entry.id))
+            .collect();
+        let expected_exit_calls = pending
+            .iter()
+            .filter(|entry| entry.marker == OverlayMarker::DecisionCallExpression)
+            .map(|entry| entry.id)
             .collect();
         Self {
             source_start,
-            expected,
+            expected_identifiers,
+            expected_calls,
+            expected_exit_calls,
             found: HashMap::new(),
             duplicates: Vec::new(),
             source_segments: source_segments.to_vec(),
             host_owners: Vec::new(),
             protocol_frames: Vec::new(),
             occupied_names: HashSet::new(),
+            function_depth: 0,
+            exit_regions: Vec::new(),
+        }
+    }
+
+    fn record_overlay(&mut self, id: RlNodeId, path: &AstNodePath<'_>) {
+        if self
+            .found
+            .insert(
+                id,
+                FoundOverlay {
+                    parents: path.kinds().to_vec(),
+                    host_owners: self.host_owners.clone(),
+                    protocol_frames: self.protocol_frames.clone(),
+                    exits: Vec::new(),
+                },
+            )
+            .is_some()
+        {
+            self.duplicates.push(id);
         }
     }
 
@@ -914,6 +1158,21 @@ impl ParentCollector {
                 core_root: entry.core_root,
                 parents: found.parents,
                 host_owner: owners[owner_id.0 as usize].owner,
+                exits: found
+                    .exits
+                    .into_iter()
+                    .map(|exit| {
+                        Ok(HostExit {
+                            statement: map_evaluation_span(&self.source_segments, exit.statement)?,
+                            argument: exit
+                                .argument
+                                .map(|argument| {
+                                    map_evaluation_span(&self.source_segments, argument)
+                                })
+                                .transpose()?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ProgramSyntaxError>>()?,
             });
         }
         Ok(CollectedProgramSyntax {
@@ -947,6 +1206,77 @@ impl VisitAstPath for ParentCollector {
         self.host_owners.pop();
     }
 
+    fn visit_array_lit<'ast: 'r, 'r>(&mut self, node: &'ast ArrayLit, path: &mut AstNodePath<'r>) {
+        self.protocol_frames.push(ProjectedProtocolFrame::Ordered {
+            parent: projected_span(node.span, self.source_start),
+            positions: node
+                .elems
+                .iter()
+                .flatten()
+                .map(|element| projected_span(element.expr.span(), self.source_start))
+                .collect(),
+            kind: OrderedEvaluationKind::Array,
+        });
+        <ArrayLit as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+        self.protocol_frames.pop();
+    }
+
+    fn visit_object_lit<'ast: 'r, 'r>(
+        &mut self,
+        node: &'ast ObjectLit,
+        path: &mut AstNodePath<'r>,
+    ) {
+        self.protocol_frames.push(ProjectedProtocolFrame::Ordered {
+            parent: projected_span(node.span, self.source_start),
+            positions: object_evaluation_positions(node, self.source_start),
+            kind: OrderedEvaluationKind::Object,
+        });
+        <ObjectLit as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+        self.protocol_frames.pop();
+    }
+
+    fn visit_assign_expr<'ast: 'r, 'r>(
+        &mut self,
+        node: &'ast AssignExpr,
+        path: &mut AstNodePath<'r>,
+    ) {
+        self.protocol_frames.push(ProjectedProtocolFrame::Ordered {
+            parent: projected_span(node.span, self.source_start),
+            positions: vec![projected_span(node.right.span(), self.source_start)],
+            kind: OrderedEvaluationKind::Assignment,
+        });
+        <AssignExpr as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+        self.protocol_frames.pop();
+    }
+
+    fn visit_seq_expr<'ast: 'r, 'r>(&mut self, node: &'ast SeqExpr, path: &mut AstNodePath<'r>) {
+        self.protocol_frames.push(ProjectedProtocolFrame::Ordered {
+            parent: projected_span(node.span, self.source_start),
+            positions: node
+                .exprs
+                .iter()
+                .map(|expression| projected_span(expression.span(), self.source_start))
+                .collect(),
+            kind: OrderedEvaluationKind::Sequence,
+        });
+        <SeqExpr as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+        self.protocol_frames.pop();
+    }
+
+    fn visit_unary_expr<'ast: 'r, 'r>(
+        &mut self,
+        node: &'ast UnaryExpr,
+        path: &mut AstNodePath<'r>,
+    ) {
+        self.protocol_frames.push(ProjectedProtocolFrame::Ordered {
+            parent: projected_span(node.span, self.source_start),
+            positions: vec![projected_span(node.arg.span(), self.source_start)],
+            kind: OrderedEvaluationKind::Unary,
+        });
+        <UnaryExpr as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+        self.protocol_frames.pop();
+    }
+
     fn visit_bin_expr<'ast: 'r, 'r>(&mut self, node: &'ast BinExpr, path: &mut AstNodePath<'r>) {
         self.protocol_frames.push(ProjectedProtocolFrame::Binary {
             parent: projected_span(node.span, self.source_start),
@@ -971,9 +1301,38 @@ impl VisitAstPath for ParentCollector {
     }
 
     fn visit_call_expr<'ast: 'r, 'r>(&mut self, node: &'ast CallExpr, path: &mut AstNodePath<'r>) {
+        let span = projected_span(node.span, self.source_start);
+        if let Some(id) = self.expected_calls.get(&span).copied() {
+            self.record_overlay(id, path);
+            let collects_exits = self.expected_exit_calls.contains(&id);
+            if collects_exits {
+                self.exit_regions.push((id, self.function_depth + 1));
+            }
+            <CallExpr as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+            if collects_exits {
+                self.exit_regions.pop();
+            }
+            return;
+        }
+        let (callee_mode, callee_receiver) = match &node.callee {
+            swc_ecma_ast::Callee::Expr(expression) => call_callee_mode(expression),
+            swc_ecma_ast::Callee::Super(_) | swc_ecma_ast::Callee::Import(_) => {
+                (EvaluationInputMode::MemberReference, None)
+            }
+        };
         self.protocol_frames.push(ProjectedProtocolFrame::Call {
-            parent: projected_span(node.span, self.source_start),
-            callee: Some(projected_span(node.callee.span(), self.source_start)),
+            parent: span,
+            callee: Some(projected_span(
+                match &node.callee {
+                    swc_ecma_ast::Callee::Expr(expression) => reference_value_span(expression),
+                    swc_ecma_ast::Callee::Super(_) | swc_ecma_ast::Callee::Import(_) => {
+                        node.callee.span()
+                    }
+                },
+                self.source_start,
+            )),
+            callee_mode,
+            callee_receiver: callee_receiver.map(|span| projected_span(span, self.source_start)),
             arguments: node
                 .args
                 .iter()
@@ -985,10 +1344,62 @@ impl VisitAstPath for ParentCollector {
         self.protocol_frames.pop();
     }
 
+    fn visit_arrow_expr<'ast: 'r, 'r>(
+        &mut self,
+        node: &'ast ArrowExpr,
+        path: &mut AstNodePath<'r>,
+    ) {
+        self.function_depth += 1;
+        <ArrowExpr as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+        self.function_depth -= 1;
+    }
+
+    fn visit_function<'ast: 'r, 'r>(&mut self, node: &'ast Function, path: &mut AstNodePath<'r>) {
+        self.function_depth += 1;
+        <Function as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+        self.function_depth -= 1;
+    }
+
+    fn visit_constructor<'ast: 'r, 'r>(
+        &mut self,
+        node: &'ast Constructor,
+        path: &mut AstNodePath<'r>,
+    ) {
+        self.function_depth += 1;
+        <Constructor as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+        self.function_depth -= 1;
+    }
+
+    fn visit_return_stmt<'ast: 'r, 'r>(
+        &mut self,
+        node: &'ast ReturnStmt,
+        path: &mut AstNodePath<'r>,
+    ) {
+        if let Some((id, target_depth)) = self.exit_regions.last().copied()
+            && target_depth == self.function_depth
+            && let Some(found) = self.found.get_mut(&id)
+        {
+            found.exits.push(ProjectedHostExit {
+                statement: projected_span(node.span, self.source_start),
+                argument: node
+                    .arg
+                    .as_ref()
+                    .map(|argument| projected_span(argument.span(), self.source_start)),
+            });
+        }
+        <ReturnStmt as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+    }
+
     fn visit_opt_call<'ast: 'r, 'r>(&mut self, node: &'ast OptCall, path: &mut AstNodePath<'r>) {
+        let (callee_mode, callee_receiver) = call_callee_mode(&node.callee);
         self.protocol_frames.push(ProjectedProtocolFrame::Call {
             parent: projected_span(node.span, self.source_start),
-            callee: Some(projected_span(node.callee.span(), self.source_start)),
+            callee: Some(projected_span(
+                reference_value_span(&node.callee),
+                self.source_start,
+            )),
+            callee_mode,
+            callee_receiver: callee_receiver.map(|span| projected_span(span, self.source_start)),
             arguments: node
                 .args
                 .iter()
@@ -1024,7 +1435,7 @@ impl VisitAstPath for ParentCollector {
         self.protocol_frames
             .push(ProjectedProtocolFrame::Construct {
                 parent: projected_span(node.span, self.source_start),
-                callee: projected_span(node.callee.span(), self.source_start),
+                callee: projected_span(reference_value_span(&node.callee), self.source_start),
                 arguments: node
                     .args
                     .iter()
@@ -1041,12 +1452,34 @@ impl VisitAstPath for ParentCollector {
         node: &'ast TaggedTpl,
         path: &mut AstNodePath<'r>,
     ) {
+        let (tag_mode, tag_receiver) = call_callee_mode(&node.tag);
         self.protocol_frames
             .push(ProjectedProtocolFrame::TaggedTemplate {
                 parent: projected_span(node.span, self.source_start),
-                tag: projected_span(node.tag.span(), self.source_start),
+                tag: projected_span(reference_value_span(&node.tag), self.source_start),
+                tag_mode,
+                tag_receiver: tag_receiver.map(|span| projected_span(span, self.source_start)),
+                expressions: node
+                    .tpl
+                    .exprs
+                    .iter()
+                    .map(|expression| projected_span(expression.span(), self.source_start))
+                    .collect(),
             });
         <TaggedTpl as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
+        self.protocol_frames.pop();
+    }
+
+    fn visit_tpl<'ast: 'r, 'r>(&mut self, node: &'ast Tpl, path: &mut AstNodePath<'r>) {
+        self.protocol_frames.push(ProjectedProtocolFrame::Template {
+            parent: projected_span(node.span, self.source_start),
+            expressions: node
+                .exprs
+                .iter()
+                .map(|expression| projected_span(expression.span(), self.source_start))
+                .collect(),
+        });
+        <Tpl as VisitWithAstPath<Self>>::visit_children_with_ast_path(node, self, path);
         self.protocol_frames.pop();
     }
 
@@ -1093,23 +1526,10 @@ impl VisitAstPath for ParentCollector {
             start: ProjectedByte(start),
             end: ProjectedByte(end),
         };
-        let Some(id) = self.expected.get(&projected).copied() else {
+        let Some(id) = self.expected_identifiers.get(&projected).copied() else {
             return;
         };
-        if self
-            .found
-            .insert(
-                id,
-                FoundOverlay {
-                    parents: path.kinds().to_vec(),
-                    host_owners: self.host_owners.clone(),
-                    protocol_frames: self.protocol_frames.clone(),
-                },
-            )
-            .is_some()
-        {
-            self.duplicates.push(id);
-        }
+        self.record_overlay(id, path);
     }
 }
 
@@ -1135,6 +1555,30 @@ fn protocol_step(
     frame: &ProjectedProtocolFrame,
 ) -> Result<Option<HostEvaluationStep>, ProgramSyntaxError> {
     let (parent, operation, inputs) = match frame {
+        ProjectedProtocolFrame::Ordered {
+            parent,
+            positions,
+            kind,
+        } => {
+            let Some(position) = child_index(positions, value) else {
+                return Ok(None);
+            };
+            let index =
+                u32::try_from(position).map_err(|_| ProgramSyntaxError::NodeCountOverflow)?;
+            let operation = HostEvaluationOperation::Eager(match kind {
+                OrderedEvaluationKind::Array => EagerPosition::ArrayElement(index),
+                OrderedEvaluationKind::Object => EagerPosition::ObjectEvaluation(index),
+                OrderedEvaluationKind::Assignment => EagerPosition::AssignmentRight,
+                OrderedEvaluationKind::Sequence => EagerPosition::SequenceElement(index),
+                OrderedEvaluationKind::Unary => EagerPosition::UnaryOperand,
+            });
+            let inputs = positions[..position]
+                .iter()
+                .copied()
+                .map(|input| (input, EvaluationInputMode::Value, None))
+                .collect();
+            (*parent, operation, inputs)
+        }
         ProjectedProtocolFrame::Binary { parent, left, .. } if projected_contains(*left, value) => {
             (
                 *parent,
@@ -1164,7 +1608,7 @@ fn protocol_step(
             (
                 *parent,
                 operation,
-                vec![(*left, EvaluationInputMode::Value)],
+                vec![(*left, EvaluationInputMode::Value, None)],
             )
         }
         ProjectedProtocolFrame::Conditional {
@@ -1175,7 +1619,7 @@ fn protocol_step(
         } if projected_contains(*consequent, value) => (
             *parent,
             HostEvaluationOperation::Conditional(ConditionalBranch::Consequent),
-            vec![(*test, EvaluationInputMode::Value)],
+            vec![(*test, EvaluationInputMode::Value, None)],
         ),
         ProjectedProtocolFrame::Conditional {
             parent,
@@ -1185,7 +1629,7 @@ fn protocol_step(
         } if projected_contains(*alternate, value) => (
             *parent,
             HostEvaluationOperation::Conditional(ConditionalBranch::Alternate),
-            vec![(*test, EvaluationInputMode::Value)],
+            vec![(*test, EvaluationInputMode::Value, None)],
         ),
         ProjectedProtocolFrame::Call {
             parent,
@@ -1204,6 +1648,8 @@ fn protocol_step(
         ProjectedProtocolFrame::Call {
             parent,
             callee,
+            callee_mode,
+            callee_receiver,
             arguments,
             optional,
             ..
@@ -1221,12 +1667,12 @@ fn protocol_step(
             let inputs = callee
                 .iter()
                 .copied()
-                .map(|callee| (callee, EvaluationInputMode::Reference))
+                .map(|callee| (callee, *callee_mode, *callee_receiver))
                 .chain(
                     arguments[..position]
                         .iter()
                         .copied()
-                        .map(|argument| (argument, EvaluationInputMode::Value)),
+                        .map(|argument| (argument, EvaluationInputMode::Value, None)),
                 )
                 .collect();
             (*parent, operation, inputs)
@@ -1247,7 +1693,7 @@ fn protocol_step(
         } if projected_contains(*property, value) => (
             *parent,
             HostEvaluationOperation::Reference(ReferencePosition::MemberProperty),
-            vec![(*object, EvaluationInputMode::Value)],
+            vec![(*object, EvaluationInputMode::Value, None)],
         ),
         ProjectedProtocolFrame::Construct { parent, callee, .. }
             if projected_contains(*callee, value) =>
@@ -1268,12 +1714,12 @@ fn protocol_step(
             };
             let index =
                 u32::try_from(position).map_err(|_| ProgramSyntaxError::NodeCountOverflow)?;
-            let inputs = std::iter::once((*callee, EvaluationInputMode::Value))
+            let inputs = std::iter::once((*callee, EvaluationInputMode::Value, None))
                 .chain(
                     arguments[..position]
                         .iter()
                         .copied()
-                        .map(|argument| (argument, EvaluationInputMode::Value)),
+                        .map(|argument| (argument, EvaluationInputMode::Value, None)),
                 )
                 .collect();
             (
@@ -1282,13 +1728,59 @@ fn protocol_step(
                 inputs,
             )
         }
-        ProjectedProtocolFrame::TaggedTemplate { parent, tag }
+        ProjectedProtocolFrame::TaggedTemplate { parent, tag, .. }
             if projected_contains(*tag, value) =>
         {
             (
                 *parent,
                 HostEvaluationOperation::Reference(ReferencePosition::TaggedTemplateTag),
                 Vec::new(),
+            )
+        }
+        ProjectedProtocolFrame::TaggedTemplate {
+            parent,
+            tag,
+            tag_mode,
+            tag_receiver,
+            expressions,
+        } => {
+            let Some(position) = child_index(expressions, value) else {
+                return Ok(None);
+            };
+            let index =
+                u32::try_from(position).map_err(|_| ProgramSyntaxError::NodeCountOverflow)?;
+            let inputs = std::iter::once((*tag, *tag_mode, *tag_receiver))
+                .chain(
+                    expressions[..position]
+                        .iter()
+                        .copied()
+                        .map(|expression| (expression, EvaluationInputMode::Value, None)),
+                )
+                .collect();
+            (
+                *parent,
+                HostEvaluationOperation::Eager(EagerPosition::TemplateInterpolation(index)),
+                inputs,
+            )
+        }
+        ProjectedProtocolFrame::Template {
+            parent,
+            expressions,
+        } => {
+            let Some(position) = child_index(expressions, value) else {
+                return Ok(None);
+            };
+            let index =
+                u32::try_from(position).map_err(|_| ProgramSyntaxError::NodeCountOverflow)?;
+            let inputs = expressions[..position]
+                .iter()
+                .copied()
+                .map(|expression| (expression, EvaluationInputMode::Value, None))
+                .collect();
+            (
+                *parent,
+                HostEvaluationOperation::Eager(EagerPosition::TemplateInterpolation(index)),
+                inputs,
             )
         }
         ProjectedProtocolFrame::Suspend {
@@ -1303,10 +1795,13 @@ fn protocol_step(
     let parent = map_evaluation_span(segments, parent)?;
     let inputs = inputs
         .into_iter()
-        .map(|(source, mode)| {
+        .map(|(source, mode, receiver)| {
             Ok(HostEvaluationInput {
                 source: map_evaluation_span(segments, source)?,
                 mode,
+                receiver: receiver
+                    .map(|receiver| map_evaluation_span(segments, receiver))
+                    .transpose()?,
             })
         })
         .collect::<Result<Vec<_>, ProgramSyntaxError>>()?;
@@ -1331,6 +1826,48 @@ fn map_evaluation_span(
 
 fn projected_contains(container: ProjectedSpan, value: ProjectedSpan) -> bool {
     container.start <= value.start && value.end <= container.end
+}
+
+fn call_callee_mode(
+    expression: &swc_ecma_ast::Expr,
+) -> (EvaluationInputMode, Option<swc_common::Span>) {
+    use swc_ecma_ast::{Expr as SwcExpr, OptChainBase};
+
+    match expression {
+        SwcExpr::Member(member) => (
+            EvaluationInputMode::MemberReference,
+            Some(member.obj.span()),
+        ),
+        SwcExpr::SuperProp(_) => (EvaluationInputMode::MemberReference, None),
+        SwcExpr::OptChain(chain) => match &*chain.base {
+            OptChainBase::Member(member) => (
+                EvaluationInputMode::MemberReference,
+                Some(member.obj.span()),
+            ),
+            OptChainBase::Call(_) => (EvaluationInputMode::DirectReference, None),
+        },
+        SwcExpr::Paren(paren) => call_callee_mode(&paren.expr),
+        SwcExpr::TsAs(expression) => call_callee_mode(&expression.expr),
+        SwcExpr::TsTypeAssertion(expression) => call_callee_mode(&expression.expr),
+        SwcExpr::TsNonNull(expression) => call_callee_mode(&expression.expr),
+        SwcExpr::TsInstantiation(expression) => call_callee_mode(&expression.expr),
+        SwcExpr::TsSatisfies(expression) => call_callee_mode(&expression.expr),
+        _ => (EvaluationInputMode::DirectReference, None),
+    }
+}
+
+fn reference_value_span(expression: &swc_ecma_ast::Expr) -> swc_common::Span {
+    use swc_ecma_ast::Expr as SwcExpr;
+
+    match expression {
+        SwcExpr::Paren(expression) => reference_value_span(&expression.expr),
+        SwcExpr::TsAs(expression) => reference_value_span(&expression.expr),
+        SwcExpr::TsTypeAssertion(expression) => reference_value_span(&expression.expr),
+        SwcExpr::TsNonNull(expression) => reference_value_span(&expression.expr),
+        SwcExpr::TsInstantiation(expression) => reference_value_span(&expression.expr),
+        SwcExpr::TsSatisfies(expression) => reference_value_span(&expression.expr),
+        _ => expression.span(),
+    }
 }
 
 fn child_index(children: &[ProjectedSpan], value: ProjectedSpan) -> Option<usize> {
@@ -1439,6 +1976,43 @@ mod tests {
         let owner = entry.host_owner.span;
         assert_eq!(&source[owner.start..owner.start + 6], "return");
         assert_eq!(&source[owner.end - 1..owner.end], ";");
+    }
+
+    #[test]
+    fn an_expression_bodied_arrow_has_an_arrow_return_continuation() {
+        let syntax = syntax("enum E { A, B }\nconst f = (e: E) => match (e) { A => 1, B => 2 };\n");
+        let entry = syntax
+            .overlay
+            .iter()
+            .find(|entry| entry.category == SyntaxCategory::Expression)
+            .expect("match overlay");
+        let context = entry.context;
+        assert_eq!(context.owner, EvaluationOwner::FunctionBody);
+        assert_eq!(
+            context.continuation,
+            HostContinuation::ArrowReturn,
+            "{:?}",
+            entry.parents
+        );
+        assert!(entry.protocol.steps().is_empty(), "{:?}", entry.protocol);
+    }
+
+    #[test]
+    fn a_nested_decision_keeps_the_outer_initializer_owner() {
+        let syntax = syntax(
+            "enum E { A, B }\nconst value = match (outer) { A => match (inner) { A => 1, B => 2 }, B => 0 };\n",
+        );
+        let entries = syntax
+            .overlay
+            .iter()
+            .filter(|entry| matches!(entry.core_root, CoreRoot::Expr(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2, "{:#?}", syntax.overlay);
+        assert_eq!(
+            entries[0].context.continuation,
+            HostContinuation::Initialize
+        );
+        assert_eq!(entries[1].context.continuation, HostContinuation::Discard);
     }
 
     #[test]
@@ -1656,6 +2230,29 @@ mod tests {
     }
 
     #[test]
+    fn a_result_statement_island_exposes_its_nested_initializer_owner() {
+        let syntax = syntax(
+            "const outer = result {\n  const x <- f();\n  const inner = result { const y <- g(); y };\n  inner\n};\n",
+        );
+        let mut entries: Vec<_> = syntax
+            .overlay
+            .iter()
+            .filter(|entry| matches!(entry.core_root, CoreRoot::Expr(_)))
+            .collect();
+        entries.sort_unstable_by_key(|entry| entry.source.start);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].context.continuation,
+            HostContinuation::Initialize
+        );
+        assert_eq!(
+            entries[1].context.continuation,
+            HostContinuation::Initialize
+        );
+        assert_ne!(entries[0].host_owner.id, entries[1].host_owner.id);
+    }
+
+    #[test]
     fn multibyte_source_and_projection_coordinates_do_not_mix() {
         let source = "const 한글 = match (e) { A => \"안녕\", _ => \"끝\" };\n";
         let syntax = syntax(source);
@@ -1665,9 +2262,9 @@ mod tests {
             .find(|entry| entry.category == SyntaxCategory::Expression)
             .expect("match overlay");
         assert_eq!(entry.source.start, source.find("match").expect("match"));
-        assert_eq!(
-            &syntax.projection[entry.projected.start.0..entry.projected.end.0],
-            "$rl_syntax_expr_0"
-        );
+        let projected = &syntax.projection[entry.projected.start.0..entry.projected.end.0];
+        assert!(projected.starts_with("(() => {"), "{projected}");
+        assert!(projected.contains("\"안녕\""), "{projected}");
+        assert!(projected.contains("\"끝\""), "{projected}");
     }
 }

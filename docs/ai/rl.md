@@ -32,7 +32,7 @@ const area = match (shape) {
   Point => 0,
 };
 ```
-- Expression (compiles to IIFE): use after `=`, in `return`, in `${...}`. Scrutinee parens mandatory, non-empty.
+- Expression: use after `=`, in `return`, in `${...}`. The compiler uses owner-scoped slots and `switch`/`if`; parameter defaults and class fields use one hygiene-safe named expression-boundary helper. Scrutinee parens mandatory, non-empty.
 - Bindings by field name, NEVER position; subset ok, any order.
 - Arm body: expr, or block `{ ... return v; }` (no return → undefined). Object literal body needs parens: `Tag => ({a: 1})`.
 - `_` arm must be LAST.
@@ -42,7 +42,7 @@ const area = match (shape) {
 - nested: `Ok(value: Some(v)) => v`; inner UNIT case needs parens `field: None()` (`field: name` = alias); no combining with or-patterns; same binding name twice in a pattern = error (alias one); inner mismatch falls through.
 - Name resolution: pattern tags and field names are checked against the declaration — but ONLY when rlc can name what you meant (case-insensitive or near-miss; a transposition counts as one edit), because tag patterns also match hand-written `kind` unions whose tags are in no table. `Circel(r)` → `enum Shape has no case \`Circel\` — did you mean \`Circle\`?`; `Circle(radiuz)` → `case \`Circle\` has no field \`radiuz\` — did you mean \`radius\`?`. Same rule in let-else / `if let` (a single-tag site needs a ONE-edit match to report the tag; an or-pattern's several tags are match-grade evidence and use the match rule; fields are checked once the tag resolves) and in nested patterns (resolved against the outer field's declared type). A wrong-but-not-typo name is NOT reported (needs types). A reported typo suppresses that match's exhaustiveness error.
 - Exhaustiveness: match without `_` is checked; missing case = compile error. Enum resolution: local decl > direct (1-hop) relative-`.rl`-import > built-in Option/Result. GUARDED arms NEVER count as covering (add an unguarded arm or `_`); NESTED patterns DO — the check descends into payloads, so `Ok(value: Some(v))` + `Ok(value: None())` + `Err(e)` is exhaustive, and a hole is reported as a PATTERN you can paste back (`missing "Ok(value: None)"`). Inner position's enum comes from the field's declared type, else from the patterns written there (so generic `T` payloads still work); if neither names an enum, only `_` covers that position. With `_`: unchecked. Unknown union: compiles unchecked, runtime default throws on unexpected kind.
-- await allowed in scrutinee/guards/bodies → async IIFE, awaited. Detection is token-level: await inside a nested callback also triggers async — avoid in non-async contexts.
+- await allowed in scrutinee/guards/bodies → remains in the surrounding async owner; an expression-only boundary uses an awaited async callback. Detection is token-level: await inside a nested callback also triggers async — avoid in non-async contexts.
 
 Literal match (`switch ($rl_m)` instead of `$rl_m.kind`):
 ```rl
@@ -71,7 +71,7 @@ try validateRange(parsed);          // propagate-only; `try await f();` ok
 - Result only (Ok unwraps `.value`; Err returned from enclosing fn). Option unsupported → `Option.okOr(o, err)` first.
 - Enclosing fn return type must be Result compatible with expr's Err type; no auto conversion.
 - UNANNOTATED fn: tsc infers the union of the return paths, so several `try`s with different Err types give `Ok<T> | Err<E1> | Err<E2>` = `Result<T, E1 | E2>`. rlc never collects/unions error types — leave inference to tsc.
-- FORBIDDEN (compile error): expression positions such as `return try f()` (bind first with `const value = try f();`), module top level / namespace body (no function for the emitted `return` to exit), and statement positions directly inside match (scrutinee/arm), template interpolation, `result` block, another try (`return` would exit the construct's IIFE). ALLOWED inside a function you write there — `run(() => { try g(); ... })` in a guard/step/arm is Rust's `?` in a closure — and inside if-let bodies / let-else else blocks whose statement sits in a function (inline contexts inherit the function). Placement is a control-flow fact, not a nesting rule.
+- FORBIDDEN (compile error): expression positions such as `return try f()` (bind first with `const value = try f();`), module top level / namespace body (no function for the emitted `return` to exit), and statement positions directly inside match (scrutinee/arm), template interpolation, `result` block, another try (the propagation would leave the construct's isolated value region). ALLOWED inside a function you write there — `run(() => { try g(); ... })` in a guard/step/arm is Rust's `?` in a closure — and inside if-let bodies / let-else else blocks whose statement sits in a function (inline contexts inherit the function). Placement is a control-flow fact, not a nesting rule.
 - Expr can't start with `(` or `<`: `try f(x);` not `try (f(x));`.
 
 ## let-else
@@ -123,7 +123,7 @@ const data = result {
 - `result` is contextual: block is claimed ONLY if it has ≥1 `<-` binding, else plain identifier + block statement (passthrough). Write `<-` with no space.
 - Binding = `const|let|var <name|destructuring|: type> <- expr;` — `;` MANDATORY on bindings, FORBIDDEN on the final value expr (else located compile error). A top-level `>` in the bound expr needs parens (generic-type-argument ambiguity). Forgetting the keyword (`y <- g();`) is a located error (`` `result` binding is missing its declaration keyword ``) wherever the text cannot be TS — which is any claimed block; for an actual `y < -g()` comparison, put a space between `<` and `-`.
 - Result only (no Option/Promise do-notation, no `<-` outside a result block). Bindings must be TOP-LEVEL statements of the block — `<-` inside an `if`/loop/function within the block is a located error (it cannot early-return the block); hoist it or `match`.
-- Block is an EXPRESSION (compiles to an IIFE of early returns): usable anywhere, incl. pipeline head. `await` inside → async IIFE, awaited.
+- Block is an EXPRESSION: usable anywhere, incl. pipeline head. Statement-capable owners use a result slot and explicit failure/success edges; expression-only owners use the shared named boundary. `await` stays in the surrounding async owner or is awaited at that boundary.
 - Error types UNION automatically: bindings of `Result<_, E1>` + `Result<_, E2>` → block assignable to `Result<T, E1 | E2>`. rlc infers NO types; tsc narrows each step.
 - `return` inside the block returns from the BLOCK. So `try`/let-else directly in the block's statements are FORBIDDEN (located error) — use `<-`; inside a function written in the block they are fine. `if let` is fine anywhere here.
 - Final expr already a Result → nested `Result<Result<...>>`; bind it with `<-` instead.

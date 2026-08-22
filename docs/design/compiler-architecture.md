@@ -133,8 +133,9 @@ AST 노드 위에서 표현되면 sema, 통과 영역의 토큰 위에서 표현
 ### 5. `codegen` — 무오류 방출
 
 sema를 통과한 AST에서 텍스트로의 순수 매핑이다. verbatim 구간은 원본
-바이트를 그대로 복사하고, enum은 유니언 `type` + 생성자 `const`로, match는
-`switch` IIFE로 방출한다(코드 형태의 규범은
+바이트를 그대로 복사하고, enum은 유니언 `type` + 생성자 `const`로 방출한다.
+값을 만드는 match는 ProgramSyntax와 Evaluation IR이 정한 owner continuation에
+따라 statement slot + `switch` 또는 expression-boundary intrinsic으로 방출한다(코드 형태의 규범은
 [`../reference/language.md`](../reference/language.md)). `await` 감지는
 AST에 남긴 원시 Span 위로 `scanner::contains_await`를 돌려 수행한다.
 

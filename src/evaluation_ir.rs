@@ -12,7 +12,7 @@ use crate::hir::ids::Idx;
 use crate::hir::{BodyId, ExprId, NodeId};
 use crate::program_syntax::{
     CoreRoot, EvaluationContext, EvaluationInputMode, HostContinuation, HostEvaluationOperation,
-    HostEvaluationProtocol, HostOwner, ProgramSyntax, RlNodeId, SourceSpan,
+    HostEvaluationProtocol, HostExit, HostOwner, ProgramSyntax, RlNodeId, SourceSpan,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,6 +42,7 @@ enum RegionPlacement {
         protocol: HostEvaluationProtocol,
         source: SourceSpan,
         host_owner: HostOwner,
+        exits: Vec<HostExit>,
     },
     Nested {
         parent: RegionId,
@@ -97,6 +98,8 @@ pub(crate) struct EvaluationFile {
 pub(crate) struct LoweringPlan {
     owners: Vec<HostRewrite>,
     slot_names: Vec<String>,
+    value_slots: HashMap<ExprId, ValueSlotId>,
+    expression_boundary_name: String,
 }
 
 #[derive(Debug)]
@@ -110,7 +113,6 @@ pub(crate) struct ValueSlotId(u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ValueTarget {
-    Return,
     Slot(ValueSlotId),
 }
 
@@ -121,6 +123,7 @@ pub(crate) struct PlannedValue {
     pub(crate) target: ValueTarget,
     pub(crate) context: EvaluationContext,
     pub(crate) schedule: EvaluationSchedule,
+    pub(crate) exits: Vec<HostExit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -146,6 +149,8 @@ pub(crate) enum PlannedEvaluationInput {
     Source {
         source: SourceSpan,
         mode: EvaluationInputMode,
+        target: ValueSlotId,
+        receiver: Option<(SourceSpan, ValueSlotId)>,
     },
     Slot {
         slot: ValueSlotId,
@@ -156,9 +161,25 @@ pub(crate) enum PlannedEvaluationInput {
 struct PendingPlannedValue {
     expr: ExprId,
     source: SourceSpan,
-    returns: bool,
     context: EvaluationContext,
     protocol: HostEvaluationProtocol,
+    exits: Vec<HostExit>,
+}
+
+#[derive(Debug, Clone)]
+struct HostBinding {
+    syntax: RlNodeId,
+    context: EvaluationContext,
+    protocol: HostEvaluationProtocol,
+    source: SourceSpan,
+    owner: HostOwner,
+    exits: Vec<HostExit>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlannedSourceSlot {
+    target: ValueSlotId,
+    receiver: Option<(SourceSpan, ValueSlotId)>,
 }
 
 impl LoweringPlan {
@@ -168,6 +189,22 @@ impl LoweringPlan {
 
     pub(crate) fn slot_name(&self, slot: ValueSlotId) -> &str {
         &self.slot_names[slot.0 as usize]
+    }
+
+    pub(crate) fn value_slot_names(&self) -> impl Iterator<Item = (ExprId, &str)> {
+        self.value_slots
+            .iter()
+            .map(|(expr, slot)| (*expr, self.slot_name(*slot)))
+    }
+
+    pub(crate) fn slots(&self) -> impl Iterator<Item = (ValueSlotId, &str)> {
+        (0u32..)
+            .zip(&self.slot_names)
+            .map(|(index, name)| (ValueSlotId(index), name.as_str()))
+    }
+
+    pub(crate) fn expression_boundary_name(&self) -> &str {
+        &self.expression_boundary_name
     }
 }
 
@@ -221,7 +258,9 @@ impl EvaluationFile {
         let declared_owners: HashSet<HostOwner> =
             syntax.owners().map(|owner| owner.owner).collect();
         let mut hosts = HashMap::new();
-        for (root, syntax_id, context, protocol, source, host_owner) in syntax.core_contexts() {
+        for (root, syntax_id, context, protocol, source, host_owner, exits) in
+            syntax.core_contexts()
+        {
             if !declared_owners.contains(&host_owner) {
                 return Err(EvaluationError::InvalidHostOwner {
                     root,
@@ -230,7 +269,17 @@ impl EvaluationFile {
                 });
             }
             if hosts
-                .insert(root, (syntax_id, context, protocol, source, host_owner))
+                .insert(
+                    root,
+                    HostBinding {
+                        syntax: syntax_id,
+                        context,
+                        protocol,
+                        source,
+                        owner: host_owner,
+                        exits,
+                    },
+                )
                 .is_some()
             {
                 return Err(EvaluationError::DuplicateHost { root });
@@ -261,7 +310,7 @@ impl EvaluationFile {
             let Some(CoreRoot::Expr(expr)) = region.root else {
                 continue;
             };
-            let (owner, value, returns, context, protocol) = match &region.placement {
+            let (owner, value, context, protocol, exits) = match &region.placement {
                 RegionPlacement::Host {
                     context:
                         context @ EvaluationContext {
@@ -271,15 +320,29 @@ impl EvaluationFile {
                     source,
                     host_owner,
                     protocol,
+                    exits,
                     ..
-                } => (*host_owner, *source, true, *context, protocol.clone()),
+                } => (
+                    *host_owner,
+                    *source,
+                    *context,
+                    protocol.clone(),
+                    exits.clone(),
+                ),
                 RegionPlacement::Host {
                     source,
                     host_owner,
                     context,
                     protocol,
+                    exits,
                     ..
-                } => (*host_owner, *source, false, *context, protocol.clone()),
+                } => (
+                    *host_owner,
+                    *source,
+                    *context,
+                    protocol.clone(),
+                    exits.clone(),
+                ),
                 RegionPlacement::Nested { .. } | RegionPlacement::SourceEdit => continue,
             };
             if region.result.is_none() {
@@ -295,9 +358,9 @@ impl EvaluationFile {
             owners.entry(owner).or_default().push(PendingPlannedValue {
                 expr,
                 source: value,
-                returns,
                 context,
                 protocol,
+                exits,
             });
         }
         let mut owners: Vec<_> = owners
@@ -311,46 +374,70 @@ impl EvaluationFile {
         let mut next_slot = 0u32;
         let mut occupied_names = self.occupied_names.clone();
         let mut slot_names = Vec::new();
-        let owners = owners
-            .into_iter()
-            .map(|(owner, values)| {
-                let assigned = values
-                    .into_iter()
-                    .map(|value| {
-                        let target = if value.returns {
-                            ValueTarget::Return
-                        } else {
-                            let slot = ValueSlotId(next_slot);
-                            next_slot = next_slot
-                                .checked_add(1)
-                                .ok_or(EvaluationError::IdOverflow)?;
-                            slot_names.push(allocate_slot_name(slot, &mut occupied_names)?);
-                            ValueTarget::Slot(slot)
-                        };
-                        Ok((value, target))
-                    })
-                    .collect::<Result<Vec<_>, EvaluationError>>()?;
-                let slots: HashMap<_, _> = assigned
-                    .iter()
-                    .filter_map(|(value, target)| match target {
-                        ValueTarget::Slot(slot) => Some((value.source, *slot)),
-                        ValueTarget::Return => None,
-                    })
-                    .collect();
-                let values = assigned
-                    .into_iter()
-                    .map(|(value, target)| PlannedValue {
+        let mut value_slots = HashMap::new();
+        let mut rewrites = Vec::with_capacity(owners.len());
+        for (owner, values) in owners {
+            let assigned = values
+                .into_iter()
+                .map(|value| {
+                    // A host value always crosses the Core/TypeScript boundary through a
+                    // named join slot. A return still owns its original TypeScript return
+                    // statement; the slot merely makes every Core exit converge before that
+                    // statement consumes the value. Besides avoiding expression wrappers,
+                    // this preserves the checker's contextual type for the value as a whole.
+                    let slot =
+                        allocate_value_slot(&mut next_slot, &mut slot_names, &mut occupied_names)?;
+                    value_slots.insert(value.expr, slot);
+                    let target = ValueTarget::Slot(slot);
+                    Ok((value, target))
+                })
+                .collect::<Result<Vec<_>, EvaluationError>>()?;
+            let slots: HashMap<_, _> = assigned
+                .iter()
+                .map(|(value, target)| match target {
+                    ValueTarget::Slot(slot) => (value.source, *slot),
+                })
+                .collect();
+            let mut source_slots = HashMap::new();
+            let values = assigned
+                .into_iter()
+                .map(|(value, target)| {
+                    Ok(PlannedValue {
                         expr: value.expr,
                         source: value.source,
                         target,
                         context: value.context,
-                        schedule: resolve_schedule(value.protocol, &slots),
+                        schedule: resolve_schedule(
+                            value.protocol,
+                            &slots,
+                            &mut source_slots,
+                            &mut next_slot,
+                            &mut slot_names,
+                            &mut occupied_names,
+                        )?,
+                        exits: value.exits,
                     })
-                    .collect();
-                Ok(HostRewrite { owner, values })
-            })
-            .collect::<Result<Vec<_>, EvaluationError>>()?;
-        Ok(LoweringPlan { owners, slot_names })
+                })
+                .collect::<Result<Vec<_>, EvaluationError>>()?;
+            rewrites.push(HostRewrite { owner, values });
+        }
+        for region in &self.regions {
+            let Some(CoreRoot::Expr(expr)) = region.root else {
+                continue;
+            };
+            if region.result.is_none() || value_slots.contains_key(&expr) {
+                continue;
+            }
+            let slot = allocate_value_slot(&mut next_slot, &mut slot_names, &mut occupied_names)?;
+            value_slots.insert(expr, slot);
+        }
+        let expression_boundary_name = allocate_generated_name("$rl_expr", &mut occupied_names)?;
+        Ok(LoweringPlan {
+            owners: rewrites,
+            slot_names,
+            value_slots,
+            expression_boundary_name,
+        })
     }
 
     fn validate(&self) -> Result<(), EvaluationError> {
@@ -434,32 +521,82 @@ impl EvaluationFile {
 fn resolve_schedule(
     protocol: HostEvaluationProtocol,
     slots: &HashMap<SourceSpan, ValueSlotId>,
-) -> EvaluationSchedule {
+    source_slots: &mut HashMap<SourceSpan, PlannedSourceSlot>,
+    next_slot: &mut u32,
+    slot_names: &mut Vec<String>,
+    occupied_names: &mut HashSet<String>,
+) -> Result<EvaluationSchedule, EvaluationError> {
     let steps = protocol
         .steps()
         .iter()
-        .map(|step| PlannedEvaluationStep {
-            parent: step.parent,
-            operation: step.operation,
-            inputs: step
-                .inputs
-                .iter()
-                .map(|input| {
-                    slots.get(&input.source).map_or(
-                        PlannedEvaluationInput::Source {
-                            source: input.source,
-                            mode: input.mode,
-                        },
-                        |slot| PlannedEvaluationInput::Slot {
-                            slot: *slot,
-                            mode: input.mode,
-                        },
-                    )
-                })
-                .collect(),
+        .map(|step| {
+            Ok(PlannedEvaluationStep {
+                parent: step.parent,
+                operation: step.operation,
+                inputs: step
+                    .inputs
+                    .iter()
+                    .map(|input| {
+                        slots.get(&input.source).map_or_else(
+                            || {
+                                if let Some(slot) = source_slots.get(&input.source) {
+                                    return Ok(PlannedEvaluationInput::Source {
+                                        source: input.source,
+                                        mode: input.mode,
+                                        target: slot.target,
+                                        receiver: slot.receiver,
+                                    });
+                                }
+                                let target =
+                                    allocate_value_slot(next_slot, slot_names, occupied_names)?;
+                                let receiver = input
+                                    .receiver
+                                    .map(|receiver| {
+                                        Ok((
+                                            receiver,
+                                            allocate_value_slot(
+                                                next_slot,
+                                                slot_names,
+                                                occupied_names,
+                                            )?,
+                                        ))
+                                    })
+                                    .transpose()?;
+                                source_slots
+                                    .insert(input.source, PlannedSourceSlot { target, receiver });
+                                Ok(PlannedEvaluationInput::Source {
+                                    source: input.source,
+                                    mode: input.mode,
+                                    target,
+                                    receiver,
+                                })
+                            },
+                            |slot| {
+                                Ok(PlannedEvaluationInput::Slot {
+                                    slot: *slot,
+                                    mode: input.mode,
+                                })
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, EvaluationError>>()?,
+            })
         })
-        .collect();
-    EvaluationSchedule { steps }
+        .collect::<Result<Vec<_>, EvaluationError>>()?;
+    Ok(EvaluationSchedule { steps })
+}
+
+fn allocate_value_slot(
+    next_slot: &mut u32,
+    slot_names: &mut Vec<String>,
+    occupied: &mut HashSet<String>,
+) -> Result<ValueSlotId, EvaluationError> {
+    let slot = ValueSlotId(*next_slot);
+    *next_slot = next_slot
+        .checked_add(1)
+        .ok_or(EvaluationError::IdOverflow)?;
+    slot_names.push(allocate_slot_name(slot, occupied)?);
+    Ok(slot)
 }
 
 fn allocate_slot_name(
@@ -482,18 +619,28 @@ fn allocate_slot_name(
     }
 }
 
+fn allocate_generated_name(
+    base: &str,
+    occupied: &mut HashSet<String>,
+) -> Result<String, EvaluationError> {
+    if occupied.insert(base.to_owned()) {
+        return Ok(base.to_owned());
+    }
+    let mut suffix = 1u32;
+    loop {
+        let candidate = format!("{base}_{suffix}");
+        if occupied.insert(candidate.clone()) {
+            return Ok(candidate);
+        }
+        suffix = suffix
+            .checked_add(1)
+            .ok_or(EvaluationError::GeneratedNameOverflow)?;
+    }
+}
+
 struct EvaluationBuilder<'a> {
     core: &'a CoreFile,
-    hosts: HashMap<
-        CoreRoot,
-        (
-            RlNodeId,
-            EvaluationContext,
-            HostEvaluationProtocol,
-            SourceSpan,
-            HostOwner,
-        ),
-    >,
+    hosts: HashMap<CoreRoot, HostBinding>,
     regions: Vec<EvalRegion>,
     seen: HashSet<OperationId>,
     next_value: u32,
@@ -518,7 +665,7 @@ impl EvaluationBuilder<'_> {
                 }
                 Statement::Propagate(propagate) => {
                     let region = self.add_propagate(propagate, parent)?;
-                    self.walk_expr(propagate.value, Some(region))?;
+                    self.walk_nested_expr(propagate.value, region)?;
                 }
                 Statement::Decision(decision) => {
                     let region = self.add_decision(
@@ -536,35 +683,59 @@ impl EvaluationBuilder<'_> {
     }
 
     fn walk_expr(&mut self, expr: ExprId, parent: Option<RegionId>) -> Result<(), EvaluationError> {
+        self.walk_expr_with_placement(expr, parent, false)
+    }
+
+    fn walk_nested_expr(&mut self, expr: ExprId, parent: RegionId) -> Result<(), EvaluationError> {
+        self.walk_expr_with_placement(expr, Some(parent), true)
+    }
+
+    fn walk_expr_with_placement(
+        &mut self,
+        expr: ExprId,
+        parent: Option<RegionId>,
+        force_nested: bool,
+    ) -> Result<(), EvaluationError> {
         match &self.core.exprs[expr.index()] {
             Expr::Opaque(_) => {}
             Expr::Sequence(body) => self.walk_body(*body, parent)?,
             Expr::Decision(decision) => {
-                let region = self.add_decision(decision, CoreRoot::Expr(expr), parent, true)?;
+                let region = self.add_operation_with_placement(
+                    OperationId::Decision(decision.extent),
+                    CoreRoot::Expr(expr),
+                    parent,
+                    RegionShape::Decision {
+                        arms: decision.arms.len(),
+                    },
+                    true,
+                    force_nested,
+                )?;
                 self.walk_decision(decision, region)?;
             }
             Expr::Apply(apply) => {
-                let region = self.add_operation(
+                let region = self.add_operation_with_placement(
                     OperationId::Apply(apply.node),
                     CoreRoot::Expr(expr),
                     parent,
                     RegionShape::Linear,
                     true,
+                    force_nested,
                 )?;
                 if let Some(head) = apply.head {
-                    self.walk_expr(head, Some(region))?;
+                    self.walk_nested_expr(head, region)?;
                 }
                 for step in &apply.steps {
-                    self.walk_expr(step.value, Some(region))?;
+                    self.walk_nested_expr(step.value, region)?;
                 }
             }
             Expr::ResultRegion(result) => {
-                let region = self.add_operation(
+                let region = self.add_operation_with_placement(
                     OperationId::ResultRegion(result.node),
                     CoreRoot::Expr(expr),
                     parent,
                     RegionShape::Linear,
                     true,
+                    force_nested,
                 )?;
                 for item in &result.items {
                     match item {
@@ -573,11 +744,11 @@ impl EvaluationBuilder<'_> {
                         }
                         ResultRegionItem::Propagate(propagate) => {
                             let child = self.add_propagate(propagate, Some(region))?;
-                            self.walk_expr(propagate.value, Some(child))?;
+                            self.walk_nested_expr(propagate.value, child)?;
                         }
                     }
                 }
-                self.walk_expr(result.value, Some(region))?;
+                self.walk_nested_expr(result.value, region)?;
             }
             Expr::Template(template) => {
                 for part in &template.parts {
@@ -668,7 +839,25 @@ impl EvaluationBuilder<'_> {
         shape: RegionShape,
         produces_value: bool,
     ) -> Result<RegionId, EvaluationError> {
-        let placement = self.placement(root, parent)?;
+        self.add_operation_with_placement(operation, root, parent, shape, produces_value, false)
+    }
+
+    fn add_operation_with_placement(
+        &mut self,
+        operation: OperationId,
+        root: CoreRoot,
+        parent: Option<RegionId>,
+        shape: RegionShape,
+        produces_value: bool,
+        force_nested: bool,
+    ) -> Result<RegionId, EvaluationError> {
+        let placement = if force_nested {
+            let parent = parent.ok_or(EvaluationError::MissingHost { root })?;
+            self.hosts.remove(&root);
+            RegionPlacement::Nested { parent }
+        } else {
+            self.placement(root, parent)?
+        };
         let result = self.result(produces_value)?;
         let blocks = blocks_for(operation, shape, result)?;
         self.push_region(operation, Some(root), placement, blocks, result)
@@ -689,18 +878,36 @@ impl EvaluationBuilder<'_> {
         root: CoreRoot,
         parent: Option<RegionId>,
     ) -> Result<RegionPlacement, EvaluationError> {
-        if let Some((syntax, context, protocol, source, host_owner)) = self.hosts.remove(&root) {
+        if let Some(parent) = parent
+            && let Some(binding) = self.hosts.get(&root)
+            && self.region_host_owner(parent) == Some(binding.owner)
+        {
+            self.hosts.remove(&root);
+            return Ok(RegionPlacement::Nested { parent });
+        }
+        if let Some(binding) = self.hosts.remove(&root) {
             Ok(RegionPlacement::Host {
-                syntax,
-                context,
-                protocol,
-                source,
-                host_owner,
+                syntax: binding.syntax,
+                context: binding.context,
+                protocol: binding.protocol,
+                source: binding.source,
+                host_owner: binding.owner,
+                exits: binding.exits,
             })
         } else if let Some(parent) = parent {
             Ok(RegionPlacement::Nested { parent })
         } else {
             Err(EvaluationError::MissingHost { root })
+        }
+    }
+
+    fn region_host_owner(&self, mut region: RegionId) -> Option<HostOwner> {
+        loop {
+            match &self.regions[region.0 as usize].placement {
+                RegionPlacement::Host { host_owner, .. } => return Some(*host_owner),
+                RegionPlacement::Nested { parent } => region = *parent,
+                RegionPlacement::SourceEdit => return None,
+            }
         }
     }
 
@@ -889,7 +1096,27 @@ mod tests {
         let plan = file.lowering_plan().expect("lowering plan");
         let owner = plan.owners().next().expect("host rewrite");
         assert_eq!(owner.values.len(), 1);
-        assert_eq!(owner.values[0].target, ValueTarget::Return);
+        assert!(matches!(owner.values[0].target, ValueTarget::Slot(_)));
+    }
+
+    #[test]
+    fn nested_decisions_share_the_outer_host_plan() {
+        let file = evaluation(
+            "enum E { A, B }\nconst value = match (outer) { A => match (inner) { A => 1, B => 2 }, B => 0 };\n",
+        );
+        let plan = file.lowering_plan().expect("lowering plan");
+        let values = plan
+            .owners()
+            .flat_map(|owner| &owner.values)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1, "{values:#?}");
+        assert!(
+            values.iter().any(|value| {
+                value.context.continuation == HostContinuation::Initialize
+                    && value.schedule.steps().is_empty()
+            }),
+            "{values:#?}"
+        );
     }
 
     #[test]
@@ -951,10 +1178,7 @@ mod tests {
         assert_eq!(owners.len(), 1);
         assert_eq!(owners[0].values.len(), 2);
         let [ValueTarget::Slot(left), ValueTarget::Slot(right)] =
-            [owners[0].values[0].target, owners[0].values[1].target]
-        else {
-            panic!("statement values need slots")
-        };
+            [owners[0].values[0].target, owners[0].values[1].target];
         assert_ne!(left, right);
     }
 
@@ -965,9 +1189,7 @@ mod tests {
         );
         let plan = file.lowering_plan().expect("lowering plan");
         let owner = plan.owners().next().expect("host rewrite");
-        let ValueTarget::Slot(first) = owner.values[0].target else {
-            panic!("first argument needs a slot")
-        };
+        let ValueTarget::Slot(first) = owner.values[0].target;
         assert!(
             owner.values[1]
                 .schedule
@@ -986,10 +1208,7 @@ mod tests {
         let file =
             evaluation("const $rl_v0 = 1;\nconst out = match (value) { A => $rl_v0, _ => 0 };\n");
         let plan = file.lowering_plan().expect("lowering plan");
-        let ValueTarget::Slot(slot) = plan.owners().next().expect("host rewrite").values[0].target
-        else {
-            panic!("initializer needs a slot")
-        };
+        let ValueTarget::Slot(slot) = plan.owners().next().expect("host rewrite").values[0].target;
         assert_eq!(plan.slot_name(slot), "$rl_v0_1");
     }
 

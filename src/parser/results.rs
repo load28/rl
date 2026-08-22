@@ -221,7 +221,7 @@ pub(super) fn parse_result_block<'t>(
 /// Byte offsets of bind-shaped runs (`const|let|var … <- …;`) **below**
 /// the block's top level — inside an `if` body, a loop, a function
 /// written in the block. A binding compiles to an early return of the
-/// block's IIFE, and only a top-level statement can promise that (a
+/// block's isolated value region, and only a top-level statement can promise that (a
 /// nested function's `return` exits the function; and codegen only lowers
 /// top-level runs) — so these are mistakes to report, not bindings. The
 /// shape cannot pass through either: a declaration keyword followed by

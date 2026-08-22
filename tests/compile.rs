@@ -163,6 +163,66 @@ fn whole_initializer_match_uses_a_statement_slot_without_an_iife() {
 }
 
 #[test]
+fn expression_bodied_arrow_match_becomes_a_block_without_an_iife() {
+    let out = ok("enum E { A, B }\nconst f = (e: E) => match (e) { A => 1, B => 2 };\n");
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(out.contains("const f = (e: E) => {\nlet $rl_v0;"), "{out}");
+    assert!(out.contains("return $rl_v0;\n};"), "{out}");
+}
+
+#[test]
+fn nested_initializer_match_inherits_the_parent_assignment_continuation() {
+    let out = ok(
+        "enum Outer { A, B }\nenum Inner { X, Y }\nconst value = match (outer) { A => match (inner) { X => 1, Y => 2 }, B => 0 };\n",
+    );
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(out.matches("switch (").count() >= 2, "{out}");
+}
+
+#[test]
+fn expression_only_owners_use_one_named_boundary_without_an_iife() {
+    let out = ok("enum E { A(value: number), B }\n\
+         function f(seed: number, value = match (E.A(seed)) { A(value) => value, B => 0 }) { return value; }\n\
+         class C { value = match (E.A(2)) { A(value) => value, B => 0 }; }\n");
+    assert!(!out.contains("((() =>"), "{out}");
+    assert!(!out.contains("(await (async () =>"), "{out}");
+    assert_eq!(out.matches("function $rl_expr<").count(), 1, "{out}");
+    assert_eq!(out.matches("$rl_expr(() => {").count(), 2, "{out}");
+}
+
+#[test]
+fn expression_boundary_names_share_the_generated_name_namespace() {
+    let out = ok(
+        "enum E { A, B }\nconst $rl_expr = 1;\nfunction f(value = match (E.A) { A => 1, B => 0 }) { return value; }\n",
+    );
+    assert!(out.contains("$rl_expr_1(() => {"), "{out}");
+    assert!(out.contains("function $rl_expr_1<T>"), "{out}");
+}
+
+#[test]
+fn one_owner_schedules_multiple_rl_values_without_expression_boundaries() {
+    let out = ok(
+        "enum E { A(value: number), B }\nconst value = new (match (ctor) { A(value) => value, B => fallback })(match (arg) { A(value) => value, B => 0 });\n",
+    );
+    assert!(!out.contains("$rl_expr(() =>"), "{out}");
+    assert_eq!(out.matches("switch (").count(), 2, "{out}");
+    assert!(out.contains("const value = new ($rl_v0)($rl_v1);"), "{out}");
+}
+
+#[test]
+fn reference_protocol_preserves_optional_calls_and_structures_tagged_templates() {
+    let optional = ok("enum E { A(value: number), B }\n\
+         const value = receiver.method?.(match (input) { A(value) => value, B => 0 });\n");
+    assert!(optional.contains("$rl_expr(() =>"), "{optional}");
+
+    let tagged = ok("enum E { A(value: number), B }\n\
+         const value = receiver.tag`value:${match (input) { A(value) => value, B => 0 }}`;\n");
+    assert!(!tagged.contains("$rl_expr(() =>"), "{tagged}");
+    assert!(tagged.contains(".bind("), "{tagged}");
+    assert_eq!(tagged.matches("switch (").count(), 1, "{tagged}");
+}
+
+#[test]
 fn match_wildcard_must_be_last_with_position() {
     let e = err("const r = match (x) { _ => 0, A => 1 };");
     assert!(e.message.contains("must be the last arm"), "{}", e.message);
@@ -182,7 +242,8 @@ fn direct_return_match_keeps_await_in_the_host_function() {
         "async function f(x: T) { return match (x) { A(url) => await fetch(url), _ => null }; }",
     );
     assert!(!out.contains("async () =>"), "{out}");
-    assert!(out.contains("return (await fetch(url));"), "{out}");
+    assert!(out.contains("$rl_v0 = (await fetch(url));"), "{out}");
+    assert!(out.contains("return $rl_v0;"), "{out}");
 }
 
 #[test]
@@ -479,7 +540,11 @@ fn await_in_guard_makes_match_async() {
         "async function f(x: T) { return match (x) { A(u) if await allowed(u) => 1, _ => 0 }; }",
     );
     assert!(!out.contains("async () =>"), "{out}");
-    assert!(out.contains("if ((await allowed(u))) return (1);"), "{out}");
+    assert!(
+        out.contains("if ((await allowed(u))) { $rl_v0 = (1); break; }"),
+        "{out}"
+    );
+    assert!(out.contains("return $rl_v0;"), "{out}");
 }
 
 #[test]
@@ -487,7 +552,9 @@ fn nested_await_match_keeps_its_expression_boundary() {
     let out = ok(
         "async function f(x: T) { return consume(match (x) { A(url) => await fetch(url), _ => null }); }",
     );
-    assert!(out.contains("(await (async () => {"), "{out}");
+    assert!(!out.contains("async () =>"), "{out}");
+    assert!(out.contains("$rl_v0 = (await fetch(url));"), "{out}");
+    assert!(out.contains("return $rl_v1($rl_v0);"), "{out}");
 }
 
 #[test]
@@ -1600,9 +1667,10 @@ fn pipeline_head_reclaims_a_lifted_template() {
 fn pipeline_head_reclaims_a_lifted_match() {
     let out =
         ok("enum E { A(v: number), B }\nconst a = match (e) { A(v) => v, B => 0, } |> double;\n");
-    assert!(out.contains("const a = $rl_ap((("), "{out}");
+    assert!(!out.contains("(() =>"), "{out}");
     assert!(out.contains("switch ($rl_m.kind)"), "{out}");
-    assert!(out.contains(")())), (double));"), "{out}");
+    assert!(out.contains("$rl_v0 = $rl_ap($rl_v0, (double));"), "{out}");
+    assert!(out.contains("const a = $rl_v0;"), "{out}");
 }
 
 #[test]
@@ -2350,7 +2418,7 @@ fn plain_if_statements_pass_through() {
 /* ------------------------------------------------------------------ */
 
 #[test]
-fn result_block_emits_an_iife_of_early_returns() {
+fn result_block_emits_a_statement_region_without_an_iife() {
     let out = ok(r#"
 const data = result {
   const user <- getUser(id);
@@ -2358,10 +2426,11 @@ const data = result {
   { user, company }
 };
 "#);
-    assert!(out.contains("const data = ((() => {"), "{out}");
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(out.contains("let $rl_v0;\ndo {"), "{out}");
     assert!(
         out.contains(
-            "const $rl_r0 = (getUser(id)); if ($rl_r0.kind !== \"Ok\") return $rl_r0; \
+            "const $rl_r0 = (getUser(id)); if ($rl_r0.kind !== \"Ok\") { $rl_v0 = ($rl_r0); break; } \
              const user = $rl_r0.value;"
         ),
         "{out}"
@@ -2369,15 +2438,15 @@ const data = result {
     assert!(
         out.contains(
             "const $rl_r1 = (getCompany(user.companyId)); if ($rl_r1.kind !== \"Ok\") \
-             return $rl_r1; const company = $rl_r1.value;"
+             { $rl_v0 = ($rl_r1); break; } const company = $rl_r1.value;"
         ),
         "{out}"
     );
     assert!(
-        out.contains("return { kind: \"Ok\" as const, value: ({ user, company }"),
+        out.contains("$rl_v0 = ({ kind: \"Ok\" as const, value: ({ user, company }"),
         "{out}"
     );
-    assert!(out.contains(") }; })())"), "{out}");
+    assert!(out.contains("const data = $rl_v0;"), "{out}");
 }
 
 #[test]
@@ -2414,14 +2483,15 @@ const a = result {
 }
 
 #[test]
-fn result_block_with_await_becomes_an_async_iife() {
+fn result_block_with_await_stays_in_the_async_arrow_body() {
     let out = ok(r#"
 const data = async () => result {
   const user <- await getUser(id);
   user.name
 };
 "#);
-    assert!(out.contains("(await (async () => {"), "{out}");
+    assert!(!out.contains("(async () =>"), "{out}");
+    assert!(out.contains("const data = async () => {"), "{out}");
     assert!(out.contains("const $rl_r0 = (await getUser(id));"), "{out}");
 }
 
@@ -2444,8 +2514,12 @@ const a = result {
 #[test]
 fn result_block_can_be_a_pipeline_head() {
     let out = ok("const a = result {\n  const x <- f();\n  x\n} |> Result.mapP(double);\n");
-    assert!(out.contains("$rl_ap((((() => {"), "{out}");
-    assert!(out.contains(", (Result.mapP(double)))"), "{out}");
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(
+        out.contains("$rl_v0 = $rl_ap($rl_v0, (Result.mapP(double)));"),
+        "{out}"
+    );
+    assert!(out.contains("const a = $rl_v0;"), "{out}");
 }
 
 #[test]
@@ -2459,11 +2533,45 @@ const a = result {
   }
 };
 "#);
+    assert!(!out.contains("(() =>"), "{out}");
     assert!(
-        out.contains("return { kind: \"Ok\" as const, value: (((() => {"),
+        out.contains("$rl_v0 = ({ kind: \"Ok\" as const, value: (value) });"),
         "{out}"
     );
     assert!(out.contains("switch ($rl_m.kind)"), "{out}");
+}
+
+#[test]
+fn direct_return_result_region_uses_the_host_function_without_an_iife() {
+    let out = ok(
+        "function load() { return result {\n  const value <- fetchValue();\n  value + 1\n}; }\n",
+    );
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(
+        out.contains("if ($rl_r0.kind !== \"Ok\") { $rl_v0 = ($rl_r0); break; }"),
+        "{out}"
+    );
+    assert!(
+        out.contains("$rl_v0 = ({ kind: \"Ok\" as const, value: (value + 1"),
+        "{out}"
+    );
+    assert!(out.contains("return $rl_v0;"), "{out}");
+}
+
+#[test]
+fn result_region_in_a_match_arm_inherits_the_parent_slot() {
+    let out = ok(
+        "enum E { A, B }\nconst value = match (e) {\n  A => result { const x <- f(); x },\n  B => Result.Ok(0),\n};\n",
+    );
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(
+        out.contains("if ($rl_r0.kind !== \"Ok\") { $rl_v0 = ($rl_r0); break; }"),
+        "{out}"
+    );
+    assert!(
+        out.contains("$rl_v0 = ({ kind: \"Ok\" as const, value: (x"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -2593,7 +2701,9 @@ fn a_nested_result_block_answers_for_its_own_runs() {
     let out = ok(
         "const a = result {\n  const x <- f();\n  const b = result {\n    const c <- g();\n    c\n  };\n  x\n};\n",
     );
-    assert_eq!(out.matches("(() => {").count(), 2, "{out}");
+    assert_eq!(out.matches("(() => {").count(), 0, "{out}");
+    assert!(out.contains("let $rl_v0;\ndo {"), "{out}");
+    assert!(out.contains("let $rl_v1;\ndo {"), "{out}");
 }
 
 #[test]
@@ -2647,12 +2757,10 @@ function outer() {
   return w;
 }
 "#);
-    assert!(out.contains("const s = `${((() => {"), "{out}");
-    assert!(out.contains("const t = g(((() => {"), "{out}");
-    assert!(
-        out.contains("const $rl_t2 = (((() => {") && out.contains("const w = $rl_t2.value;"),
-        "{out}"
-    );
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(out.contains("const s = `${$rl_v0}`;"), "{out}");
+    assert!(out.contains("const t = $rl_v2($rl_v1, 2);"), "{out}");
+    assert!(out.contains("const w = $rl_t2.value;"), "{out}");
 }
 
 /* ------------------------------------------------------------------ */
@@ -2742,8 +2850,11 @@ fn literal_match_evaluates_the_scrutinee_once() {
 #[test]
 fn literal_match_block_bodies_break_out_of_the_switch() {
     let out = ok(r#"const v = match (s) { "a" => { return 1; }, _ => 0 };"#);
-    assert!(out.contains(r#"case "a": { return 1;"#));
-    assert!(out.contains("break; }"));
+    assert!(!out.contains("(() =>"), "{out}");
+    assert!(
+        out.contains(r#"case "a": { $rl_v0 = (1); break $rl_y_$rl_v0;"#),
+        "{out}"
+    );
 }
 
 #[test]
@@ -2863,7 +2974,8 @@ const v = match (a) {
 fn direct_return_literal_match_keeps_await_in_the_host_function() {
     let out = ok(r#"async function f() { return match (s) { "a" => await g(), _ => null }; }"#);
     assert!(!out.contains("async () =>"), "{out}");
-    assert!(out.contains("return (await g());"), "{out}");
+    assert!(out.contains("$rl_v0 = (await g());"), "{out}");
+    assert!(out.contains("return $rl_v0;"), "{out}");
 }
 
 #[test]

@@ -292,6 +292,131 @@ console.log(describe(Msg.Quit));
 }
 
 #[test]
+fn runtime_owner_lowering_preserves_reference_order_and_block_exits() {
+    require_toolchain!();
+    let lines = run(r#"
+enum E { A(value: number), B }
+const events: string[] = [];
+const receiver = {
+  get method() {
+    events.push("callee");
+    return function (this: unknown, before: number, value: number, after: number) {
+      events.push(`call:${this === receiver}:${before}:${value}:${after}`);
+      return value;
+    };
+  },
+};
+function effect<T>(label: string, value: T): T {
+  events.push(label);
+  return value;
+}
+const value = receiver.method(
+  effect("before", 1),
+  match (effect("subject", E.A(2))) { A(value) => value, B => 0 },
+  effect("after", 3),
+);
+const block = match (E.A(4)) {
+  A(value) => {
+    if (value > 0) return value * 2;
+    return 0;
+  },
+  B => { return -1; },
+};
+const nested = match (E.A(5)) {
+  A(value) => {
+    const add = () => { return value + 1; };
+    return add();
+  },
+  B => { return 0; },
+};
+console.log(events.join(","));
+console.log(value, block, nested);
+"#);
+    assert_eq!(
+        lines,
+        ["callee,before,subject,after,call:true:1:2:3", "2 8 6",]
+    );
+}
+
+#[test]
+fn runtime_expression_boundaries_preserve_parameter_and_field_context() {
+    require_toolchain!();
+    let lines = run(r#"
+enum E { A(value: number), B }
+function parameter(
+  seed: number,
+  value = match (E.A(seed + arguments.length)) {
+    A(value) => { return value; },
+    B => { return 0; },
+  },
+) {
+  return value;
+}
+class Counter {
+  seed = 4;
+  value = match (E.A(this.seed + 1)) {
+    A(value) => { return value; },
+    B => { return 0; },
+  };
+}
+console.log(parameter.length, parameter(3));
+console.log(new Counter().value);
+"#);
+    assert_eq!(lines, ["1 4", "5"]);
+}
+
+#[test]
+fn runtime_reference_protocol_preserves_optional_and_tagged_calls() {
+    require_toolchain!();
+    let lines = run(r#"
+enum E { A(value: number), B }
+const events: string[] = [];
+const receiver = {
+  get method() {
+    events.push("method");
+    return function (this: unknown, value: number) {
+      events.push(`call:${this === receiver}:${value}`);
+      return value;
+    };
+  },
+  get tag() {
+    events.push("tag");
+    return function (this: unknown, strings: TemplateStringsArray, value: number) {
+      events.push(`tag-call:${this === receiver}:${value}`);
+      return (strings[0] ?? "") + value;
+    };
+  },
+};
+const absent: { method: ((value: number) => number) | null } = {
+  get method() { return null as ((value: number) => number) | null; },
+};
+function effect(value: E): E {
+  events.push("subject");
+  return value;
+}
+const present = receiver.method?.(
+  match (effect(E.A(2))) { A(value) => value, B => 0 },
+);
+const missing = absent.method?.(
+  match (effect(E.A(3))) { A(value) => value, B => 0 },
+);
+const tagged = receiver.tag`value:${match (effect(E.A(4))) {
+  A(value) => value,
+  B => 0,
+}}`;
+console.log(events.join(","));
+console.log(present, missing, tagged);
+"#);
+    assert_eq!(
+        lines,
+        [
+            "method,subject,call:true:2,tag,subject,tag-call:true:4",
+            "2 undefined value:4",
+        ]
+    );
+}
+
+#[test]
 fn runtime_or_patterns_share_one_body() {
     require_toolchain!();
     let lines = run(r#"

@@ -226,16 +226,16 @@ enum Ctx {
 /// statement itself stands, so they inherit its place (upgraded to
 /// [`Place::Function`] when the statement sits inside a function written
 /// in its region). A match arm body, a `result` block's statements, and
-/// every expression region reset to [`Place::Iife`] — a `return` emitted
-/// there exits the construct's own IIFE, never the user's function.
+/// every isolated value region reset to [`Place::ValueRegion`] — an exit
+/// written there belongs to the construct value, never the user's function.
 #[derive(Clone, Copy, PartialEq)]
 enum Place {
     /// The module's top level (or an inline chain that bottoms out there).
     Module,
     /// Inside a user-written function (directly or through inline chains).
     Function,
-    /// Inside an rl construct's own IIFE or an expression region.
-    Iife,
+    /// Inside an isolated rl value region.
+    ValueRegion,
 }
 
 impl Place {
@@ -356,16 +356,16 @@ impl Checker {
                     // Head and steps are expressions — `try` inside them is
                     // rejected for the same reason as inside a match.
                     if let Some(head) = &pipe.head {
-                        self.visit_program(head, Ctx::Expr, Place::Iife);
+                        self.visit_program(head, Ctx::Expr, Place::ValueRegion);
                     }
                     for step in &pipe.steps {
-                        self.visit_program(&step.body, Ctx::Expr, Place::Iife);
+                        self.visit_program(&step.body, Ctx::Expr, Place::ValueRegion);
                     }
                 }
                 Segment::Template(template) => {
                     for chunk in &template.chunks {
                         if let TemplateChunk::Interp(interp) = chunk {
-                            self.visit_program(interp, Ctx::Expr, Place::Iife);
+                            self.visit_program(interp, Ctx::Expr, Place::ValueRegion);
                         }
                     }
                 }
@@ -379,7 +379,7 @@ impl Checker {
     /// in a match arm, a scrutinee, a pipeline step is fine, exactly like
     /// `?` inside a closure in Rust), or one an inline chain (an `if let`
     /// body, a let-else `else` block) bottoms out in. Without one, the
-    /// `return` would exit the construct's own IIFE, or fall at the
+    /// `return` would exit the construct's own value region, or fall at the
     /// module's top level, where there is nothing to return from.
     fn check_try(&mut self, stmt: &TryStmt, place: Place) {
         if !stmt.in_function && place != Place::Function {
@@ -398,16 +398,16 @@ impl Checker {
                     .code(DiagnosticCode::TryPlacement),
             );
         }
-        self.visit_program(&stmt.expr, Ctx::Expr, Place::Iife);
+        self.visit_program(&stmt.expr, Ctx::Expr, Place::ValueRegion);
     }
 
     /// let-else placement is the same flow fact as `try`'s, except the
     /// module's top level is fine: the lowering emits no `return` of its
     /// own (a `throw`-diverging `else` is valid anywhere), so only
-    /// [`Place::Iife`] regions — where the `else`'s exits would leave the
-    /// construct's IIFE — need a function written in the region.
+    /// [`Place::ValueRegion`] regions — where the `else`'s exits would leave the
+    /// construct's value boundary — need a function written in the region.
     fn check_let_else(&mut self, stmt: &LetElseStmt, place: Place) {
-        if place == Place::Iife && !stmt.in_function {
+        if place == Place::ValueRegion && !stmt.in_function {
             self.error(
                 RlError::span(
                     stmt.head_span.start,
@@ -436,7 +436,7 @@ impl Checker {
         }
         self.check_leaf_bindings(&stmt.alternatives[0]);
         self.check_alternatives(&stmt.alternatives, "let-else");
-        self.visit_program(&stmt.expr, Ctx::Expr, Place::Iife);
+        self.visit_program(&stmt.expr, Ctx::Expr, Place::ValueRegion);
         // The `else` block is inline: its statements run where the
         // statement stands.
         self.visit_program(&stmt.else_body, Ctx::Stmt, place.inline(stmt.in_function));
@@ -445,7 +445,7 @@ impl Checker {
     /// `if let` emits a self-contained block statement, so it needs a
     /// statement position — which an expression region provides exactly
     /// when the user wrote a function there (the same flow fact that
-    /// places `try`, judged from the other side: no IIFE to escape, just
+    /// places `try`, judged from the other side: no value boundary to escape, just
     /// a statement stream to stand in).
     fn check_if_let(&mut self, stmt: &IfLetStmt, ctx: Ctx, place: Place) {
         if ctx == Ctx::Expr && !stmt.in_function {
@@ -464,7 +464,7 @@ impl Checker {
         }
         self.check_leaf_bindings(&stmt.alternatives[0]);
         self.check_alternatives(&stmt.alternatives, "if let");
-        self.visit_program(&stmt.expr, Ctx::Expr, Place::Iife);
+        self.visit_program(&stmt.expr, Ctx::Expr, Place::ValueRegion);
         // The then/else bodies are inline: their statements run where the
         // statement stands, so a `try` inside them exits the function the
         // chain bottoms out in.
@@ -517,17 +517,21 @@ impl Checker {
     }
 
     /// A `result` block is an expression, so it is allowed anywhere; its
-    /// body is the IIFE's statement stream ([`Place::Iife`] — a `try` or
+    /// body is the construct's isolated value stream ([`Place::ValueRegion`] — a `try` or
     /// let-else there would return from the *block*, not the enclosing
     /// function), and the bindings and the trailing value are expressions.
     fn check_result_block(&mut self, block: &ResultBlock) {
         for item in &block.items {
             match item {
-                ResultItem::Stmts(stmts) => self.visit_program(stmts, Ctx::Stmt, Place::Iife),
-                ResultItem::Bind(bind) => self.visit_program(&bind.expr, Ctx::Expr, Place::Iife),
+                ResultItem::Stmts(stmts) => {
+                    self.visit_program(stmts, Ctx::Stmt, Place::ValueRegion)
+                }
+                ResultItem::Bind(bind) => {
+                    self.visit_program(&bind.expr, Ctx::Expr, Place::ValueRegion)
+                }
             }
         }
-        self.visit_program(&block.value, Ctx::Expr, Place::Iife);
+        self.visit_program(&block.value, Ctx::Expr, Place::ValueRegion);
     }
 
     fn check_enum(&mut self, decl: &EnumDecl) {
@@ -744,16 +748,16 @@ impl Checker {
         // program and answers for every match at once (`report_coverage`).
 
         // children, in source order: scrutinee first, then guards and bodies
-        self.visit_program(&expr.scrutinee, Ctx::Expr, Place::Iife);
+        self.visit_program(&expr.scrutinee, Ctx::Expr, Place::ValueRegion);
         for arm in &expr.arms {
             if let Some(guard) = &arm.guard {
-                self.visit_program(&guard.expr, Ctx::Expr, Place::Iife);
+                self.visit_program(&guard.expr, Ctx::Expr, Place::ValueRegion);
             }
-            // A block arm body is a statement context (inside the IIFE)
+            // A block arm body is a statement context inside the value region.
             self.visit_program(
                 &arm.body,
                 if arm.block { Ctx::Stmt } else { Ctx::Expr },
-                Place::Iife,
+                Place::ValueRegion,
             );
         }
     }
@@ -849,16 +853,16 @@ impl Checker {
 
         // children, in source order
         for (_, scrutinee) in &expr.scrutinees {
-            self.visit_program(scrutinee, Ctx::Expr, Place::Iife);
+            self.visit_program(scrutinee, Ctx::Expr, Place::ValueRegion);
         }
         for arm in &expr.arms {
             if let Some(guard) = &arm.guard {
-                self.visit_program(&guard.expr, Ctx::Expr, Place::Iife);
+                self.visit_program(&guard.expr, Ctx::Expr, Place::ValueRegion);
             }
             self.visit_program(
                 &arm.body,
                 if arm.block { Ctx::Stmt } else { Ctx::Expr },
-                Place::Iife,
+                Place::ValueRegion,
             );
         }
     }
